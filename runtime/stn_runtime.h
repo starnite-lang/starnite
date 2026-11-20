@@ -1,0 +1,199 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* The Starnite runtime (section 11). Programs compiled with Starnite link it. */
+#ifndef STN_RUNTIME_H
+#define STN_RUNTIME_H
+
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include <stdatomic.h>
+
+/* ---- object header (section 11.1) ---- */
+typedef struct stn_header {
+    uint32_t rc;          /* reference count */
+    uint16_t tag;         /* variant index; 0 for other objects */
+    uint8_t  flags;       /* STN_NOCOUNT | STN_ATOMIC */
+    uint8_t  size_class;  /* allocator class, for reuse and free */
+} stn_header;
+
+#define STN_NOCOUNT 1
+#define STN_ATOMIC  2
+
+typedef uint8_t StnUnit;
+
+void* stn_alloc(size_t size);
+void  stn_free(void* p);
+
+static inline void stn_dup(void* p) {
+    if ((uintptr_t)p & 1) return;                 /* field-less variant */
+    stn_header* h = (stn_header*)p;
+    if (h->flags == 0) {
+        if (__builtin_expect(++h->rc == UINT32_MAX, 0)) h->flags |= STN_NOCOUNT;
+        return;
+    }
+    if (h->flags & STN_NOCOUNT) return;
+    atomic_fetch_add_explicit((_Atomic uint32_t*)&h->rc, 1, memory_order_relaxed);
+}
+
+void stn_check_header(void* p);
+
+static inline void stn_drop(void* p, void (*release)(void*)) {
+    if ((uintptr_t)p & 1) return;
+    stn_header* h = (stn_header*)p;
+#ifdef STN_DEBUG
+    stn_check_header(p);
+#endif
+    if (h->flags == 0) { if (--h->rc == 0) release(p); return; }
+    if (h->flags & STN_NOCOUNT) return;
+    if (atomic_fetch_sub_explicit((_Atomic uint32_t*)&h->rc, 1, memory_order_acq_rel) == 1)
+        release(p);
+}
+
+static inline int stn_unique(void* p) {
+    return ((stn_header*)p)->flags == 0 && ((stn_header*)p)->rc == 1;
+}
+
+/* ---- traps (section 11.5) ---- */
+typedef struct { const char* file; int32_t line, col; } StnLoc;
+_Noreturn void stn_trap(const char* kind, const char* file, int line, int col, const char* msg);
+_Noreturn void stn_overflow(const char* file, int line, int col);
+_Noreturn void stn_div_zero(const char* file, int line, int col);
+
+/* ---- strings (section 3.6) ---- */
+/* Milestone 1 stores every string in a counted buffer; the 15-byte inline form arrives
+   with the layout work of milestone 2. */
+typedef struct StnStrBuf { stn_header h; int64_t len; char data[]; } StnStrBuf;
+typedef StnStrBuf* StnStr;
+
+void   stn_str_release(void* p);
+StnStr stn_str_new(const char* data, int64_t len);
+StnStr stn_str_concat(StnStr a, StnStr b);
+StnStr stn_str_concat_n(int n, StnStr* parts);   /* borrows parts */
+int    stn_str_eq(StnStr a, StnStr b);
+int    stn_str_cmp(StnStr a, StnStr b);
+StnStr stn_str_slice(StnStr s, int64_t lo, int64_t hi, const char* file, int line, int col);
+#define STN_STR_DUP(s) (stn_dup(s), (s))
+#define STN_STR_DROP(s) stn_drop((s), stn_str_release)
+
+StnStr stn_show_i64(int64_t v);
+StnStr stn_show_u64(uint64_t v);
+StnStr stn_show_f64(double v);
+StnStr stn_show_f32(float v);
+StnStr stn_show_bool(uint8_t v);
+StnStr stn_show_char(uint32_t c);
+StnStr stn_show_unit(void);
+StnStr stn_show_dur(int64_t v);
+StnStr stn_show_bytes(int64_t v);
+
+/* ---- arrays (section 3.1) ---- */
+typedef struct StnElemOps {
+    size_t size;
+    void (*dup)(void* elem);     /* NULL for Copy kind */
+    void (*drop)(void* elem);
+} StnElemOps;
+
+typedef struct StnArray {
+    stn_header h;
+    int64_t len, cap;
+    const StnElemOps* ops;
+    _Alignas(16) char data[];
+} StnArray;
+
+void      stn_array_release(void* p);
+StnArray* stn_array_new(const StnElemOps* ops, int64_t cap);
+void      stn_array_make_unique(StnArray** a);                 /* section 4.5 */
+void      stn_array_push(StnArray** a, const void* elem);       /* takes the element */
+void      stn_array_reserve(StnArray** a, int64_t extra);
+StnArray* stn_array_slice(StnArray* a, int64_t lo, int64_t hi, const char* file, int line, int col);
+void      stn_array_extend(StnArray** a, StnArray* b);
+void      stn_array_insert(StnArray** a, int64_t i, const void* elem, const char* file, int line, int col);
+void      stn_array_remove(StnArray** a, int64_t i, void* out, const char* file, int line, int col);
+int       stn_array_pop(StnArray** a, void* out);
+void      stn_array_clear(StnArray** a);
+StnArray* stn_array_filled(const StnElemOps* ops, int64_t n, const void* elem, const char* file, int line, int col);
+
+_Noreturn void stn_index_trap(int64_t i, int64_t len, const char* file, int line, int col);
+static inline int64_t stn_index(int64_t i, int64_t len, const char* file, int line, int col) {
+    if (__builtin_expect((uint64_t)i >= (uint64_t)len, 0)) stn_index_trap(i, len, file, line, col);
+    return i;
+}
+
+/* ---- closures (section 13) ---- */
+typedef struct StnClosure {
+    stn_header h;
+    void* code;                           /* first parameter is the closure itself */
+    void (*release)(void* self);          /* releases the captures and the object */
+} StnClosure;
+
+static inline void stn_closure_drop(StnClosure* c) { stn_drop(c, c->release); }
+
+/* ---- errors (section 5.4) ---- */
+typedef struct StnErrBox { stn_header h; void (*release)(void* self); } StnErrBox;
+typedef struct StnError { uint32_t type_id; StnErrBox* box; } StnError;
+static inline void stn_error_drop(StnError e) { if (e.box) stn_drop(e.box, e.box->release); }
+static inline StnError stn_error_dup(StnError e) { if (e.box) stn_dup(e.box); return e; }
+
+/* ---- console and the rest of the built-ins ---- */
+void    stn_print(StnStr s);
+int     stn_read_line(StnStr* out);
+int64_t stn_clock_ns(void);
+StnArray* stn_str_chars(StnStr s, const StnElemOps* char_ops);
+StnArray* stn_str_split(StnStr s, StnStr sep, const StnElemOps* str_ops, const char* file, int line, int col);
+StnStr  stn_str_join(StnArray* xs, StnStr sep);
+StnStr  stn_str_trim(StnStr s);
+uint8_t stn_str_contains(StnStr s, StnStr sub);
+uint8_t stn_str_starts_with(StnStr s, StnStr p);
+uint8_t stn_str_ends_with(StnStr s, StnStr p);
+StnStr  stn_str_repeat(StnStr s, int64_t n, const char* file, int line, int col);
+int     stn_parse_int(StnStr s, int64_t* out);   /* 0 ok, 1 invalid, 2 out of range */
+int     stn_parse_float(StnStr s, double* out);  /* 0 ok, 1 invalid */
+void    stn_check_char(int64_t c, const char* file, int line, int col);
+
+/* ---- integer arithmetic that traps (section 17.1) ---- */
+#define STN_ARITH(T, N)                                                                      \
+    static inline T stn_add_##N(T a, T b, const char* f, int l, int c) {                     \
+        T r; if (__builtin_expect(__builtin_add_overflow(a, b, &r), 0)) stn_overflow(f, l, c); return r; } \
+    static inline T stn_sub_##N(T a, T b, const char* f, int l, int c) {                     \
+        T r; if (__builtin_expect(__builtin_sub_overflow(a, b, &r), 0)) stn_overflow(f, l, c); return r; } \
+    static inline T stn_mul_##N(T a, T b, const char* f, int l, int c) {                     \
+        T r; if (__builtin_expect(__builtin_mul_overflow(a, b, &r), 0)) stn_overflow(f, l, c); return r; }
+STN_ARITH(int64_t, i64)
+STN_ARITH(int32_t, i32)
+STN_ARITH(int16_t, i16)
+STN_ARITH(int8_t, i8)
+STN_ARITH(uint64_t, u64)
+STN_ARITH(uint32_t, u32)
+STN_ARITH(uint16_t, u16)
+STN_ARITH(uint8_t, u8)
+
+#define STN_DIV_S(T, N, MIN)                                                                 \
+    static inline T stn_div_##N(T a, T b, const char* f, int l, int c) {                     \
+        if (__builtin_expect(b == 0, 0)) { stn_div_zero(f, l, c); }                          \
+        if (__builtin_expect(b == -1 && a == MIN, 0)) { stn_overflow(f, l, c); } return a / b; } \
+    static inline T stn_rem_##N(T a, T b, const char* f, int l, int c) {                     \
+        if (__builtin_expect(b == 0, 0)) { stn_div_zero(f, l, c); }                          \
+        return b == -1 ? 0 : a % b; }
+#define STN_DIV_U(T, N)                                                                      \
+    static inline T stn_div_##N(T a, T b, const char* f, int l, int c) {                     \
+        if (__builtin_expect(b == 0, 0)) { stn_div_zero(f, l, c); } return a / b; }              \
+    static inline T stn_rem_##N(T a, T b, const char* f, int l, int c) {                     \
+        if (__builtin_expect(b == 0, 0)) { stn_div_zero(f, l, c); } return a % b; }
+STN_DIV_S(int64_t, i64, INT64_MIN)
+STN_DIV_S(int32_t, i32, INT32_MIN)
+STN_DIV_S(int16_t, i16, INT16_MIN)
+STN_DIV_S(int8_t, i8, INT8_MIN)
+STN_DIV_U(uint64_t, u64)
+STN_DIV_U(uint32_t, u32)
+STN_DIV_U(uint16_t, u16)
+STN_DIV_U(uint8_t, u8)
+
+/* conversions that trap when the value does not fit */
+_Noreturn void stn_conv_trap(const char* to, const char* file, int line, int col);
+
+/* ---- start-up and debug accounting (section 11.6) ---- */
+void stn_runtime_init(void);
+void stn_runtime_exit(int status);
+void stn_runtime_flush_for_error(void);
+extern int64_t stn_live_objects;
+
+#endif

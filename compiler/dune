@@ -1,0 +1,23 @@
+; SPDX-License-Identifier: GPL-3.0-or-later
+(executable
+ (name main)
+ (public_name starnite)
+ (libraries unix)
+ (flags (:standard -w +a-4-9-26-27-32..42-44-45-69-70 -warn-error -a)))
+
+(rule
+ (targets runtime_src.ml)
+ (deps ../runtime/stn_runtime.h ../runtime/stn_runtime.c prelude.stn)
+ (action
+  (with-stdout-to %{targets}
+   (progn
+    (echo "(* Generated from runtime/ and prelude.stn; do not edit. *)\n")
+    (echo "let header = {stnrt|")
+    (cat ../runtime/stn_runtime.h)
+    (echo "|stnrt}\n")
+    (echo "let source = {stnrt|")
+    (cat ../runtime/stn_runtime.c)
+    (echo "|stnrt}\n")
+    (echo "let prelude = {stnrt|")
+    (cat prelude.stn)
+    (echo "|stnrt}\n")))))
