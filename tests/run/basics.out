@@ -1,0 +1,9 @@
+centroid (2.0, 3.0, 4.0)
+areas 3.14159 7.0 0.0
+sum 4950
+squares [0, 4, 16, 36, 64] len 5
+largest Some(9) Some(b) Some(1.5)
+sorted [apple, fig, pear]
+value semantics: ys=[0, 3, 8, 1, 10] zs=[5, 3, 8, 1]
+or 4 7
+exit 0

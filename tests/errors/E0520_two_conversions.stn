@@ -1,0 +1,11 @@
+# expect: E0520 11:5
+type A = Ea(n: Int)
+type B = Eb(n: Int)
+impl From[ParseError] for A:
+    fn from(e: ParseError) -> A:
+        Ea(1)
+impl From[ParseError] for B:
+    fn from(e: ParseError) -> B:
+        Eb(2)
+fn f*(s: Str) -> Int ! A, B:
+    parse_int(s)

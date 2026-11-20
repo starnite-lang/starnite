@@ -1,0 +1,6 @@
+# expect: E0202 4:5
+type C = R | G | B
+fn main():
+    match R:
+        R -> print("r")
+        G -> print("g")

@@ -1,0 +1,59 @@
+type ConfigError* = BadPort(text: Str) | Missing(key: Str)
+
+impl From[ParseError] for ConfigError:
+    fn from(e: ParseError) -> ConfigError:
+        match e:
+            InvalidNumber(t) -> BadPort(t)
+            OutOfRange(t) -> BadPort(t)
+
+impl Show for ConfigError:
+    fn show(e: ConfigError) -> Str:
+        match e:
+            BadPort(t) -> f"bad port '{t}'"
+            Missing(k) -> f"missing {k}"
+
+fn parse_port(text: Str) -> Int:
+    let n = parse_int(text)
+    if n < 0 or n > 65535:
+        fail(OutOfRange(text))
+    n
+
+fn load*(text: Str) -> Int ! ConfigError:
+    if len(text) == 0:
+        fail(Missing("port"))
+    parse_port(text) + 0
+
+fn counter() -> (fn() -> Unit, fn() -> Int):
+    var c = 0
+    (fn(): c += 1, fn(): c)
+
+fn apply_twice(f: fn(Int) -> Int, x: Int) -> Int:
+    f(f(x))
+
+fn main() ! io, ConfigError:
+    match try parse_port("8080"):
+        Ok(p) -> print(f"port {p}")
+        Err(e) -> print(f"error {e}")
+    match try parse_port("99999"):
+        Ok(p) -> print(f"port {p}")
+        Err(e) -> print(f"error {e}")
+    let r = try load("")
+    print(f"load: {r}")
+    print(f"or: {(try load("x1")).or(80)}")
+    let (inc, get) = counter()
+    inc()
+    inc()
+    inc()
+    print(f"counter {get()}")
+    let k = 10
+    print(f"twice {apply_twice(fn(x): x * k, 3)}")
+    fn fact(n: Int) -> Int:
+        var acc = 1
+        for i in 1..n + 1:
+            acc *= i
+        acc
+    print(f"fact {fact(10)}")
+    let names = ["a", "b"]
+    let greet = fn(n: Str): f"hi {n}"
+    print(greet(names[1]))
+    print(f"final {load("12a")}")

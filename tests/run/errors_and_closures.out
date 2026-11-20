@@ -1,0 +1,10 @@
+port 8080
+error number out of range '99999'
+load: Err(missing port)
+or: 80
+counter 3
+twice 300
+fact 3628800
+hi b
+error: bad port '12a'
+exit 1

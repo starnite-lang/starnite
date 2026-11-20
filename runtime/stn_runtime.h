@@ -101,8 +101,20 @@ typedef struct StnArray {
 
 void      stn_array_release(void* p);
 StnArray* stn_array_new(const StnElemOps* ops, int64_t cap);
-void      stn_array_make_unique(StnArray** a);                 /* section 4.5 */
-void      stn_array_push(StnArray** a, const void* elem);       /* takes the element */
+void      stn_array_copy_for_write(StnArray** a);
+/* A write needs the box unshared (section 4.5). */
+static inline void stn_array_make_unique(StnArray** a) {
+    if (__builtin_expect(!stn_unique(*a), 0)) stn_array_copy_for_write(a);
+}
+void      stn_array_push_slow(StnArray** a, const void* elem);
+/* takes the element; constant time on average, since capacity doubles */
+static inline void stn_array_push(StnArray** pa, const void* elem) {
+    StnArray* a = *pa;
+    if (__builtin_expect(stn_unique(a) && a->len < a->cap, 1)) {
+        memcpy(a->data + (size_t)a->len * a->ops->size, elem, a->ops->size);
+        a->len++;
+    } else stn_array_push_slow(pa, elem);
+}
 void      stn_array_reserve(StnArray** a, int64_t extra);
 StnArray* stn_array_slice(StnArray* a, int64_t lo, int64_t hi, const char* file, int line, int col);
 void      stn_array_extend(StnArray** a, StnArray* b);

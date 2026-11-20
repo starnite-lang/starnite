@@ -1,0 +1,6 @@
+# expect: E0305 6:17
+fn run(mut xs: Array[Int], f: fn() -> Int):
+    xs.push(f())
+fn main():
+    var xs = [1]
+    run(mut xs, fn(): len(xs))

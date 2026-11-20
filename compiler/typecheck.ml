@@ -371,23 +371,29 @@ let add_eff c l (e : eff) : conv list =
 (* ---------- literals ---------- *)
 
 let int_fits k (s : string) l =
+  let neg = String.length s > 0 && s.[0] = '-' in
+  let body = if neg then String.sub s 1 (String.length s - 1) else s in
   let v =
     try
-      if String.length s > 2 && (s.[1] = 'b' || s.[1] = 'B') then
-        Int64.of_string ("0b" ^ String.sub s 2 (String.length s - 2))
-      else Int64.of_string s
+      if String.length body > 2 && (body.[1] = 'b' || body.[1] = 'B') then
+        Int64.of_string ("0b" ^ String.sub body 2 (String.length body - 2))
+      else Int64.of_string body
     with _ -> (
-      (* the U64 range above Int64.max_int *)
-      try Int64.of_string ("0u" ^ s) with _ -> err "E0201" l "integer literal %s is too large" s)
+      try Int64.of_string ("0u" ^ body) with _ -> err "E0201" l "integer literal %s is too large" s)
   in
+  (* v is the magnitude; for U64 it may have the top bit set *)
+  let big = Int64.compare v 0L < 0 in
   let ok =
     match k with
-    | IInt | I64 -> not (String.length s > 0 && Int64.compare v 0L < 0 && s.[0] <> '0')
-    | U64 -> true
+    | U64 -> not neg || v = 0L
+    | IInt | I64 -> if neg then (not big) || v = Int64.min_int else not big
     | _ ->
         let bits = ikind_bits k in
-        if ikind_signed k then Int64.compare v (Int64.shift_left 1L (bits - 1)) <= 0
-        else Int64.compare v (Int64.shift_left 1L bits) < 0 && Int64.compare v 0L >= 0
+        if big then false
+        else if ikind_signed k then
+          if neg then Int64.compare v (Int64.shift_left 1L (bits - 1)) <= 0
+          else Int64.compare v (Int64.shift_left 1L (bits - 1)) < 0
+        else (not neg || v = 0L) && Int64.compare v (Int64.shift_left 1L bits) < 0
   in
   if not ok then err "E0201" l "integer literal %s does not fit in %s" s (ikind_name k)
 
@@ -494,13 +500,12 @@ and check_or_infer c (e : Syntax.expr) (expected : ty option) : texpr =
       let tb = check c b ta.ty in
       mk (XIf (tc, ta, tb)) (if ta.ty = TNever then tb.ty else ta.ty) l
   | Lambda (ps, body) -> infer_lambda c l ps body exp
+  | Unop ("-", { d = Lit (LInt s); _ }) ->
+      (* a negative literal is one literal: -128 fits in I8 even though 128 does not *)
+      check_or_infer c { e with d = Lit (LInt ("-" ^ s)) } expected
+  | Unop ("-", { d = Lit (LFloat f); _ }) -> check_or_infer c { e with d = Lit (LFloat (-.f)) } expected
   | Unop ("-", a) ->
       let ta = match exp with Some t when is_numeric t -> check c a t | _ -> infer c a in
-      (match a.d with
-       | Lit (LInt s) when ta.ty <> TFloat && ta.ty <> TF32 ->
-           (* -128 fits in I8 even though 128 does not *)
-           ()
-       | _ -> ());
       if not (is_numeric ta.ty) then err "E0201" l "unary - needs a number, found %s" (show_ty ta.ty);
       mk (XNeg ta) ta.ty l
   | Unop ("not", a) -> let ta = check c a TBool in mk (XNot ta) TBool l

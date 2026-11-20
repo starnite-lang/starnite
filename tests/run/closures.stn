@@ -1,0 +1,37 @@
+# closures and automatic sharing (section 13)
+fn make_adder(n: Int) -> fn(Int) -> Int:
+    fn(x): x + n
+
+fn map_ints(xs: Array[Int], f: fn(Int) -> Int) -> Array[Int]:
+    var out: Array[Int] = []
+    for x in xs:
+        out.push(f(x))
+    out
+
+fn compose(f: fn(Int) -> Int, g: fn(Int) -> Int) -> fn(Int) -> Int:
+    fn(x): g(f(x))
+
+fn double(x: Int) -> Int:
+    x * 2
+
+fn main():
+    let add5 = make_adder(5)
+    print(f"{add5(10)} {map_ints([1, 2, 3], add5)} {map_ints([1, 2], double)}")
+    let h = compose(add5, double)
+    print(f"{h(1)}")
+    var total = 0
+    let xs = [1, 2, 3, 4]
+    let add = fn(x: Int): total += x
+    for x in xs:
+        add(x)
+    print(f"total {total}")
+    var log: Array[Str] = []
+    let note = fn(s: Str): log.push(s)
+    note("a")
+    note("b")
+    print(f"{log}")
+    let fs = [fn(x: Int): x + 1, fn(x: Int): x * 10]
+    print(f"{fs[0](5)} {fs[1](5)}")
+    let label = "n="
+    let show = fn(n: Int): f"{label}{n}"
+    print(show(3))

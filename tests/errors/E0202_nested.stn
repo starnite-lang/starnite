@@ -1,0 +1,5 @@
+# expect: E0202 3:5
+fn f(x: Int??) -> Int:
+    match x:
+        Some(Some(n)) -> n
+        None -> 0

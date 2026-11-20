@@ -1,0 +1,41 @@
+# Tests for the prelude, run with: starnite test tests/unit/prelude_test.stn
+
+fn parse_port*(text: Str) -> Int ! ParseError:
+    let n = parse_int(text)
+    if n < 0 or n > 65535:
+        fail(OutOfRange(text))
+    n
+
+test "accepts a valid port":
+    assert parse_port("8080") == 8080
+
+test "rejects an out-of-range port":
+    assert_fails[ParseError] parse_port("70000")
+
+test "sort is stable and ordered":
+    var xs = [5, 1, 4, 1, 3, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4]
+    sort(mut xs)
+    for i in 1..len(xs):
+        assert xs[i - 1] <= xs[i]
+
+test "options":
+    let a: Int? = Some(3)
+    assert a.or(0) == 3
+    assert is_none(None.or(None))
+    assert a == Some(3)
+
+test "array value semantics":
+    var a = [1, 2]
+    let b = a
+    a.push(3)
+    assert len(b) == 2
+    assert a == [1, 2, 3]
+
+test rejects E0304 "mut must be written at the call site":
+    var xs = [1]
+    sort(xs)
+
+test rejects E0202 "a match must cover every case":
+    let o: Int? = None
+    match o:
+        Some(v) -> print(f"{v}")

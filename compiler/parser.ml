@@ -97,7 +97,7 @@ and parse_base_type st =
       in
       expect_op st ")";
       let ret = if accept_op st "->" then Some (parse_type st) else None in
-      let effs = if is_op st "!" then (advance st; Some (parse_effects st)) else None in
+      let effs = if is_op st "!" then (advance st; Some (parse_effects ~in_type:true st)) else None in
       TyFn (ps, ret, effs, l)
   | OP "(" ->
       advance st;
@@ -128,10 +128,19 @@ and parse_targ st =
   (* typestate arguments (IDENT -> IDENT) arrive with milestone 4 *)
   parse_type st
 
-and parse_effects st =
+and parse_effects ?(in_type = false) st =
+  (* in a function type inside a parameter list, "! pure, x: Int" ends the effects
+     before the next parameter *)
+  let next_is_param () =
+    in_type &&
+    match (peek_at st 1, peek_at st 2) with
+    | IDENT _, OP (":" | "=") -> true
+    | KW ("mut" | "take"), _ -> true
+    | _ -> false
+  in
   let rec go acc =
     let t = parse_type st in
-    if accept_op st "," then go (t :: acc) else List.rev (t :: acc)
+    if is_op st "," && not (next_is_param ()) then (advance st; go (t :: acc)) else List.rev (t :: acc)
   in
   go []
 
@@ -284,13 +293,13 @@ and parse_postfix st =
         let name = member_name st in
         go (mk (Field (e, name)) l)
     | OP "(" ->
-        let l = loc st in
+        let l = e.loc in
         advance st;
         let args = comma_list st ")" parse_arg in
         expect_op st ")";
         go (mk (Call (e, args)) l)
     | OP "[" ->
-        let l = loc st in
+        let l = e.loc in
         advance st;
         let bs = comma_list st "]" parse_barg in
         expect_op st "]";

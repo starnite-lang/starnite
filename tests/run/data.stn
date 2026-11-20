@@ -1,0 +1,85 @@
+# data types, generics, traits and exhaustive matching (sections 3.3, 3.4, 5.5)
+type Tree[T] = Leaf | Node(left: Tree[T], value: T, right: Tree[T])
+
+fn insert[T: Ord](t: Tree[T], x: T) -> Tree[T]:
+    match t:
+        Leaf -> Node(Leaf, x, Leaf)
+        Node(l, v, r) ->
+            if x < v:
+                Node(insert(l, x), v, r)
+            elif x > v:
+                Node(l, v, insert(r, x))
+            else:
+                t
+
+fn to_list[T](t: Tree[T], mut out: Array[T]):
+    match t:
+        Leaf -> ()
+        Node(l, v, r) ->
+            to_list(l, mut out)
+            out.push(v)
+            to_list(r, mut out)
+
+fn depth[T](t: Tree[T]) -> Int:
+    match t:
+        Leaf -> 0
+        Node(l, _, r) -> 1 + max(depth(l), depth(r))
+
+type Color = Red | Green | Blue
+
+impl Show for Color:
+    fn show(c: Color) -> Str:
+        match c:
+            Red -> "red"
+            Green -> "green"
+            Blue -> "blue"
+
+type Point = struct(x: Int, y: Int = 0)
+
+trait Area:
+    fn area(s: Self) -> Float
+
+type Square = struct(side: Float)
+type Circle = struct(r: Float)
+
+impl Area for Square:
+    fn area(s: Square) -> Float:
+        s.side * s.side
+
+impl Area for Circle:
+    fn area(c: Circle) -> Float:
+        3.0 * c.r * c.r
+
+fn describe[T: Area](x: T) -> Str:
+    f"area {x.area()}"
+
+fn classify(p: (Int, Bool)) -> Str:
+    match p:
+        (0, _) -> "zero"
+        (n, true) if n > 0 -> "positive and true"
+        (_, true) -> "true"
+        (_, false) -> "false"
+
+fn main():
+    var t = Leaf
+    for x in [5, 3, 8, 1, 4, 7, 9, 2, 6]:
+        t = insert(t, x)
+    var xs: Array[Int] = []
+    to_list(t, mut xs)
+    print(f"{xs} depth {depth(t)}")
+    var st = Leaf
+    for w in ["m", "c", "x"]:
+        st = insert(st, w)
+    var ws: Array[Str] = []
+    to_list(st, mut ws)
+    print(f"{ws}")
+    print(f"{Red} {[Green, Blue]} {Red == Red} {Red == Blue}")
+    let p = Point(3)
+    let q = Point(y = 4, x = 1)
+    print(f"{p.x},{p.y} {q.x},{q.y} {p == Point(3, 0)}")
+    print(f"{describe(Square(2.0))} {describe(Circle(1.0))}")
+    print(f"{classify((0, true))} {classify((5, true))} {classify((-1, true))} {classify((2, false))}")
+    let o: Int? = None
+    match o:
+        Some(v) -> print(f"some {v}")
+        None -> print("none")

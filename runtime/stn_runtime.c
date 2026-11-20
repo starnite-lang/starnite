@@ -154,35 +154,49 @@ StnStr stn_str_slice(StnStr s, int64_t lo, int64_t hi, const char* file, int lin
 StnStr stn_show_i64(int64_t v) { char b[32]; int n = snprintf(b, sizeof b, "%lld", (long long)v); return stn_str_new(b, n); }
 StnStr stn_show_u64(uint64_t v) { char b[32]; int n = snprintf(b, sizeof b, "%llu", (unsigned long long)v); return stn_str_new(b, n); }
 
-/* Shortest text that reads back as the same value, always with '.' or an exponent.
-   The reference interpreter uses the same rule (compiler/values.ml). */
-StnStr stn_show_f64(double v) {
-    char b[48];
+/* Float text: the shortest digits that read back as the same value, in fixed notation
+   when the decimal exponent is in [-4, 16), else scientific. The reference interpreter
+   uses the same rule (compiler/values.ml); the two must agree exactly. */
+static StnStr stn_show_float_digits(double v, int maxp, int is_f32) {
+    char b[64], out[96];
     if (isnan(v)) return stn_str_new("nan", 3);
     if (isinf(v)) return v > 0 ? stn_str_new("inf", 3) : stn_str_new("-inf", 4);
-    int n = 0;
-    for (int p = 1; p <= 17; p++) {
-        n = snprintf(b, sizeof b, "%.*g", p, v);
-        if (p == 17 || strtod(b, NULL) == v) break;
+    for (int p = 1; p <= maxp; p++) {
+        snprintf(b, sizeof b, "%.*e", p - 1, v);
+        double back = strtod(b, NULL);
+        if (p == maxp || (is_f32 ? (float)back == (float)v : back == v)) break;
     }
-    if (!strchr(b, '.') && !strchr(b, 'e')) { b[n++] = '.'; b[n++] = '0'; b[n] = 0; }
-    return stn_str_new(b, n);
+    const char* s = b;
+    int neg = 0;
+    if (*s == '-') { neg = 1; s++; }
+    char digits[40]; int nd = 0;
+    const char* e = strchr(s, 'e');
+    for (const char* q = s; q < e; q++) if (*q != '.') digits[nd++] = *q;
+    while (nd > 1 && digits[nd - 1] == '0') nd--;
+    int exp = atoi(e + 1);
+    int n = 0;
+    if (neg) out[n++] = '-';
+    if (exp >= -4 && exp < 16) {
+        if (exp >= 0) {
+            for (int i = 0; i <= exp; i++) out[n++] = i < nd ? digits[i] : '0';
+            out[n++] = '.';
+            if (nd > exp + 1) for (int i = exp + 1; i < nd; i++) out[n++] = digits[i];
+            else out[n++] = '0';
+        } else {
+            out[n++] = '0'; out[n++] = '.';
+            for (int i = 0; i < -exp - 1; i++) out[n++] = '0';
+            for (int i = 0; i < nd; i++) out[n++] = digits[i];
+        }
+    } else {
+        out[n++] = digits[0];
+        if (nd > 1) { out[n++] = '.'; for (int i = 1; i < nd; i++) out[n++] = digits[i]; }
+        n += snprintf(out + n, sizeof out - (size_t)n, "e%c%02d", exp < 0 ? '-' : '+', exp < 0 ? -exp : exp);
+    }
+    return stn_str_new(out, n);
 }
 
-StnStr stn_show_f32(float v) {
-    char b[48];
-    if (isnan(v)) return stn_str_new("nan", 3);
-    if (isinf(v)) return v > 0 ? stn_str_new("inf", 3) : stn_str_new("-inf", 4);
-    double d = v;
-    if (d == floor(d) && fabs(d) < 1e16) return stn_show_f64(d);
-    int n = 0;
-    for (int p = 1; p <= 9; p++) {
-        n = snprintf(b, sizeof b, "%.*g", p, d);
-        if (p == 9 || (float)strtod(b, NULL) == v) break;
-    }
-    if (!strchr(b, '.') && !strchr(b, 'e') && !strchr(b, 'n')) { b[n++] = '.'; b[n++] = '0'; b[n] = 0; }
-    return stn_str_new(b, n);
-}
+StnStr stn_show_f64(double v) { return stn_show_float_digits(v, 17, 0); }
+StnStr stn_show_f32(float v) { return stn_show_float_digits((double)v, 9, 1); }
 
 StnStr stn_show_bool(uint8_t v) { return v ? stn_str_new("true", 4) : stn_str_new("false", 5); }
 StnStr stn_show_unit(void) { return stn_str_new("()", 2); }
@@ -228,7 +242,7 @@ static StnArray* stn_array_copy(StnArray* a, int64_t cap) {
     return b;
 }
 
-void stn_array_make_unique(StnArray** pa) {
+void stn_array_copy_for_write(StnArray** pa) {
     StnArray* a = *pa;
     if (stn_unique(a)) return;
     StnArray* b = stn_array_copy(a, a->len > 0 ? a->len : 1);
@@ -261,7 +275,7 @@ void stn_array_reserve(StnArray** pa, int64_t extra) {
     }
 }
 
-void stn_array_push(StnArray** pa, const void* elem) {
+void stn_array_push_slow(StnArray** pa, const void* elem) {
     StnArray* a = *pa;
     if (!stn_unique(a) || a->len == a->cap) { stn_array_reserve(pa, 1); a = *pa; }
     memcpy(a->data + (size_t)a->len * a->ops->size, elem, a->ops->size);

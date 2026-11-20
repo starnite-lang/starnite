@@ -1,0 +1,15 @@
+type AppError = Broken(why: Str)
+
+impl Show for AppError:
+    fn show(e: AppError) -> Str:
+        match e:
+            Broken(w) -> f"broken: {w}"
+
+fn step(n: Int) -> Int:
+    if n > 2:
+        fail(Broken(f"step {n}"))
+    n * 10
+
+fn main() ! io, AppError:
+    for i in 0..5:
+        print(f"{step(i)}")

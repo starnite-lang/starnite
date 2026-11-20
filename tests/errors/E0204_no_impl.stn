@@ -1,0 +1,5 @@
+# expect: E0204 5:14
+type P = struct(x: Int)
+fn main():
+    let p = P(1)
+    print(f"{p}")

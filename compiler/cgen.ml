@@ -458,7 +458,8 @@ let inst_name uname targs =
 
 let param_decl st m t name =
   match m with
-  | MMut -> Printf.sprintf "%s* %s" (cty st t) name
+  (* exclusivity (section 4.3) means nothing else reaches a mut parameter's storage *)
+  | MMut -> Printf.sprintf "%s* restrict %s" (cty st t) name
   | _ -> Printf.sprintf "%s %s" (cty st t) name
 
 let var_name (v : var) = Printf.sprintf "v%d_%s" v.vid (c_ident v.vname)

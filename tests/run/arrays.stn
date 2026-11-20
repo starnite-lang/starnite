@@ -1,0 +1,41 @@
+# value semantics of arrays (section 4) and the array built-ins
+fn bump(mut xs: Array[Int]):
+    for x in mut xs:
+        x += 100
+
+fn total(xs: Array[Int]) -> Int:
+    var s = 0
+    for x in xs:
+        s += x
+    s
+
+fn main():
+    var a = [3, 1, 2]
+    var b = a
+    b.push(9)
+    bump(mut a)
+    print(f"{a} {b}")
+    a.insert(1, 7)
+    let r = a.remove(0)
+    print(f"{a} removed {r} pop {a.pop()} {a}")
+    var empty: Array[Int] = []
+    print(f"{empty.pop()} {len(empty)}")
+    let nested = [[1, 2], [3]]
+    var n2 = nested
+    n2[0][1] = 20
+    print(f"{nested} {n2}")
+    var grid = filled(3, filled(2, 0))
+    grid[1][0] = 5
+    print(f"{grid}")
+    let xs = [5, 2, 8, 1, 9, 3, 7, 4, 6, 0, 11, 15, 13, 12, 14, 10, 19, 17, 18, 16]
+    var ys = xs
+    sort(mut ys)
+    print(f"{ys} {total(ys)} {contains(ys, 13)} {contains(ys, 42)}")
+    reverse(mut ys)
+    print(f"{ys[0..5]}")
+    let pairs = [(a, b) for a in 0..3 for b in 0..3 if a < b]
+    print(f"{pairs}")
+    var e: Array[Str] = []
+    e.extend(["x", "y"])
+    e.extend(e.copy())
+    print(f"{e} {[1, 2] == [1, 2]} {[1] != [1, 2]}")

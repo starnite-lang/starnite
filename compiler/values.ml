@@ -87,36 +87,54 @@ let compare_int k a b = if k = U64 then Int64.unsigned_compare a b else Int64.co
 
 let int_to_string k v = if k = U64 then Printf.sprintf "%Lu" v else Int64.to_string v
 
-(* Shortest text that reads back as the same double, always with a '.' or exponent. *)
-let float_to_string (f : float) =
+(* Float text (section 20.1): the shortest digits that read back as the same value, in
+   fixed notation when the decimal exponent is in [-4, 16), else scientific. The C
+   runtime (stn_show_f64) implements the same rule; the backends must agree exactly. *)
+let format_digits neg (digits : string) (exp : int) =
+  let nd = String.length digits in
+  let body =
+    if exp >= -4 && exp < 16 then
+      if exp >= 0 then
+        let ip = if nd > exp + 1 then String.sub digits 0 (exp + 1) else digits ^ String.make (exp + 1 - nd) '0' in
+        let fp = if nd > exp + 1 then String.sub digits (exp + 1) (nd - exp - 1) else "0" in
+        ip ^ "." ^ fp
+      else "0." ^ String.make (-exp - 1) '0' ^ digits
+    else
+      let m = if nd > 1 then String.sub digits 0 1 ^ "." ^ String.sub digits 1 (nd - 1) else digits in
+      Printf.sprintf "%se%c%02d" m (if exp < 0 then '-' else '+') (abs exp)
+  in
+  (if neg then "-" else "") ^ body
+
+let shortest (f : float) (maxp : int) (roundtrips : string -> bool) =
   if Float.is_nan f then "nan"
   else if f = Float.infinity then "inf"
   else if f = Float.neg_infinity then "-inf"
   else begin
     let rec go p =
-      let s = Printf.sprintf "%.*g" p f in
-      if p >= 17 || float_of_string s = f then s else go (p + 1)
+      let s = Printf.sprintf "%.*e" (p - 1) f in
+      if p >= maxp || roundtrips s then s else go (p + 1)
     in
     let s = go 1 in
-    if String.contains s '.' || String.contains s 'e' then s else s ^ ".0"
+    let neg = s.[0] = '-' in
+    let s = if neg then String.sub s 1 (String.length s - 1) else s in
+    let epos = String.index s 'e' in
+    let mant = String.sub s 0 epos in
+    let exp = int_of_string (String.sub s (epos + 1) (String.length s - epos - 1)) in
+    let digits = String.concat "" (String.split_on_char '.' mant) in
+    let n = ref (String.length digits) in
+    while !n > 1 && digits.[!n - 1] = '0' do decr n done;
+    format_digits neg (String.sub digits 0 !n) exp
   end
+
+let float_to_string (f : float) = shortest f 17 (fun s -> float_of_string s = f)
 
 let f32_round (f : float) = Int32.float_of_bits (Int32.bits_of_float f)
 
-let f32_to_string (f : float) =
-  if Float.is_nan f then "nan"
-  else if Float.is_integer f && Float.abs f < 1e16 then float_to_string f
-  else begin
-    let rec go p =
-      let s = Printf.sprintf "%.*g" p f in
-      if p >= 9 || f32_round (float_of_string s) = f then s else go (p + 1)
-    in
-    let s = go 1 in
-    if String.contains s '.' || String.contains s 'e' || String.contains s 'n' then s else s ^ ".0"
-  end
+let f32_to_string (f : float) = shortest f 9 (fun s -> f32_round (float_of_string s) = f)
 
-let parse_int_lit (s : string) : int64 =
-  if String.length s > 2 && (s.[1] = 'b' || s.[1] = 'B') then Int64.of_string ("0b" ^ String.sub s 2 (String.length s - 2))
+let rec parse_int_lit (s : string) : int64 =
+  if String.length s > 0 && s.[0] = '-' then Int64.neg (parse_int_lit (String.sub s 1 (String.length s - 1)))
+  else if String.length s > 2 && (s.[1] = 'b' || s.[1] = 'B') then Int64.of_string ("0b" ^ String.sub s 2 (String.length s - 2))
   else try Int64.of_string s with _ -> Int64.of_string ("0u" ^ s)
 
 let dur_value n u =

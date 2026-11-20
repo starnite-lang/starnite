@@ -1,0 +1,13 @@
+fn main():
+    let s = "héllo wörld"
+    print(f"{len(s)} {len(chars(s))} {s[0..6]}")
+    let parts = split("a,b,,c", ",")
+    print(f"{parts} {len(parts)} {join(parts, "+")}")
+    print(f"[{trim("  pad  ")}] {contains(s, "wör")} {starts_with(s, "hé")} {ends_with(s, "x")}")
+    print(f"{repeat("ab", 3)} {"abc" < "abd"} {"b" > "abc"} {"x" == "x"}")
+    var acc = ""
+    for c in chars("abc"):
+        acc = acc + f"<{c}>"
+    print(acc)
+    print(f"{parse_int("-42") + 1} {(try parse_int("4x2")).is_ok()} {(try parse_int("99999999999999999999"))}")
+    print(f"tab\there \"quoted\" \u{263A}")

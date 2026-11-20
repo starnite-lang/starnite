@@ -1,0 +1,4 @@
+# expect: E0201 4:17
+fn main():
+    let a: I32 = 1
+    let b = a + 2.5

@@ -7,11 +7,11 @@
 
 (rule
  (targets runtime_src.ml)
- (deps ../runtime/stn_runtime.h ../runtime/stn_runtime.c prelude.stn)
+ (deps ../runtime/stn_runtime.h ../runtime/stn_runtime.c ../stdlib/prelude.stn)
  (action
   (with-stdout-to %{targets}
    (progn
-    (echo "(* Generated from runtime/ and prelude.stn; do not edit. *)\n")
+    (echo "(* Generated from runtime/ and stdlib/prelude.stn; do not edit. *)\n")
     (echo "let header = {stnrt|")
     (cat ../runtime/stn_runtime.h)
     (echo "|stnrt}\n")
@@ -19,5 +19,5 @@
     (cat ../runtime/stn_runtime.c)
     (echo "|stnrt}\n")
     (echo "let prelude = {stnrt|")
-    (cat prelude.stn)
+    (cat ../stdlib/prelude.stn)
     (echo "|stnrt}\n")))))
