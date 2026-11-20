@@ -1,0 +1,7 @@
+# Regression (found by tests/fuzz.py): a let initializer must be evaluated before the
+# temporaries of its statement are released.
+fn main():
+    let n = len(join(["x", "héllo"], "-"))
+    var b: Bool = (len([3, 1, 2]) -% 5) < len(join(["x", "h"], "-"))
+    let s = f"{len(split("a,b,c", ","))}"
+    print(f"{n} {b} {s}")

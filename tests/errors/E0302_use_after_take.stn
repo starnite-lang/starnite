@@ -1,0 +1,7 @@
+# expect: E0302 7:22
+fn keep(take xs: Array[Int]) -> Int:
+    len(xs)
+fn main():
+    let a = [1, 2]
+    let n = keep(take a)
+    print(f"{n} {len(a)}")

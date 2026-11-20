@@ -1355,7 +1355,8 @@ and stmt fc (s : tstmt) =
   (match s.st with
    | SLet (TPVar v, e) | SVar (v, e) ->
        let x = expr fc e in
-       let init = own fc x e.ty in
+       (* evaluate fully before the statement's temporaries are released *)
+       let init = tmp fc e.ty (own fc x e.ty) in
        (* declared in the enclosing scope, not the statement frame *)
        let f = List.hd fc.frames in
        fc.frames <- List.tl fc.frames;

@@ -53,6 +53,10 @@ Exit status follows section 11.5: 0 on success, 1 when an error reaches `main`, 
 tests/run.sh
 ```
 
+```bash
+tests/fuzz.py --count 200
+```
+
 Each program in `tests/run` is run three ways (reference interpreter, debug C build, release C build), and all three must match each other and a reviewed golden output. That is oracle 3 of section 21.2, applied to a fixed corpus. The debug runtime also checks that counts balance at exit (oracle 2). `tests/errors` holds one golden test per implemented error code, with its location. `tests/unit` holds `test` blocks, and `rejects` tests that check the compiler refuses a misuse.
 
 ## Status against milestone 1
@@ -64,19 +68,19 @@ Working now:
 - **Pass 1, lexing and parsing (section 2).** Indentation, line continuation, every literal form (durations and sizes too), f-strings, and the full expression and statement grammar.
 - **Passes 2 and 3, names and types (sections 3 and 5).** This covers structs with default fields, data types, aliases, generics with trait bounds, monomorphization, traits with type parameters, impls (generic ones too), method lookup, operators as trait methods, derived `Eq`, named arguments, and the `T -> T?` coercion. Matches are checked for exhaustiveness and reachability with Maranget's algorithm.
 - **Pass 5, effects (sections 5.4, 7.1, 7.2).** Errors are a checked effect: `fail`, `try`, error unions, `Err(SomeType(...))` patterns, and `From` conversions. `io` is checked on exported functions. Private functions get their errors and `io` inferred by fixpoint. Function-typed parameters are effect-polymorphic, and `! pure` is checked.
-- **Passes 4 and 6, the call-site rules (section 4).** `mut` must be marked at the call site (E0304) and must name a mutable place (E0303). A `mut` argument must not overlap another argument (E0301), and a closure argument must not capture one (E0305).
+- **Passes 4 and 6, the call-site rules (section 4).** `mut` must be marked at the call site (E0304) and must name a mutable place (E0303). A `mut` argument must not overlap another argument (E0301), and a closure argument must not capture one (E0305). A variable moved by an explicit `take` cannot be used again (E0302), across branches and loops.
 - **Closures and automatic sharing (section 13).** A captured `var` becomes a shared cell, and accesses keep their busy checks.
 - **Arithmetic (section 17.1).** Overflow traps, wrapping operators, checked conversions, and division traps.
 - **C output (section 11).** The object header, size-class allocator, inline and boxed data layouts with field-less variants encoded in the pointer (section 3.3), copy-on-write arrays, per-type release functions, and status-byte error returns. The debug build poisons freed memory and checks counts at exit.
 - **The reference interpreter (section 21.1)**, the test runner with `assert`, `assert_fails` and `rejects` (section 20.2), and diagnostics in the format of section 19.1, plus JSON.
+- **A first differential fuzzer (section 21.2)**, `tests/fuzz.py`. It builds well-typed programs by construction and requires the interpreter and the debug C build to agree, with balanced counts.
 
 Not done yet:
 
 - `lend` functions and projections (4.6)
 - trait values (`any T`, 3.4)
-- use-after-`take` (E0302)
 - modules and `import` (3.5); one file is compiled at a time
-- the program fuzzer (21.2)
+- the rest of the fuzzer of section 21.2: shrinking failing programs, negative fuzzing, and comparing each optional pass on and off
 - property, snapshot and doc tests, which belong to milestone 2
 
 Strings are always heap buffers. The 15-byte inline form arrives with the layout work of milestone 2.

@@ -256,6 +256,7 @@ type fctx = {
   declared : ty list option;        (* declared error list, if any *)
   mutable obligations : (ty * string * ty list * loc) list;
   mutable unsolved : (ty * loc) list;
+  mutable moved : (int * loc) list;        (* variables moved by an explicit take (section 4.2) *)
   fname : string;
   self_ty : ty option;
 }
@@ -415,6 +416,17 @@ let instantiate (sg : fsig) =
    { sg.seff with errs = List.map (subst s) sg.seff.errs })
 
 let defaults_table : (string, Syntax.expr option list) Hashtbl.t = Hashtbl.create 16
+
+let union_moved a b = a @ List.filter (fun (id, _) -> not (List.mem_assoc id a)) b
+
+(* a variable from outside a loop, moved inside it, would be used again on the next pass *)
+let loop_moves c before =
+  let declared_outside id = List.exists (fun f -> List.exists (fun (_, v) -> v.vid = id) f.vars) c.frames in
+  List.iter
+    (fun (id, (l : loc)) ->
+      if not (List.mem_assoc id before) && declared_outside id then
+        err "E0302" l "this 'take' is inside a loop, so the next pass would use the moved value")
+    c.moved
 let lambda_counter = ref 0
 
 let rec infer c (e : Syntax.expr) : texpr = check_or_infer c e None
@@ -554,7 +566,12 @@ and check_iter c (it : Syntax.expr) mode : titer * ty =
 
 and infer_name c l n exp : texpr =
   match lookup c n with
-  | Some v -> mk (XVar v) v.vty l
+  | Some v ->
+      (match List.assoc_opt v.vid c.moved with
+       | Some ml ->
+           err "E0302" l "'%s' is used after 'take %s' at line %d; the value has moved" n n ml.line
+       | None -> ());
+      mk (XVar v) v.vty l
   | None -> (
       match Hashtbl.find_opt c.tb.variants n with
       | Some (tn, idx) -> construct_variant c l tn idx n [] exp
@@ -673,6 +690,10 @@ and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : 
              | _, Some MMut -> err "E0304" a.aloc "parameter '%s' is not mut" n
              | _ -> ());
             let te = check c a.aexpr t in
+            (match (a.amode, te.e) with
+             | Some MTake, XVar v -> c.moved <- (v.vid, a.aloc) :: c.moved
+             | Some MTake, _ -> err "E0302" a.aloc "'take' moves a variable; write it before a variable name"
+             | _ -> ());
             (match (repr t, repr te.ty) with
              | TFn pf, TFn af when pf.feff.poly && not af.feff.poly -> poly_effs := af.feff :: !poly_effs
              | _ -> ());
@@ -1184,7 +1205,14 @@ and fix_place_types c (te : texpr) : texpr =
 and check_assign c l (lhs : Syntax.expr) op (rhs : Syntax.expr) : tstmt =
   if not (is_place lhs) then err "E0103" lhs.loc "the left side of an assignment must be a variable, field or element";
   let p = place_of c lhs in
-  if op = "=" then { st = SAssign (p, check c rhs p.pty); sl = l }
+  if op = "=" then begin
+    let rhs = check c rhs p.pty in
+    (* assigning the whole variable gives it a value again *)
+    if p.path = [] then c.moved <- List.filter (fun (id, _) -> id <> p.root.vid) c.moved
+    else if List.mem_assoc p.root.vid c.moved then
+      err "E0302" l "'%s' is used after it was moved by 'take'" p.root.vname;
+    { st = SAssign (p, rhs); sl = l }
+  end
   else begin
     let bop = String.sub op 0 1 in
     let cur = fix_place_types c (place_expr p l) in
@@ -1313,32 +1341,44 @@ and check_stmt_expr c (s : Syntax.stmt) (want : ty option) : texpr =
   let l = s.sloc in
   match s.s with
   | If (branches, els) ->
+      let before = c.moved in
+      let after = ref before in
+      let branch f = c.moved <- before; let r = f () in after := union_moved !after c.moved; r in
       let rec build = function
-        | [] -> (match els with Some b -> check_block c b want l | None ->
+        | [] -> (match els with Some b -> branch (fun () -> check_block c b want l) | None ->
             (match want with Some t when (match repr t with TUnit | TVar _ -> false | _ -> true) ->
                err "E0201" l "this if has no else branch, so it has no value of type %s" (show_ty t) | _ -> ());
             unit_e l)
         | (cnd, blk) :: rest ->
+            c.moved <- before;
             let tc = check c cnd TBool in
-            let tb = check_block c blk want l in
+            let before_branch = c.moved in
+            let tb = c.moved <- before_branch; let r = check_block c blk want l in after := union_moved !after c.moved; r in
             let te = build rest in
             let ty = match want with Some t -> t | None -> TUnit in
             mk (XIf (tc, tb, te)) ty l
       in
-      build branches
+      let r = build branches in
+      c.moved <- !after;
+      r
   | Match (scrut, arms) ->
       let ts = infer c scrut in
+      let before = c.moved in
+      let after = ref before in
       let tarms =
         List.map
           (fun (a : Syntax.arm) ->
+            c.moved <- before;
             push_frame c ();
             let p = check_pat c a.apat ts.ty true in
             let g = Option.map (fun g -> check c g TBool) a.aguard in
             let body = check_block c a.abody want a.arm_loc in
             pop_frame c;
+            after := union_moved !after c.moved;
             { pat = p; guard = g; body })
           arms
       in
+      c.moved <- !after;
       Exhaust.check c.tb.decls (zonk ts.ty) (List.map (fun a -> (a.pat, a.guard <> None)) tarms) l
         (List.map (fun (a : Syntax.arm) -> a.arm_loc) arms);
       let ty = match want with Some t -> t | None -> TUnit in
@@ -1401,14 +1441,19 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
         | _ -> check_pat c p elt false
       in
       c.loops <- c.loops + 1;
+      let before = c.moved in
       let tb = check_block c body None l in
       c.loops <- c.loops - 1;
       pop_frame c;
+      (* checked after the loop variable's frame is gone: it is fresh on every pass *)
+      loop_moves c before;
       mks (SFor (tp, src, tb))
   | While (cnd, body) ->
       let tc = check c cnd TBool in
       c.loops <- c.loops + 1;
+      let before = c.moved in
       let tb = check_block c body None l in
+      loop_moves c before;
       c.loops <- c.loops - 1;
       mks (SWhile (tc, tb))
   | LocalFn fd ->
@@ -1718,7 +1763,7 @@ let new_ctx tb (sg : fsig) self : fctx =
   { tb; frames = [ { vars = []; lam = None } ]; tparams = sg.stparams; ret = sg.sret; errs = []; io = false;
     in_try = 0; loops = 0;
     declared = (if sg.sdeclared && (sg.seff.errs <> [] || sg.sexport) then Some sg.seff.errs else None);
-    obligations = []; unsolved = []; fname = sg.sdisplay; self_ty = self }
+    obligations = []; unsolved = []; moved = []; fname = sg.sdisplay; self_ty = self }
 
 let finish_ctx c l =
   List.iter
