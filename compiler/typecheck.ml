@@ -21,7 +21,8 @@ type tables = {
   mutable lambdas : lambda list;
   mutable final_pass : bool;
   mutable decl_errors : (string * loc * string) list;
-  mutable any_uses : (string * loc) list;               (* every `any Trait` written, checked once traits are known *)
+  mutable any_uses : (string * int * loc) list;         (* every `any Trait` written before the traits were known *)
+  mutable traits_ready : bool;                          (* traits are complete: validate `any` uses on the spot *)
 }
 
 let builtin_prefix = "builtin:"
@@ -49,6 +50,43 @@ let rec head t =
   | TErr _ -> "_err"
   | TAny _ -> "any"
 
+(* A trait can be used with any only if every method takes Self as its first parameter,
+   has no type parameters of its own, and does not return Self (section 3.4). Methods
+   that take Self by mut or take are refused too: the box is shared, and a method table
+   cannot hand out a lent place. Checked where `any Trait` is written, once the traits
+   are known: [tb.traits_ready] says whether that is now. *)
+let validate_any_use tb ((tn, argc, l) : string * int * loc) =
+  let rec mentions_self t =
+    match repr t with
+    | TParam "Self" -> true
+    | TArray t -> mentions_self t
+    | TTuple ts | TNamed (_, ts) | TErr ts | TAny (_, ts) -> List.exists mentions_self ts
+    | TFn f -> List.exists (fun (_, t) -> mentions_self t) f.fps || mentions_self f.fret
+    | _ -> false
+  in
+  match Hashtbl.find_opt tb.traits tn with
+  | None -> err "E0101" l "unknown trait '%s'" tn
+  | Some tr ->
+      if argc <> List.length tr.trparams then
+        err "E0201" l "trait %s takes %d type argument(s), found %d" tn (List.length tr.trparams) argc;
+      let bad fmt = Printf.ksprintf (fun m -> err "E0230" l "%s cannot be used with any: %s" tn m) fmt in
+      List.iter
+        (fun (m, (sg : fsig)) ->
+          (match sg.sparams with
+           | (md, _, t, _) :: rest ->
+               if (match repr t with TParam "Self" -> false | _ -> true) then bad "method %s must take Self as its first parameter" m;
+               if md <> MBorrow then bad "method %s takes Self by %s" m (if md = MMut then "mut" else "take");
+               if List.exists (fun (_, _, t, _) -> mentions_self t) rest then bad "method %s mentions Self in another parameter" m
+           | [] -> bad "method %s takes no Self parameter" m);
+          if mentions_self sg.sret then bad "method %s returns Self" m;
+          if sg.slend <> None then bad "method %s lends a place, which a method table cannot hand out" m;
+          if List.length sg.stparams > List.length tr.trparams then bad "method %s has type parameters of its own" m)
+        tr.trmethods_
+
+let validate_any_uses tb =
+  List.iter (validate_any_use tb) (List.rev tb.any_uses);
+  tb.traits_ready <- true
+
 (* ---------- syntax types to types ---------- *)
 
 let rec conv_ty tb (tps : string list) (self : ty option) (t : Syntax.ty) : ty =
@@ -74,7 +112,8 @@ let rec conv_ty tb (tps : string list) (self : ty option) (t : Syntax.ty) : ty =
             | None -> err "E0101" l "unknown type '%s'" n)
   | TyPath (p, _, l) -> err "E0101" l "unknown type '%s' (modules arrive with imports)" (String.concat "." p)
   | TyAny (n, args, l) ->
-      tb.any_uses <- (n, l) :: tb.any_uses;
+      let use_ = (n, List.length args, l) in
+      if tb.traits_ready then validate_any_use tb use_ else tb.any_uses <- use_ :: tb.any_uses;
       TAny (n, List.map (conv_ty tb tps self) args)
   | TyFn (ps, ret, effs, _) ->
       let fps = List.map (fun (m, t) -> (m, conv_ty tb tps self t)) ps in
@@ -131,14 +170,23 @@ let prim_traits t =
   | TDur | TBytes -> [ "Eq"; "Ord"; "Show"; "Add"; "Sub"; "Copy" ]
   | _ -> []
 
+(* trait arguments agree, an unresolved variable agreeing with anything *)
+let args_compat (xs : ty list) (ys : ty list) =
+  List.length xs = List.length ys
+  && List.for_all2
+       (fun a b -> match (repr a, repr b) with TVar _, _ | _, TVar _ -> true | _ -> ty_equal a b)
+       xs ys
+
 let rec find_impl tb ?(bounds = []) trait (targs : ty list) self : resolution option =
   let self = repr self in
   match self with
-  | TAny (n, _) -> if n = trait then Some RPrim else None   (* any T implements T, through its table *)
+  | TAny (n, anyargs) ->
+      (* any T implements T, through its table, with the same trait arguments *)
+      if n = trait && args_compat targs anyargs then Some RPrim else None
   | TParam p -> (
       (* a bound of the enclosing generic function *)
       match List.assoc_opt p bounds with
-      | Some bs when List.exists (fun (tr, _) -> tr = trait) bs -> Some RPrim
+      | Some bs when List.exists (fun (tr, bta) -> tr = trait && args_compat targs bta) bs -> Some RPrim
       | _ -> None)
   | _ ->
       if List.mem trait (prim_traits self) then begin
@@ -586,7 +634,7 @@ and coerce c (te : texpr) expected : texpr =
       let ok =
         match repr found with
         | TParam _ -> find_impl c.tb ~bounds:c.tparams tr ta found <> None
-        | _ -> List.exists (fun im -> im.itrait_ = tr && (let s = ref [] in match_ty (List.map fst im.itparams) s im.ifor_ found)) c.tb.impls
+        | _ -> (match find_impl c.tb ~bounds:c.tparams tr ta found with Some (RImpl _) -> true | _ -> false)
       in
       if not ok then err "E0204" te.l "%s has no impl of %s written in the program, so it cannot be used as %s" (show_ty found) tr (show_ty expected);
       mk (XPack te) expected te.l
@@ -2013,6 +2061,28 @@ let declare_items tb modname (items : item list) =
                 let sg = make_sig tb ~modname ~uname fd tps (Some fty) in
                 (* the impl's effects may be fewer than the trait's, never more *)
                 let tsig = List.assoc fd.fname info.trmethods_ in
+                (* the impl's method must have the trait method's signature, with Self and
+                   the trait arguments filled in (a method with type parameters of its own
+                   is compared by shape only) *)
+                if List.length tsig.stparams = List.length info.trparams then begin
+                  let ts = ("Self", fty) :: List.combine info.trparams targs in
+                  if List.length sg.sparams <> List.length tsig.sparams then
+                    err "E0203" fd.floc "method '%s' takes %d parameter(s) in trait %s, but the impl has %d" fd.fname
+                      (List.length tsig.sparams) trn (List.length sg.sparams);
+                  List.iter2
+                    (fun (m1, n1, t1, _) (m2, _, t2, _) ->
+                      let t2 = subst ts t2 in
+                      if m1 <> m2 then
+                        err "E0201" fd.floc "parameter '%s' of '%s' is passed differently in trait %s" n1 fd.fname trn;
+                      if not (ty_equal t1 t2) then
+                        err "E0201" fd.floc "parameter '%s' of '%s' has type %s, but trait %s requires %s" n1 fd.fname (show_ty t1) trn (show_ty t2))
+                    sg.sparams tsig.sparams;
+                  let want = subst ts tsig.sret in
+                  if not (ty_equal sg.sret want) then
+                    err "E0201" fd.floc "'%s' returns %s, but trait %s requires %s" fd.fname (show_ty sg.sret) trn (show_ty want);
+                  if sg.slend <> tsig.slend then
+                    err "E0201" fd.floc "'%s' must %s lend, as in trait %s" fd.fname (if tsig.slend = None then "not" else "also") trn
+                end;
                 let sg = { sg with seff = (if fd.feffects = None then tsig.seff else sg.seff); sdeclared = true; sdisplay = "" } in
                 Hashtbl.replace tb.fns uname sg;
                 Hashtbl.replace tb.bodies uname (fd, [ ("Self", fty) ]);
@@ -2129,46 +2199,10 @@ let check_const tb n =
   if c.io || c.errs <> [] then err "E0503" e.loc "a constant cannot perform effects or fail";
   Hashtbl.replace tb.typed_consts n te
 
-(* A trait can be used with any only if every method takes Self as its first parameter,
-   has no type parameters of its own, and does not return Self (section 3.4). Methods
-   that take Self by mut or take are refused too: the box is shared. *)
-let validate_any_uses tb =
-  let rec mentions_self t =
-    match repr t with
-    | TParam "Self" -> true
-    | TArray t -> mentions_self t
-    | TTuple ts | TNamed (_, ts) | TErr ts | TAny (_, ts) -> List.exists mentions_self ts
-    | TFn f -> List.exists (fun (_, t) -> mentions_self t) f.fps || mentions_self f.fret
-    | _ -> false
-  in
-  let seen = Hashtbl.create 8 in
-  List.iter
-    (fun (tn, l) ->
-      match Hashtbl.find_opt tb.traits tn with
-      | None -> err "E0101" l "unknown trait '%s'" tn
-      | Some tr ->
-          let bad fmt = Printf.ksprintf (fun m -> err "E0230" l "%s cannot be used with any: %s" tn m) fmt in
-          if not (Hashtbl.mem seen tn) then begin
-            Hashtbl.replace seen tn ();
-            List.iter
-              (fun (m, (sg : fsig)) ->
-                (match sg.sparams with
-                 | (md, _, t, _) :: rest ->
-                     if (match repr t with TParam "Self" -> false | _ -> true) then bad "method %s must take Self as its first parameter" m;
-                     if md <> MBorrow then bad "method %s takes Self by %s" m (if md = MMut then "mut" else "take");
-                     if List.exists (fun (_, _, t, _) -> mentions_self t) rest then bad "method %s mentions Self in another parameter" m
-                 | [] -> bad "method %s takes no Self parameter" m);
-                if mentions_self sg.sret then bad "method %s returns Self" m;
-                if sg.slend <> None then bad "method %s lends a place, which a method table cannot hand out" m;
-                if List.length sg.stparams > List.length tr.trparams then bad "method %s has type parameters of its own" m)
-              tr.trmethods_
-          end)
-    (List.rev tb.any_uses)
-
 let new_tables () =
   { decls = Hashtbl.create 64; variants = Hashtbl.create 64; fns = Hashtbl.create 64; by_name = Hashtbl.create 64;
     bodies = Hashtbl.create 64; traits = Hashtbl.create 16; impls = []; consts = Hashtbl.create 8;
-    typed_consts = Hashtbl.create 8; lambdas = []; final_pass = false; decl_errors = []; any_uses = [] }
+    typed_consts = Hashtbl.create 8; lambdas = []; final_pass = false; decl_errors = []; any_uses = []; traits_ready = false }
 
 (* Check a whole program (the prelude plus one module). Effects of private functions are
    inferred by iterating to a fixpoint (section 7.2). *)

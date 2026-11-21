@@ -1,0 +1,9 @@
+# expect: E0201 5:9
+trait Scale[N]:
+    fn scale(s: Self, by: N) -> N
+
+fn f(x: any Scale) -> Int:
+    0
+
+fn main():
+    print("x")

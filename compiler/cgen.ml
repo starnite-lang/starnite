@@ -187,6 +187,8 @@ and ensure_type st t =
         (* two words: the counted box and the method table (section 3.4) *)
         let info = Hashtbl.find st.prog.traits tr in
         let s = List.combine info.trparams ta in
+        (* the two-word type comes first: a method's types may refer back to it *)
+        pr st.typedefs "typedef struct StnVt_%s StnVt_%s;\ntypedef struct { StnAnyBox* box; const StnVt_%s* vt; } stn_%s;\n" m m m m;
         let members =
           List.map
             (fun (m, (sg : fsig)) ->
@@ -197,8 +199,7 @@ and ensure_type st t =
               else Printf.sprintf "%s (*%s)(StnAnyBox*%s);" ret (c_ident m) ps)
             info.trmethods_
         in
-        pr st.typedefs "typedef struct StnVt_%s { %s } StnVt_%s;\n" m (if members = [] then "uint8_t _empty;" else String.concat " " members) m;
-        pr st.typedefs "typedef struct { StnAnyBox* box; const StnVt_%s* vt; } stn_%s;\n" m m;
+        pr st.typedefs "struct StnVt_%s { %s };\n" m (if members = [] then "uint8_t _empty;" else String.concat " " members);
         emit_helpers st t
     | TNamed _ when is_struct st t ->
         let fs = struct_fields st t in
@@ -778,12 +779,17 @@ let rec expr fc (e : texpr) : r =
   | XPack a ->
       (* box the value once; the table says which methods to run (section 3.4) *)
       let at = ts fc a.ty in
+      (match repr at with
+       | TAny _ ->
+           (* a generic function instantiated with a trait value: it is one already *)
+           expr fc a
+       | _ ->
       let vt = any_vtable fc.st t at in
       let v = own fc (expr fc a) a.ty in
       let b = fresh st "_b" in
       line fc "StnAnyBox* %s = (StnAnyBox*)stn_alloc(sizeof(StnAnyBox) + sizeof(%s));" b (cty st at);
       line fc "%s->release = anyrel_%s; *(%s*)%s->data = %s;" b (mangle at) (cty st at) b v;
-      { c = tmp fc t (Printf.sprintf "(%s){ %s, &%s }" (ct fc t) b vt); owned = true }
+      { c = tmp fc t (Printf.sprintf "(%s){ %s, &%s }" (ct fc t) b vt); owned = true })
   | XFail a ->
       let at = ts fc a.ty in
       let v = own fc (expr fc a) a.ty in

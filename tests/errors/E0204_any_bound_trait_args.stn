@@ -1,0 +1,16 @@
+# expect: E0204 16:14
+trait Scale[N]:
+    fn scale(s: Self, by: N) -> N
+
+type Strict = struct(value: Int)
+
+impl Scale[Float] for Strict:
+    fn scale(s: Strict, by: Float) -> Float:
+        Float(s.value) * by
+
+fn twice[T: Scale[Int]](x: T) -> Int:
+    x.scale(2)
+
+fn main():
+    let s: any Scale[Float] = Strict(4)
+    print(f"{twice(s)}")

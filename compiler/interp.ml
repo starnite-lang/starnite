@@ -492,7 +492,11 @@ and eval env (te : texpr) : value =
           let v = match repr ety with TErr _ -> VErr (t, v) | _ -> v in
           VVariant (1, [| v |]))
   | XConv a -> convert env (tsub env a.ty) (tsub env te.ty) (eval env a) te.l
-  | XPack a -> VAny (tsub env a.ty, eval env a)
+  | XPack a -> (
+      (* a generic function instantiated with a trait value gets one already *)
+      match repr (tsub env a.ty) with
+      | TAny _ -> eval env a
+      | at -> VAny (at, eval env a))
   | XFail a -> (
       let v = eval env a in
       match v with
