@@ -269,8 +269,11 @@ and ts =
   | SAssertFails of ty * texpr
   | SCheck of texpr
   | SLocalFn of var * lambda
+  | SLend of texpr                       (* lend [mut] place: the result of a lend function (4.6) *)
 
-and place = { root : var; path : proj list; pty : ty }
+(* A place starts at a variable, or at the result of a lend mut call ([via]), whose
+   root is then the variable that call lends from. *)
+and place = { root : var; via : texpr option; path : proj list; pty : ty }
 
 and proj = PField of int * string | PTupleIx of int | PIndex of texpr
 
@@ -301,6 +304,7 @@ type fsig = {
   mutable seff : eff;
   sdeclared : bool;            (* effects were written in the signature *)
   sexport : bool;
+  slend : bool option;         (* Some false: -> lend T; Some true: -> lend mut T (4.6) *)
   sloc : loc;
   smodule : string;
 }

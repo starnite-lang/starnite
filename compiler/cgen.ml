@@ -370,6 +370,7 @@ type fc = {
   vars : (int, vinfo) Hashtbl.t;
   self_struct : string option;
   cached : (int, string * string) Hashtbl.t;  (* arrays hoisted for a loop: data and length names *)
+  lend : bool option;                          (* compiling a lend function (lend mut when Some true) *)
 }
 
 type r = { c : string; owned : bool }
@@ -513,6 +514,22 @@ let kname = function
 let unsigned_of = function
   | IInt | I64 | U64 -> "uint64_t" | I32 | U32 -> "uint32_t" | I16 | U16 -> "uint16_t" | I8 | U8 -> "uint8_t"
 
+(* Some m when [e] calls a lend function (section 4.6) *)
+let lend_sig fc (e : texpr) : bool option =
+  match e.e with
+  | XCall (CFn (u, _), _, _) -> (Hashtbl.find fc.st.prog.fns u).fsig.slend
+  | XCall (CTrait (tr, ta, m, self), _, _) -> (
+      match Typecheck.impl_method_in fc.st.prog.impls tr (List.map (ts fc) ta) m (ts fc self) with
+      | Some (f, _) -> (Hashtbl.find fc.st.prog.fns f).fsig.slend
+      | None -> None)
+  | _ -> None
+
+(* The value of a block that ends in return, break, continue, fail or lend: the checker
+   gives it the block's type, but control never reaches it. *)
+let unreachable_value fc (e : texpr) =
+  repr (ts fc e.ty) = TNever
+  || (match (e.e, repr (ts fc e.ty)) with XLit LUnit, TUnit -> false | XLit LUnit, _ -> true | _ -> false)
+
 let rec expr fc (e : texpr) : r =
   let st = fc.st in
   let t = ts fc e.ty in
@@ -625,7 +642,7 @@ let rec expr fc (e : texpr) : r =
           List.iter (stmt fc) ss;
           push fc FStmt;
           let x = expr fc v in
-          if repr (ts fc v.ty) <> TNever then line fc "%s = %s;" res (own fc x v.ty);
+          if not (unreachable_value fc v) then line fc "%s = %s;" res (own fc x v.ty);
           pop fc;
           pop fc;
           fc.ind <- fc.ind - 1;
@@ -731,7 +748,7 @@ and discard_value fc (e : texpr) =
 and assign_into fc res (e : texpr) t =
   push fc FStmt;
   let x = expr fc e in
-  if repr (ts fc e.ty) <> TNever then line fc "%s = %s;" res (own fc x t);
+  if not (unreachable_value fc e) then line fc "%s = %s;" res (own fc x t);
   pop fc
 
 and construct fc t i (vals : string list) : r =
@@ -806,6 +823,25 @@ and call_instance fc (e : texpr) uname tys (sg : fsig) targs convs : r =
   let name = !request_instance st uname tys in
   let s = List.combine (List.map fst sg.stparams) tys in
   let ps = List.map (fun (m, _, pt, _) -> (m, subst s pt)) sg.sparams in
+  if sg.slend <> None then begin
+    (* every parameter it can lend from is passed by address, so the place outlives
+       the call; the pointer is good for the rest of the caller's statement *)
+    let avs =
+      List.map2
+        (fun (m, _) ta ->
+          match m with
+          | MMut -> let lv = place_lvalue_of_expr fc ta.a in hold_busy fc ta.a; "&" ^ lv
+          | MTake -> tmp fc ta.a.ty (own fc (expr fc ta.a) ta.a.ty)
+          | MBorrow -> (
+              match to_place fc ta.a with
+              | Some p -> "&" ^ place_lvalue ~write:false fc p
+              | None -> "&" ^ tmp fc ta.a.ty (borrow fc (expr fc ta.a) ta.a.ty)))
+        ps targs
+    in
+    let p = fresh st "_lp" in
+    line fc "%s* %s = %s(%s);" (ct fc t) p name (String.concat ", " avs);
+    { c = "(*" ^ p ^ ")"; owned = false }
+  end else
   let avs = args_c fc ps targs in
   if sig_can_fail sg then begin
     let res = fresh st "_r" and ev = fresh st "_e" in
@@ -1191,7 +1227,7 @@ and closure fc (lam : lambda) : string =
       (String.concat "" (List.map (fun (v, m) -> ", " ^ param_decl st m (ts fc v.vty) (var_name v)) params))
   in
   pr st.protos "%s;\n" header;
-  let fc' = { st; b; ind = 1; sub = fc.sub; frames = []; can_fail = true; ret = ft.fret; vars = Hashtbl.create 16; self_struct = Some name; cached = Hashtbl.create 4 } in
+  let fc' = { st; b; ind = 1; sub = fc.sub; frames = []; can_fail = true; ret = ft.fret; vars = Hashtbl.create 16; self_struct = Some name; cached = Hashtbl.create 4; lend = None } in
   List.iter
     (fun (v : var) ->
       if is_cell fc v then Hashtbl.replace fc'.vars v.vid (VCapCell (Printf.sprintf "((%s_t*)self_)->%s" name (cap_field v), ts fc v.vty))
@@ -1231,8 +1267,11 @@ and closure fc (lam : lambda) : string =
 (* ---------- places ---------- *)
 
 (* an lvalue for a place, making every array on the way unshared (section 4.5) *)
-and place_lvalue fc (p : place) : string =
-  let root =
+and place_lvalue ?(write = true) fc (p : place) : string =
+  let root () =
+    match p.via with
+    | Some call -> (expr fc call).c
+    | None ->
     match Hashtbl.find_opt fc.vars p.root.vid with
     | Some (VDirect n) -> n
     | Some (VPtr n) -> "(*" ^ n ^ ")"
@@ -1251,27 +1290,36 @@ and place_lvalue fc (p : place) : string =
     | PIndex ix :: rest ->
         let et = match repr t with TArray et -> et | _ -> assert false in
         let iv = tmp fc (TInt IInt) (expr fc ix).c in
-        line fc "stn_array_make_unique(&%s);" lv;
+        if write then line fc "stn_array_make_unique(&%s);" lv;
         go (Printf.sprintf "((%s*)(%s)->data)[stn_index(%s, (%s)->len, %s)]" (cty fc.st et) lv iv lv (loc_args ix.l)) et rest
   in
-  match (Hashtbl.find_opt fc.cached p.root.vid, p.path) with
+  match ((if p.via = None then Hashtbl.find_opt fc.cached p.root.vid else None), p.path) with
   | Some (d, n), PIndex ix :: rest ->
       (* hoisted for this loop: already unshared, and its data and length are fixed *)
       let et = match repr (ts fc p.root.vty) with TArray et -> et | _ -> assert false in
       let iv = tmp fc (TInt IInt) (expr fc ix).c in
       go (Printf.sprintf "%s[stn_index(%s, %s, %s)]" d iv n (loc_args ix.l)) et rest
-  | _ -> go root (ts fc p.root.vty) p.path
+  | _ ->
+      let start = root () in
+      let t0 = match p.via with Some call -> ts fc call.ty | None -> ts fc p.root.vty in
+      go start t0 p.path
+
+(* a place expression as a place: a variable or a lend call, then fields and elements *)
+and to_place fc (e : texpr) : place option =
+  match e.e with
+  | XVar v -> Some { root = v; via = None; path = []; pty = e.ty }
+  | XField (b, i, f) -> Option.map (fun p -> { p with path = p.path @ [ PField (i, f) ]; pty = e.ty }) (to_place fc b)
+  | XTupleGet (b, i) -> Option.map (fun p -> { p with path = p.path @ [ PTupleIx i ]; pty = e.ty }) (to_place fc b)
+  | XIndex (b, i) -> Option.map (fun p -> { p with path = p.path @ [ PIndex i ]; pty = e.ty }) (to_place fc b)
+  | XCall (_, args, _) when lend_sig fc e <> None -> (
+      let lent = match List.find_opt (fun a -> a.amode = MMut) args with Some a -> Some a | None -> (match args with a :: _ -> Some a | [] -> None) in
+      match Option.bind lent (fun a -> to_place fc a.a) with
+      | Some base -> Some { root = base.root; via = Some e; path = []; pty = e.ty }
+      | None -> None)
+  | _ -> None
 
 and place_lvalue_of_expr fc (e : texpr) : string =
-  let rec to_place (e : texpr) : place option =
-    match e.e with
-    | XVar v -> Some { root = v; path = []; pty = e.ty }
-    | XField (b, i, f) -> Option.map (fun p -> { p with path = p.path @ [ PField (i, f) ]; pty = e.ty }) (to_place b)
-    | XTupleGet (b, i) -> Option.map (fun p -> { p with path = p.path @ [ PTupleIx i ]; pty = e.ty }) (to_place b)
-    | XIndex (b, i) -> Option.map (fun p -> { p with path = p.path @ [ PIndex i ]; pty = e.ty }) (to_place b)
-    | _ -> None
-  in
-  match to_place e with
+  match to_place fc e with
   | Some p ->
       (match cell_root fc e with
        | Some (c, l) -> line fc "if (%s->busy) stn_trap(\"shared cell busy\", %s, \"a shared cell was accessed while it was lent out\");" c (loc_args l)
@@ -1405,6 +1453,7 @@ and walk_texpr (fe : texpr -> unit) (fs : tstmt -> unit) (e : texpr) =
     | SWhile (c, b) -> we c; we b
     | SFor (_, it, b) -> wit it; we b
     | SLocalFn (_, lam) -> we lam.lbody
+    | SLend e -> we e
   in
   fe e;
   match e.e with
@@ -1451,6 +1500,7 @@ and hoistable (v : var) (body : texpr list) : bool option =
       | SBreak | SContinue -> ()
       | SWhile (c, b) -> visit_child c; visit_child b
       | SFor (_, it, b) -> wit it; visit_child b
+      | SLend e -> visit_child e
       | SLocalFn (_, lam) ->
           if List.exists (fun (c : var) -> c.vid = v.vid) lam.lcaps then good := false;
           visit_child lam.lbody
@@ -1557,6 +1607,14 @@ and stmt fc (s : tstmt) =
    | SCheck e ->
        let cv = cond fc e in
        line fc "if (!%s) stn_trap(\"check failed\", %s, \"the checked condition is false\");" cv (loc_args s.sl)
+   | SLend e ->
+       (* for lend mut, any copy section 4.5 needs happens before the pointer is taken *)
+       let write = fc.lend = Some true in
+       let lv = match to_place fc e with Some p -> place_lvalue ~write fc p | None -> (expr fc e).c in
+       let pv = fresh st "_lp" in
+       line fc "%s* %s = &(%s);" (ct fc e.ty) pv lv;
+       drop_until fc (fun _ -> false);
+       line fc "return %s;" pv
    | SLocalFn (v, lam) ->
        let c = closure fc lam in
        let f = List.hd fc.frames in
@@ -1704,8 +1762,15 @@ let compile_instance st cname uname tys =
   let can_fail = sig_can_fail sg in
   let params = List.map2 (fun (v : var) (m, _, t, _) -> (v, m, subst sub t)) tf.fparams sg.sparams in
   let plist = List.map (fun (v, m, t) -> param_decl st m t (var_name v)) params in
+  let lend = sg.slend <> None in
+  (* a lend function takes its borrowed parameters by address too, and returns a pointer *)
+  let plist =
+    if lend then List.map (fun (v, m, t) -> match m with MBorrow -> Printf.sprintf "%s* %s" (cty st t) (var_name v) | _ -> param_decl st m t (var_name v)) params
+    else plist
+  in
   let header =
-    if can_fail then
+    if lend then Printf.sprintf "static inline %s* %s(%s)" (cty st ret) cname (if plist = [] then "void" else String.concat ", " plist)
+    else if can_fail then
       Printf.sprintf "static inline uint8_t %s(%s* _out, StnError* _err%s)" cname (cty st ret) (String.concat "" (List.map (fun p -> ", " ^ p) plist))
     (* inline is a hint: the C compiler weighs a body full of overflow checks as large,
        and small Starnite functions would otherwise stay calls in hot loops *)
@@ -1713,7 +1778,7 @@ let compile_instance st cname uname tys =
   in
   pr st.protos "%s;\n" header;
   let b = Buffer.create 4096 in
-  let fc = { st; b; ind = 1; sub; frames = []; can_fail; ret; vars = Hashtbl.create 32; self_struct = None; cached = Hashtbl.create 4 } in
+  let fc = { st; b; ind = 1; sub; frames = []; can_fail; ret; vars = Hashtbl.create 32; self_struct = None; cached = Hashtbl.create 4; lend = sg.slend } in
   pr b "%s {\n" header;
   push fc FFun;
   List.iter
@@ -1739,8 +1804,16 @@ let compile_instance st cname uname tys =
             line fc "%s* %s = (%s*)stn_alloc(sizeof(%s)); %s->busy = 0; %s->value = %s;" cn c cn cn c c (dup_expr st t n);
             Hashtbl.replace fc.vars v.vid (VCell (c, t));
             (List.hd fc.frames).owned <- (c, TNamed ("__cell", [ t ])) :: (List.hd fc.frames).owned
-          end else Hashtbl.replace fc.vars v.vid (VDirect n))
+          end else Hashtbl.replace fc.vars v.vid (if lend then VPtr n else VDirect n))
     params;
+  if lend then begin
+    (* every path ends in a lend statement, which returns; the checker proved it *)
+    discard fc tf.fbody;
+    pop fc;
+    line fc "stn_trap(\"unreachable\", __FILE__, __LINE__, 0, \"a lend function ended without lend\");";
+    pr b "}\n\n";
+    Buffer.add_buffer st.funcs b
+  end else begin
   push fc FStmt;
   let x = expr fc tf.fbody in
   let never = repr (ts fc tf.fbody.ty) = TNever in
@@ -1753,6 +1826,7 @@ let compile_instance st cname uname tys =
   if can_fail then (line fc "*_out = %s;" r; line fc "return 0;") else line fc "return %s;" r;
   pr b "}\n\n";
   Buffer.add_buffer st.funcs b
+  end
 
 let () =
   request_instance :=
@@ -1775,7 +1849,7 @@ let emit_show_error st =
       List.iter
         (fun (k, id, t) ->
           Hashtbl.replace seen k ();
-          let fc = { st; b = Buffer.create 64; ind = 0; sub = []; frames = []; can_fail = false; ret = TStr; vars = Hashtbl.create 1; self_struct = None; cached = Hashtbl.create 4 } in
+          let fc = { st; b = Buffer.create 64; ind = 0; sub = []; frames = []; can_fail = false; ret = TStr; vars = Hashtbl.create 1; self_struct = None; cached = Hashtbl.create 4; lend = None } in
           pr b "    case %d: return %s;\n" id (show_call fc t (err_val st t "e")))
         pending;
       loop ()

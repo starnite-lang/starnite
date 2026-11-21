@@ -1,0 +1,10 @@
+# expect: E0320 8:5
+type Grid = struct(width: Int, cells: Array[Int])
+fn at(g: Grid, i: Int) -> lend Int:
+    lend g.cells[i]
+fn at_mut(mut g: Grid, i: Int) -> lend mut Int:
+    lend mut g.cells[i]
+fn first(g: Grid) -> Int:
+    return at(g, 0)
+fn main():
+    print(f"{first(Grid(1, [1]))}")

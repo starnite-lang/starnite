@@ -1,0 +1,9 @@
+# expect: E0322 9:5
+type Grid = struct(width: Int, cells: Array[Int])
+fn at(g: Grid, i: Int) -> lend Int:
+    lend g.cells[i]
+fn at_mut(mut g: Grid, i: Int) -> lend mut Int:
+    lend mut g.cells[i]
+fn main():
+    let g = Grid(1, [1])
+    lend g.cells[0]

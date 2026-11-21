@@ -1,0 +1,11 @@
+# expect: E0322 8:5
+type Grid = struct(width: Int, cells: Array[Int])
+fn at(g: Grid, i: Int) -> lend Int:
+    lend g.cells[i]
+fn at_mut(mut g: Grid, i: Int) -> lend mut Int:
+    lend mut g.cells[i]
+fn pick(g: Grid) -> lend Int:
+    lend g.cells[0]
+    print("after")
+fn main():
+    print("x")

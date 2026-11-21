@@ -25,7 +25,7 @@ type token = { t : tok; tloc : loc }
 let keywords =
   [ "and"; "as"; "break"; "check"; "continue"; "effect"; "elif"; "else"; "ensures";
     "extern"; "false"; "fn"; "for"; "frozen"; "handle"; "if"; "impl"; "import"; "in";
-    "iso"; "let"; "level"; "local"; "match"; "mut"; "not"; "or"; "par"; "resource";
+    "iso"; "lend"; "let"; "level"; "local"; "match"; "mut"; "not"; "or"; "par"; "resource";
     "resume"; "return"; "shared"; "spawn"; "struct"; "take"; "trait"; "true"; "try";
     "type"; "unique"; "var"; "where"; "while"; "with" ]
 
