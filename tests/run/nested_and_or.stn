@@ -1,0 +1,8 @@
+fn ok(s: Str) -> Bool:
+    len(s + "x") > 0
+
+fn main():
+    let k = 3
+    let a = ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (ok("a") and (k == 3))))))))))))))))))))))))
+    let b = ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (ok("b") and not (k == 4))))))))))))))))))))))))
+    print(f"{a} {b}")

@@ -98,18 +98,20 @@ Strings are always heap buffers. The 15-byte inline form arrives with the layout
 
 | Benchmark | Starnite / C |
 |---|---|
-| centroid | 0.9x |
+| centroid | 1.0x |
 | n-body | 1.0x |
-| Mandelbrot | 1.05x |
-| spectral norm | 1.15x |
+| Mandelbrot | 1.0x |
+| spectral norm | 1.0x |
 
-Three of the four meet the gate. spectral norm runs at C speed once its overflow checks are taken out; what is left is the cost of the traps section 17.1 requires. They can go only when a refinement proves the arithmetic cannot overflow, which is milestone 5's interval analysis (section 17.2). centroid runs for about 40 ms, so its ratio is noisy.
+All four meet the gate and run at C speed, with every bounds check and overflow trap still in place. n-body, spectral norm and Mandelbrot land within about 3% of 1.0 from run to run. centroid runs for only about 35 ms, so its ratio moves by up to 10%.
 
 What closed most of the gap:
 
 - **Arrays hoisted out of loops.** A loop body may use an array only through element reads, element writes and `len`. The array is then made unshared once before the loop, and its data pointer and length are read into locals, so `-fno-strict-aliasing` no longer forces a reload after every store. Every bounds check stays.
 - **Generated functions are `static inline`.** Bodies full of overflow checks look large to the C compiler, and small Starnite functions stayed calls in hot loops.
 - **Large arrays grow with `realloc`**, which can move pages rather than copy them.
+- **Array lengths carry their bound.** No array holds more than 2^40 elements, because every path that creates or grows one traps beyond that. `stn_len` tells the C compiler so. It can then bound loop counters and the index arithmetic built from them, and drop the overflow and sign checks it proves redundant. This took spectral norm from 1.17x to 1.0x.
+- **`and`, `or` and comparisons stay C expressions** when their right side needs no statements of its own, so a loop condition reaches the C compiler as one test. Operands still evaluate left to right: the left one becomes a temporary unless it is a variable or a literal. This took Mandelbrot from 1.08x to 1.0x.
 
 ## Reading of the specification
 

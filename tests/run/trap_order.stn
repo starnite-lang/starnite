@@ -1,0 +1,7 @@
+# Operands are evaluated left to right (section 4.4): when both sides overflow, the
+# trap is the left one, in C as in the interpreter.
+fn main():
+    let x = 4611686018427387904
+    let y = 3
+    let s = (x * y) + (y * x)
+    print(f"{s}")

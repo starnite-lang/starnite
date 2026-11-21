@@ -524,6 +524,19 @@ let lend_sig fc (e : texpr) : bool option =
       | None -> None)
   | _ -> None
 
+(* a C operand that cannot trap or have effects: a name, a dereferenced name, a number *)
+let simple_operand (c : string) =
+  let ident_char ch = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch = '_' || ch = '.' in
+  let c = if String.length c > 3 && String.sub c 0 2 = "(*" && c.[String.length c - 1] = ')' then String.sub c 2 (String.length c - 3) else c in
+  let c =
+    (* INT64_C(5), UINT64_C(5) *)
+    match String.index_opt c '(' with
+    | Some i when (String.sub c 0 i = "INT64_C" || String.sub c 0 i = "UINT64_C" || String.sub c 0 i = "UINT32_C") && c.[String.length c - 1] = ')' ->
+        String.sub c (i + 1) (String.length c - i - 2)
+    | _ -> c
+  in
+  c <> "" && String.for_all (fun ch -> ident_char ch || ch = '-') c
+
 (* The value of a block that ends in return, break, continue, fail or lend: the checker
    gives it the block's type, but control never reaches it. *)
 let unreachable_value fc (e : texpr) =
@@ -564,7 +577,7 @@ let rec expr fc (e : texpr) : r =
       let av = borrow fc (expr fc a) a.ty in
       let iv = (expr fc i).c in
       let iv = tmp fc (TInt IInt) iv in
-      { c = Printf.sprintf "((%s*)(%s)->data)[stn_index(%s, (%s)->len, %s)]" (ct fc t) av iv av (loc_args e.l); owned = false }
+      { c = Printf.sprintf "((%s*)(%s)->data)[stn_index(%s, stn_len(%s), %s)]" (ct fc t) av iv av (loc_args e.l); owned = false }
   | XSlice (a, lo, hi) ->
       let av = borrow fc (expr fc a) a.ty in
       let lov = tmp fc (TInt IInt) (expr fc lo).c in
@@ -652,23 +665,40 @@ let rec expr fc (e : texpr) : r =
   | XLambda lam -> { c = closure fc lam; owned = true }
   | XBin (And, a, b) | XBin (Or, a, b) ->
       let is_and = match e.e with XBin (And, _, _) -> true | _ -> false in
-      let res = tmp fc TBool (cond fc a) in
-      line fc "if (%s%s) {" (if is_and then "" else "!") res;
-      fc.ind <- fc.ind + 1;
+      let av = cond fc a in
+      (* When the right side needs no statements of its own, C's && and || keep the
+         short circuit and let the C compiler see the loop condition as one test. *)
+      let mark = Buffer.length fc.b and saved = fc.frames in
       push fc FStmt;
-      let bv = cond fc b in
-      line fc "%s = %s;" res bv;
-      pop fc;
-      fc.ind <- fc.ind - 1;
-      line fc "}";
-      { c = res; owned = false }
+      let bx = expr fc b in
+      let simple = Buffer.length fc.b = mark && (List.hd fc.frames).owned = [] && not bx.owned in
+      if simple then begin
+        fc.frames <- saved;
+        { c = Printf.sprintf "(%s %s %s)" av (if is_and then "&&" else "||") bx.c; owned = false }
+      end else begin
+        (* The right side is already generated, with its frame still open. Move its
+           statements inside the conditional instead of generating it a second time:
+           regenerating would make right-nested and/or cost exponential work. *)
+        let body = Buffer.sub fc.b mark (Buffer.length fc.b - mark) in
+        Buffer.truncate fc.b mark;
+        let res = tmp fc TBool av in
+        line fc "if (%s%s) {" (if is_and then "" else "!") res;
+        Buffer.add_string fc.b body;
+        fc.ind <- fc.ind + 1;
+        let bv = tmp fc TBool bx.c in
+        pop fc;
+        line fc "%s = %s;" res bv;
+        fc.ind <- fc.ind - 1;
+        line fc "}";
+        { c = res; owned = false }
+      end
   | XBin (op, a, b) -> binop fc e op a b
   | XNeg a -> (
       let av = (expr fc a).c in
       match repr t with
       | TInt k -> { c = Printf.sprintf "stn_sub_%s(0, %s, %s)" (kname k) av (loc_args e.l); owned = false }
       | _ -> { c = Printf.sprintf "(-(%s))" av; owned = false })
-  | XNot a -> { c = Printf.sprintf "(!(%s))" (cond fc a); owned = false }
+  | XNot a -> { c = Printf.sprintf "(!(%s))" (expr fc a).c; owned = false }
   | XTry a -> try_ fc t a
   | XConv a -> conv fc e a t
   | XFail a ->
@@ -1002,8 +1032,22 @@ and binop fc (e : texpr) op (a : texpr) (b : texpr) : r =
   let st = fc.st in
   let at = ts fc a.ty in
   let ab = borrow fc (expr fc a) a.ty in
-  let ab = if rc fc a.ty then ab else tmp fc a.ty ab in
+  (* Operands are evaluated left to right (section 4.4), but C leaves the order of a
+     call's arguments open, and either side may trap. So the left operand stays an
+     expression only when it is a variable or a literal and the right one emits no
+     statements; otherwise it is saved in a temporary ahead of the right one's code. *)
+  let mark = Buffer.length fc.b in
   let bb = borrow fc (expr fc b) b.ty in
+  let ab =
+    if rc fc a.ty || (Buffer.length fc.b = mark && simple_operand ab) then ab
+    else begin
+      let right = Buffer.sub fc.b mark (Buffer.length fc.b - mark) in
+      Buffer.truncate fc.b mark;
+      let n = tmp fc a.ty ab in
+      Buffer.add_string fc.b right;
+      n
+    end
+  in
   let la = loc_args e.l in
   let plain o = { c = Printf.sprintf "((%s) %s (%s))" ab o bb; owned = false } in
   match (op, repr at) with
@@ -1291,7 +1335,7 @@ and place_lvalue ?(write = true) fc (p : place) : string =
         let et = match repr t with TArray et -> et | _ -> assert false in
         let iv = tmp fc (TInt IInt) (expr fc ix).c in
         if write then line fc "stn_array_make_unique(&%s);" lv;
-        go (Printf.sprintf "((%s*)(%s)->data)[stn_index(%s, (%s)->len, %s)]" (cty fc.st et) lv iv lv (loc_args ix.l)) et rest
+        go (Printf.sprintf "((%s*)(%s)->data)[stn_index(%s, stn_len(%s), %s)]" (cty fc.st et) lv iv lv (loc_args ix.l)) et rest
   in
   match ((if p.via = None then Hashtbl.find_opt fc.cached p.root.vid else None), p.path) with
   | Some (d, n), PIndex ix :: rest ->
@@ -1373,7 +1417,7 @@ and loop_over fc (src : titer) (p : tpat) (body : unit -> unit) =
           hold_busy fc a;
           let et = match repr (ts fc a.ty) with TArray et -> et | _ -> assert false in
           let i = fresh st "_i" in
-          line fc "for (int64_t %s = 0; %s < (%s)->len; %s++) {" i i lv i;
+          line fc "for (int64_t %s = 0; %s < stn_len(%s); %s++) {" i i lv i;
           fc.ind <- fc.ind + 1;
           push fc FLoop;
           line fc "stn_array_make_unique(&%s);" lv;
@@ -1394,7 +1438,7 @@ and loop_over fc (src : titer) (p : tpat) (body : unit -> unit) =
       let av = tmp fc a.ty (own fc (expr fc a) a.ty) in
       own_in fc av a.ty;
       let i = fresh st "_i" in
-      line fc "for (int64_t %s = 0; %s < %s->len; %s++) {" i i av i;
+      line fc "for (int64_t %s = 0; %s < stn_len(%s); %s++) {" i i av i;
       fc.ind <- fc.ind + 1;
       push fc FLoop;
       let x = tmp fc et (Printf.sprintf "((%s*)%s->data)[%s]" (cty st et) av i) in
@@ -1430,7 +1474,7 @@ and with_hoisted fc (body : texpr list) (k : unit -> unit) =
           let et = match repr (ts fc v.vty) with TArray et -> et | _ -> assert false in
           if writes then line fc "stn_array_make_unique(&%s);" lv;
           let d = fresh fc.st "_d" and n = fresh fc.st "_n" in
-          line fc "%s* %s = (%s*)(%s)->data; int64_t %s = (%s)->len;" (ct fc et) d (ct fc et) lv n lv;
+          line fc "%s* %s = (%s*)(%s)->data; int64_t %s = stn_len(%s);" (ct fc et) d (ct fc et) lv n lv;
           Hashtbl.replace fc.cached v.vid (d, n);
           added := v.vid :: !added
       | None -> ())
@@ -1658,7 +1702,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
   | "len@Array" -> (
       match (arg 0).a.e with
       | XVar v when Hashtbl.mem fc.cached v.vid -> value (snd (Hashtbl.find fc.cached v.vid))
-      | _ -> value (Printf.sprintf "(%s)->len" (b 0)))
+      | _ -> value (Printf.sprintf "stn_len(%s)" (b 0)))
   | "len@Str" -> value (Printf.sprintf "(%s)->len" (b 0))
   | "push@Array" ->
       let lv = m 0 in

@@ -7,9 +7,9 @@ starnite=${STARNITE:-"$here/../_build/default/compiler/main.exe"}
 # a private directory of our own, never a fixed shared path
 out=$(mktemp -d "${TMPDIR:-/tmp}/starnite-bench.XXXXXXXX")
 trap 'rm -rf "$out"' EXIT
-best() { # best of 3 wall-clock runs, in seconds
+best() { # best of 9 wall-clock runs, in seconds: the short ones are noisy
     b=999
-    for _ in 1 2 3; do
+    for _ in 1 2 3 4 5 6 7 8 9; do
         s=$(date +%s.%N); "$1" > /dev/null; e=$(date +%s.%N)
         b=$(echo "$e - $s" | bc -l | awk -v b="$b" '{ print ($1 < b) ? $1 : b }')
     done

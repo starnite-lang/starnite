@@ -231,9 +231,9 @@ void stn_array_release(void* p) {
     stn_free(a);
 }
 
-/* Requests above this many elements or bytes trap rather than wrap a size computation.
-   The reference interpreter applies the same limit (compiler/interp.ml). */
-#define STN_MAX_ALLOC ((int64_t)1 << 40)
+/* Requests above STN_MAX_ALLOC (stn_runtime.h) elements or bytes trap rather than wrap
+   a size computation. The reference interpreter applies the same limit
+   (compiler/interp.ml), and generated code relies on it through stn_len. */
 
 _Noreturn static void stn_too_large(const char* file, int line, int col) {
     stn_trap("allocation too large", file, line, col, "the requested size is too large");
@@ -274,6 +274,8 @@ void stn_array_reserve(StnArray** pa, int64_t extra) {
         if (need <= a->cap) return;
         int64_t cap = a->cap ? a->cap * 2 : 4;
         while (cap < need) cap *= 2;
+        /* capacity never passes the limit, so no push can take a length past it */
+        if (cap > STN_MAX_ALLOC) cap = STN_MAX_ALLOC;
         size_t bytes = sizeof(StnArray) + (size_t)cap * a->ops->size;
 #ifndef STN_DEBUG
         /* a large buffer already belongs to the system allocator, whose realloc can
@@ -298,6 +300,7 @@ void stn_array_reserve(StnArray** pa, int64_t extra) {
     } else {
         int64_t cap = need > a->len * 2 ? need : a->len * 2;
         if (cap < 4) cap = 4;
+        if (cap > STN_MAX_ALLOC) cap = STN_MAX_ALLOC;
         StnArray* b = stn_array_copy(a, cap);
         stn_drop(a, stn_array_release);
         *pa = b;

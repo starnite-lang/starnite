@@ -1,0 +1,9 @@
+# the right side of `or` does run when the left is false, so its overflow traps
+fn boom(x: Int) -> Bool:
+    x + 1 > 0
+
+fn main():
+    let big = 9223372036854775807
+    let f = false
+    print("before")
+    print(f"{f or boom(big)}")
