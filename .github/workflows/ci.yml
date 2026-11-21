@@ -53,9 +53,13 @@ jobs:
       - name: Build
         run: dune build
       - name: Differential fuzzing
-        # a new seed on every run, printed first; a failing case is reported by number
-        # and can be replayed with: dune exec tests/fuzz/fuzz.exe -- --seed <case> --count 1
-        run: ./_build/default/tests/fuzz/fuzz.exe --count 500 --seed $(( GITHUB_RUN_ID % 1000000000 )) --keep fuzz-failures
+        # the fuzzer picks a random seed on every run, reruns included, and prints it
+        # first; a failing case is reported by number and can be replayed with:
+        #   dune exec tests/fuzz/fuzz.exe -- --seed <case> --count 1
+        # the step's limit is below the job's, so failing programs are still uploaded
+        # when repeated hangs (120 s each) use up the time
+        timeout-minutes: 20
+        run: ./_build/default/tests/fuzz/fuzz.exe --count 500 --keep fuzz-failures
       - name: Keep failing programs
         if: failure()
         uses: actions/upload-artifact@v4
