@@ -233,8 +233,12 @@ let run starnite tmp args path : int * string =
           ignore (Unix.setsid ());
           Unix.dup2 fd Unix.stdout;
           Unix.dup2 fd Unix.stderr;
-          Unix.execv starnite argv
-        with _ -> Unix._exit 127)
+          (* execvp searches PATH, so STARNITE may name an installed command *)
+          Unix.execvp starnite argv
+        with e ->
+          prerr_string (sprintf "fuzz: cannot run %s: %s\n" starnite (Printexc.to_string e));
+          flush stderr;
+          Unix._exit 127)
     | pid -> pid
   in
   Unix.close fd;
@@ -297,6 +301,11 @@ let () =
     let failed =
       match
         let ci, oi = run starnite tmp [ "check" ] path in
+        if ci = 127 then begin
+          (* the compiler did not start at all: no case can be judged *)
+          prerr_string oi;
+          exit 2
+        end;
         if ci <> 0 then `Rejected oi
         else
           let ri, out_i = run starnite tmp [ "run"; "--interp" ] path in
