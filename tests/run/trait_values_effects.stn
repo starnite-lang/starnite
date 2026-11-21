@@ -1,0 +1,70 @@
+# Trait values with effects, arguments, generic impls and nesting (section 3.4).
+type LimitError = TooBig(n: Int)
+
+impl Show for LimitError:
+    fn show(e: LimitError) -> Str:
+        match e:
+            TooBig(n) -> f"too big: {n}"
+
+trait Check:
+    fn check(c: Self, limit: Int) -> Int ! LimitError
+    fn label(c: Self) -> Str
+
+type Strict = struct(value: Int)
+type Lax = struct(text: Str)
+type Pair[T] = struct(a: T, b: T)
+
+impl Check for Strict:
+    fn check(c: Strict, limit: Int) -> Int ! LimitError:
+        if c.value > limit:
+            fail(TooBig(c.value))
+        c.value
+    fn label(c: Strict) -> Str:
+        "strict"
+
+# an impl may do less than the trait: this one never fails
+impl Check for Lax:
+    fn check(c: Lax, limit: Int) -> Int:
+        len(c.text)
+    fn label(c: Lax) -> Str:
+        f"lax {c.text}"
+
+impl Check for Pair[Int]:
+    fn check(c: Pair[Int], limit: Int) -> Int ! LimitError:
+        if c.a + c.b > limit:
+            fail(TooBig(c.a + c.b))
+        c.a + c.b
+    fn label(c: Pair[Int]) -> Str:
+        "pair"
+
+trait Scale[N]:
+    fn scale(s: Self, by: N) -> N
+
+impl Scale[Float] for Strict:
+    fn scale(s: Strict, by: Float) -> Float:
+        Float(s.value) * by
+
+type Slot = Filled(c: any Check) | Empty
+
+fn run(c: any Check, limit: Int) -> Int ! LimitError:
+    c.check(limit)
+
+fn main() ! io:
+    let items: Array[any Check] = [Strict(7), Lax("hello"), Pair(2, 3)]
+    for c in items:
+        match try run(c, 6):
+            Ok(n) -> print(f"{c.label()} ok {n}")
+            Err(e) -> print(f"{c.label()} {e}")
+    let slots = [Filled(Strict(1)), Empty, Filled(Lax("ab"))]
+    var sum = 0
+    for s in slots:
+        match s:
+            Filled(c) -> sum += (try run(c, 100)).or(0)
+            Empty -> sum += 1000
+    print(f"{sum}")
+    let sc: any Scale[Float] = Strict(4)
+    print(f"{sc.scale(2.5)}")
+    let maybe: (any Check)? = Lax("xyz")
+    match maybe:
+        Some(c) -> print(c.label())
+        None -> print("none")

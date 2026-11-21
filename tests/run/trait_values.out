@@ -1,0 +1,12 @@
+total 12.0
+square 4.0
+tri 8.0
+square 9.0
+two 2 3 13.0
+2 12.0
+[square, tri, tri]
+square
+tri
+3.0 25.0
+tri 2.0
+exit 0

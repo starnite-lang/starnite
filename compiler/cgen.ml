@@ -48,6 +48,7 @@ let rec mangle t =
   | TNamed (n, ts) -> n ^ "_" ^ String.concat "_" (List.map mangle ts) ^ "_E"
   | TFn _ -> "Fn"
   | TErr _ -> "Err"
+  | TAny (n, ts) -> "Any_" ^ n ^ "_" ^ String.concat "_" (List.map mangle ts) ^ "_E"
   | TParam p -> failwith ("cgen: unsubstituted type parameter " ^ p)
   | TVar _ -> failwith "cgen: unresolved type variable"
 
@@ -113,7 +114,7 @@ let rec size_of st t =
   | TF32 | TChar -> 4
   | TBool | TUnit | TNever -> 1
   | TStr | TArray _ | TFn _ -> 8
-  | TErr _ -> 16
+  | TErr _ | TAny _ -> 16
   | TTuple ts -> List.fold_left (fun a t -> a + max 8 (size_of st t)) 0 ts
   | TNamed _ when is_struct st t -> List.fold_left (fun a (_, t) -> a + max 1 (size_of st t)) 0 (struct_fields st t)
   | TNamed _ when is_data st t -> if layout st t = LBoxed then 8 else 1 + payload_size st t
@@ -144,9 +145,12 @@ and layout st t : layout =
       Hashtbl.replace st.layouts key l;
       l
 
+let sig_can_fail_sg (sg : fsig) =
+  sg.seff.errs <> [] || List.exists (fun (_, _, t, _) -> match repr t with TFn f -> f.feff.poly | _ -> false) sg.sparams
+
 let rec needs_rc st t =
   match repr t with
-  | TStr | TArray _ | TFn _ | TErr _ -> true
+  | TStr | TArray _ | TFn _ | TErr _ | TAny _ -> true
   | TTuple ts -> List.exists (needs_rc st) ts
   | TNamed _ when is_struct st t -> List.exists (fun (_, t) -> needs_rc st t) (struct_fields st t)
   | TNamed _ when is_data st t -> layout st t = LBoxed || List.exists (fun (_, fs) -> List.exists (fun (_, t) -> needs_rc st t) fs) (variants st t)
@@ -164,7 +168,7 @@ let rec cty st t : string =
   | TArray _ -> "StnArray*"
   | TFn _ -> "StnClosure*"
   | TErr _ -> "StnError"
-  | TTuple _ | TNamed _ -> ensure_type st t; "stn_" ^ mangle t
+  | TTuple _ | TNamed _ | TAny _ -> ensure_type st t; "stn_" ^ mangle t
   | TParam p -> failwith ("cgen: type parameter " ^ p)
   | TVar _ -> failwith "cgen: type variable"
 
@@ -178,6 +182,23 @@ and ensure_type st t =
     | TTuple ts ->
         let fields = List.mapi (fun i t -> Printf.sprintf "%s f%d;" (cty st t) i) ts in
         pr st.typedefs "typedef struct { %s } stn_%s;\n" (String.concat " " fields) m;
+        emit_helpers st t
+    | TAny (tr, ta) ->
+        (* two words: the counted box and the method table (section 3.4) *)
+        let info = Hashtbl.find st.prog.traits tr in
+        let s = List.combine info.trparams ta in
+        let members =
+          List.map
+            (fun (m, (sg : fsig)) ->
+              let ps = List.map (fun (md, _, pt, _) -> match md with MMut -> cty st (subst s pt) ^ "*" | _ -> cty st (subst s pt)) (List.tl sg.sparams) in
+              let ps = String.concat "" (List.map (fun p -> ", " ^ p) ps) in
+              let ret = cty st (subst s sg.sret) in
+              if sig_can_fail_sg sg then Printf.sprintf "uint8_t (*%s)(%s*, StnError*, StnAnyBox*%s);" (c_ident m) ret ps
+              else Printf.sprintf "%s (*%s)(StnAnyBox*%s);" ret (c_ident m) ps)
+            info.trmethods_
+        in
+        pr st.typedefs "typedef struct StnVt_%s { %s } StnVt_%s;\n" m (if members = [] then "uint8_t _empty;" else String.concat " " members) m;
+        pr st.typedefs "typedef struct { StnAnyBox* box; const StnVt_%s* vt; } stn_%s;\n" m m;
         emit_helpers st t
     | TNamed _ when is_struct st t ->
         let fs = struct_fields st t in
@@ -228,6 +249,9 @@ and emit_helpers st t =
   if needs_rc st t then begin
     pr st.protos "static inline %s dup_%s(%s x);\nstatic inline void drop_%s(%s x);\n" c m c m c;
     match repr t with
+    | TAny _ ->
+        pr st.helpers "static inline %s dup_%s(%s x) { stn_dup(x.box); return x; }\n" c m c;
+        pr st.helpers "static inline void drop_%s(%s x) { stn_any_drop(x.box); }\n" m c
     | TTuple ts ->
         pr st.helpers "static inline %s dup_%s(%s x) { %s return x; }\n" c m c
           (String.concat " " (List.mapi (fun i t -> if needs_rc st t then dup_stmt st t (Printf.sprintf "x.f%d" i) else "") ts));
@@ -514,6 +538,56 @@ let kname = function
 let unsigned_of = function
   | IInt | I64 | U64 -> "uint64_t" | I32 | U32 -> "uint32_t" | I16 | U16 -> "uint16_t" | I8 | U8 -> "uint8_t"
 
+(* The method table of [any] for the concrete type [at], and the release function of its
+   box. One wrapper per method takes the box and forwards the payload to the impl's
+   function; an impl that cannot fail is adapted to a trait method that can (section 3.4). *)
+let any_vtable st (any : ty) (at : ty) : string =
+  let tr, ta = match repr any with TAny (tr, ta) -> (tr, ta) | _ -> assert false in
+  let info = Hashtbl.find st.prog.traits tr in
+  let s = List.combine info.trparams ta in
+  let cm = mangle at and am = mangle any in
+  let cc = cty st at in
+  if not (Hashtbl.mem st.defined ("anyrel_" ^ cm)) then begin
+    Hashtbl.replace st.defined ("anyrel_" ^ cm) ();
+    pr st.protos "static void anyrel_%s(void* p);\n" cm;
+    pr st.helpers "static void anyrel_%s(void* p) { %s stn_free(p); }\n" cm
+      (if needs_rc st at then drop_stmt st at (Printf.sprintf "(*(%s*)((StnAnyBox*)p)->data)" cc) else "")
+  end;
+  let key = "vt_" ^ am ^ "__" ^ cm in
+  if not (Hashtbl.mem st.defined key) then begin
+    Hashtbl.replace st.defined key ();
+    ensure_type st any;
+    let entries =
+      List.map
+        (fun (m, (sg : fsig)) ->
+          let f, ftys =
+            match Typecheck.impl_method_in st.prog.impls tr ta m at with
+            | Some r -> r
+            | None -> unsupported Syntax.noloc "%s cannot be used as %s: its implementation of %s is built in and has no method table" (show_ty at) (show_ty any) tr
+          in
+          let impl_sg = (Hashtbl.find st.prog.fns f).fsig in
+          let iname = !request_instance st f ftys in
+          let ps = List.mapi (fun i (md, _, pt, _) -> (md, subst s pt, Printf.sprintf "p%d" i)) (List.tl sg.sparams) in
+          let ret = cty st (subst s sg.sret) in
+          let plist = String.concat "" (List.map (fun (md, pt, n) -> ", " ^ param_decl st md pt n) ps) in
+          let args = String.concat "" (List.map (fun (_, _, n) -> ", " ^ n) ps) in
+          let recv = Printf.sprintf "*(%s*)b->data" cc in
+          let w = Printf.sprintf "vtw_%s__%s__%s" am cm (c_ident m) in
+          (if sig_can_fail_sg sg then begin
+             if sig_can_fail_sg impl_sg then
+               pr st.helpers "static uint8_t %s(%s* _out, StnError* _err, StnAnyBox* b%s) { return %s(_out, _err, %s%s); }\n" w ret plist iname recv args
+             else
+               pr st.helpers "static uint8_t %s(%s* _out, StnError* _err, StnAnyBox* b%s) { *_out = %s(%s%s); return 0; }\n" w ret plist iname recv args
+           end else
+             pr st.helpers "static %s %s(StnAnyBox* b%s) { return %s(%s%s); }\n" ret w plist iname recv args);
+          (m, w))
+        info.trmethods_
+    in
+    pr st.helpers "static const StnVt_%s %s = { %s };\n" am key
+      (if entries = [] then "0" else String.concat ", " (List.map (fun (m, w) -> Printf.sprintf ".%s = %s" (c_ident m) w) entries))
+  end;
+  key
+
 (* Some m when [e] calls a lend function (section 4.6) *)
 let lend_sig fc (e : texpr) : bool option =
   match e.e with
@@ -701,6 +775,15 @@ let rec expr fc (e : texpr) : r =
   | XNot a -> { c = Printf.sprintf "(!(%s))" (expr fc a).c; owned = false }
   | XTry a -> try_ fc t a
   | XConv a -> conv fc e a t
+  | XPack a ->
+      (* box the value once; the table says which methods to run (section 3.4) *)
+      let at = ts fc a.ty in
+      let vt = any_vtable fc.st t at in
+      let v = own fc (expr fc a) a.ty in
+      let b = fresh st "_b" in
+      line fc "StnAnyBox* %s = (StnAnyBox*)stn_alloc(sizeof(StnAnyBox) + sizeof(%s));" b (cty st at);
+      line fc "%s->release = anyrel_%s; *(%s*)%s->data = %s;" b (mangle at) (cty st at) b v;
+      { c = tmp fc t (Printf.sprintf "(%s){ %s, &%s }" (ct fc t) b vt); owned = true }
   | XFail a ->
       let at = ts fc a.ty in
       let v = own fc (expr fc a) a.ty in
@@ -822,6 +905,8 @@ and call fc (e : texpr) (cl : callee) (targs : targ list) convs : r =
       let tf = Hashtbl.find st.prog.fns uname in
       call_instance fc e uname tys tf.fsig targs convs
   | CBuiltin (name, tys) -> builtin fc e name (List.map (ts fc) tys) targs convs
+  | CTrait (tr, ta, m, self) when (match repr (ts fc self) with TAny _ -> true | _ -> false) ->
+      any_call fc e tr (List.map (ts fc) ta) m (ts fc self) targs convs
   | CTrait (tr, ta, m, self) -> (
       let self = ts fc self and ta = List.map (ts fc) ta in
       match Typecheck.impl_method_in st.prog.impls tr ta m self with
@@ -846,6 +931,33 @@ and call fc (e : texpr) (cl : callee) (targs : targ list) convs : r =
       fc.ind <- fc.ind - 1;
       line fc "}";
       { c = res; owned = true }
+
+(* a call of a trait method on a trait value: through the method table of its box *)
+and any_call fc (e : texpr) tr ta m (self : ty) (targs : targ list) convs : r =
+  let st = fc.st in
+  let t = ts fc e.ty in
+  ensure_type st self;
+  let info = Hashtbl.find st.prog.traits tr in
+  let sg = List.assoc m info.trmethods_ in
+  let s = List.combine info.trparams ta in
+  let ps = List.map (fun (md, _, pt, _) -> (md, subst s pt)) (List.tl sg.sparams) in
+  let recv = List.hd targs in
+  let rv = tmp fc self (borrow fc (expr fc recv.a) recv.a.ty) in
+  let avs = args_c fc ps (List.tl targs) in
+  let rest = String.concat "" (List.map (fun a -> ", " ^ a) avs) in
+  let fp = Printf.sprintf "%s.vt->%s" rv (c_ident m) in
+  if sig_can_fail_sg sg then begin
+    let res = fresh st "_r" and ev = fresh st "_e" in
+    line fc "%s %s; StnError %s;" (ct fc t) res ev;
+    line fc "if (__builtin_expect(%s(&%s, &%s, %s.box%s), 0)) {" fp res ev rv rest;
+    fc.ind <- fc.ind + 1;
+    apply_convs fc convs ev;
+    propagate fc ev;
+    fc.ind <- fc.ind - 1;
+    line fc "}";
+    { c = res; owned = true }
+  end else
+    { c = tmp fc t (Printf.sprintf "%s(%s.box%s)" fp rv rest); owned = true }
 
 and call_instance fc (e : texpr) uname tys (sg : fsig) targs convs : r =
   let st = fc.st in
@@ -1504,7 +1616,7 @@ and walk_texpr (fe : texpr -> unit) (fs : tstmt -> unit) (e : texpr) =
   | XLit _ | XNone | XVar _ | XFnRef _ -> ()
   | XFStr es | XTuple es | XArray es | XStruct (_, _, es) | XVariant (_, _, _, es) -> List.iter we es
   | XCall (cl, args, _) -> (match cl with CClosure f -> we f | _ -> ()); List.iter (fun a -> we a.a) args
-  | XField (b, _, _) | XTupleGet (b, _) | XNeg b | XNot b | XTry b | XConv b | XFail b -> we b
+  | XField (b, _, _) | XTupleGet (b, _) | XNeg b | XNot b | XTry b | XConv b | XFail b | XPack b -> we b
   | XIndex (a, b) | XBin (_, a, b) -> we a; we b
   | XSlice (a, b, c) | XIf (a, b, c) -> we a; we b; we c
   | XBlock (ss, v) -> List.iter ws ss; we v
@@ -1553,7 +1665,7 @@ and hoistable (v : var) (body : texpr list) : bool option =
     (match e.e with
      | XLit _ | XNone | XVar _ | XFnRef _ | XLambda _ | XCall _ -> ()
      | XFStr es | XTuple es | XArray es | XStruct (_, _, es) | XVariant (_, _, _, es) -> List.iter visit_child es
-     | XField (b, _, _) | XTupleGet (b, _) | XNeg b | XNot b | XTry b | XConv b | XFail b -> visit_child b
+     | XField (b, _, _) | XTupleGet (b, _) | XNeg b | XNot b | XTry b | XConv b | XFail b | XPack b -> visit_child b
      | XIndex (a, b) | XBin (_, a, b) -> visit_child a; visit_child b
      | XSlice (a, b, c) | XIf (a, b, c) -> visit_child a; visit_child b; visit_child c
      | XBlock (ss, x) -> List.iter st ss; visit_child x

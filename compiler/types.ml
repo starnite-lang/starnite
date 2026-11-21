@@ -23,6 +23,7 @@ type ty =
   | TParam of string
   | TVar of tvar ref
   | TErr of ty list               (* anonymous union of error types (section 5.4) *)
+  | TAny of string * ty list      (* trait value: any Figure (section 3.4) *)
 
 and fnty = { fps : (mode * ty) list; fret : ty; feff : eff }
 
@@ -83,6 +84,8 @@ let rec show_ty t =
   | TVar { contents = Unbound _ } -> "_"
   | TVar _ -> assert false
   | TErr ts -> String.concat " | " (List.map show_ty ts)
+  | TAny (n, []) -> "any " ^ n
+  | TAny (n, ts) -> "any " ^ n ^ "[" ^ String.concat ", " (List.map show_ty ts) ^ "]"
 
 (* Fully resolve type variables. *)
 let rec zonk t =
@@ -90,6 +93,7 @@ let rec zonk t =
   | TArray t -> TArray (zonk t)
   | TTuple ts -> TTuple (List.map zonk ts)
   | TNamed (n, ts) -> TNamed (n, List.map zonk ts)
+  | TAny (n, ts) -> TAny (n, List.map zonk ts)
   | TFn f -> TFn (zonk_fn f)
   | TErr ts -> TErr (List.map zonk ts)
   | t -> t
@@ -104,6 +108,7 @@ let rec subst (s : (string * ty) list) t =
   | TArray t -> TArray (subst s t)
   | TTuple ts -> TTuple (List.map (subst s) ts)
   | TNamed (n, ts) -> TNamed (n, List.map (subst s) ts)
+  | TAny (n, ts) -> TAny (n, List.map (subst s) ts)
   | TFn f ->
       TFn { fps = List.map (fun (m, t) -> (m, subst s t)) f.fps; fret = subst s f.fret;
             feff = { f.feff with errs = List.map (subst s) f.feff.errs } }
@@ -114,7 +119,7 @@ let rec occurs r t =
   match repr t with
   | TVar r' -> r == r'
   | TArray t -> occurs r t
-  | TTuple ts | TNamed (_, ts) | TErr ts -> List.exists (occurs r) ts
+  | TTuple ts | TNamed (_, ts) | TErr ts | TAny (_, ts) -> List.exists (occurs r) ts
   | TFn f -> List.exists (fun (_, t) -> occurs r t) f.fps || occurs r f.fret
   | _ -> false
 
@@ -125,9 +130,10 @@ let rec ty_equal a b =
   match (repr a, repr b) with
   | TInt x, TInt y -> x = y
   | TArray x, TArray y -> ty_equal x y
-  | TTuple xs, TTuple ys | TNamed (_, xs), TNamed (_, ys) | TErr xs, TErr ys ->
-      (match (repr a, repr b) with TNamed (n, _), TNamed (m, _) when n <> m -> false | _ ->
-        List.length xs = List.length ys && List.for_all2 ty_equal xs ys)
+  | TTuple xs, TTuple ys | TNamed (_, xs), TNamed (_, ys) | TErr xs, TErr ys | TAny (_, xs), TAny (_, ys) ->
+      (match (repr a, repr b) with
+       | TNamed (n, _), TNamed (m, _) | TAny (n, _), TAny (m, _) when n <> m -> false
+       | _ -> List.length xs = List.length ys && List.for_all2 ty_equal xs ys)
   | TParam x, TParam y -> x = y
   | TVar r, TVar r' -> r == r'
   | TFn f, TFn g ->
@@ -150,7 +156,7 @@ let rec unify a b =
     | TTuple xs, TTuple ys ->
         if List.length xs <> List.length ys then raise Mismatch;
         List.iter2 unify xs ys
-    | TNamed (n, xs), TNamed (m, ys) ->
+    | TNamed (n, xs), TNamed (m, ys) | TAny (n, xs), TAny (m, ys) ->
         if n <> m || List.length xs <> List.length ys then raise Mismatch;
         List.iter2 unify xs ys
     | TFn f, TFn g ->
@@ -219,6 +225,7 @@ and te =
   | XFail of texpr                       (* fail(e) *)
   | XComp of texpr * tcomp list          (* array comprehension *)
   | XNone
+  | XPack of texpr                       (* a value of a type implementing the trait, boxed as [ty] = any Trait *)
 
 and conv = { cfrom : ty; cfn : string; cto : ty }  (* From[cfrom] for cto, applied on propagation *)
 

@@ -20,6 +20,7 @@ type value =
   | VClosure of lambda * (int * value ref) list * (string * ty) list
   | VFn of string * ty list
   | VErr of ty * value           (* a member of an error union *)
+  | VAny of ty * value           (* a trait value: the hidden type and the value (section 3.4) *)
 
 exception Failed of ty * value
 exception Partial of value list * exn
@@ -260,6 +261,12 @@ and eval_call env (cl : callee) (targs : targ list) convs loc : value =
       | CTrait (tr, ta, m, self) ->
           let self = tsub env self in
           let ta = List.map (tsub env) ta in
+          (* a call through a trait value runs the method of the hidden type *)
+          let self, vals =
+            match (repr self, vals) with
+            | TAny _, VAny (hidden, inner) :: rest -> (hidden, inner :: rest)
+            | _ -> (self, vals)
+          in
           (match resolve env tr ta m self with
            | Some (f, ftys) ->
                let tf = Hashtbl.find env.prog.fns f in
@@ -485,6 +492,7 @@ and eval env (te : texpr) : value =
           let v = match repr ety with TErr _ -> VErr (t, v) | _ -> v in
           VVariant (1, [| v |]))
   | XConv a -> convert env (tsub env a.ty) (tsub env te.ty) (eval env a) te.l
+  | XPack a -> VAny (tsub env a.ty, eval env a)
   | XFail a -> (
       let v = eval env a in
       match v with

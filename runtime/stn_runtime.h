@@ -160,6 +160,16 @@ typedef struct StnClosure {
 
 static inline void stn_closure_drop(StnClosure* c) { stn_drop(c, c->release); }
 
+/* ---- trait values (section 3.4) ---- */
+/* The counted box behind `any Trait`: the value follows the header, and [release] drops
+   it and frees the box. The method table travels beside the box, in the value. */
+typedef struct StnAnyBox {
+    stn_header h;
+    void (*release)(void* self);
+    _Alignas(16) char data[];
+} StnAnyBox;
+static inline void stn_any_drop(StnAnyBox* b) { stn_drop(b, b->release); }
+
 /* ---- errors (section 5.4) ---- */
 typedef struct StnErrBox { stn_header h; void (*release)(void* self); } StnErrBox;
 typedef struct StnError { uint32_t type_id; StnErrBox* box; } StnError;

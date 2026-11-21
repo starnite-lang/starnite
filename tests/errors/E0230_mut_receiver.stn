@@ -1,0 +1,10 @@
+# expect: E0230 6:9
+trait Counter:
+    fn bump(mut c: Self) -> Int
+    fn name(x: Self) -> Str
+
+fn f(x: any Counter) -> Str:
+    x.name()
+
+fn main():
+    print("x")

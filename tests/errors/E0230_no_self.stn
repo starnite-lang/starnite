@@ -1,0 +1,10 @@
+# expect: E0230 6:9
+trait Maker:
+    fn make(seed: Int) -> Int
+    fn name(x: Self) -> Str
+
+fn f(x: any Maker) -> Str:
+    x.name()
+
+fn main():
+    print("x")

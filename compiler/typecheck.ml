@@ -21,6 +21,7 @@ type tables = {
   mutable lambdas : lambda list;
   mutable final_pass : bool;
   mutable decl_errors : (string * loc * string) list;
+  mutable any_uses : (string * loc) list;               (* every `any Trait` written, checked once traits are known *)
 }
 
 let builtin_prefix = "builtin:"
@@ -46,6 +47,7 @@ let rec head t =
   | TVar _ -> "_"
   | TNever -> "_"
   | TErr _ -> "_err"
+  | TAny _ -> "any"
 
 (* ---------- syntax types to types ---------- *)
 
@@ -71,7 +73,9 @@ let rec conv_ty tb (tps : string list) (self : ty option) (t : Syntax.ty) : ty =
                  | _ -> TNamed (n, args))
             | None -> err "E0101" l "unknown type '%s'" n)
   | TyPath (p, _, l) -> err "E0101" l "unknown type '%s' (modules arrive with imports)" (String.concat "." p)
-  | TyAny (n, _, l) -> err "E0230" l "trait values (any %s) are not implemented yet" n
+  | TyAny (n, args, l) ->
+      tb.any_uses <- (n, l) :: tb.any_uses;
+      TAny (n, List.map (conv_ty tb tps self) args)
   | TyFn (ps, ret, effs, _) ->
       let fps = List.map (fun (m, t) -> (m, conv_ty tb tps self t)) ps in
       let fret = match ret with Some r -> conv_ty tb tps self r | None -> TUnit in
@@ -130,6 +134,7 @@ let prim_traits t =
 let rec find_impl tb ?(bounds = []) trait (targs : ty list) self : resolution option =
   let self = repr self in
   match self with
+  | TAny (n, _) -> if n = trait then Some RPrim else None   (* any T implements T, through its table *)
   | TParam p -> (
       (* a bound of the enclosing generic function *)
       match List.assoc_opt p bounds with
@@ -450,7 +455,7 @@ let sub_exprs (e : texpr) : texpr list =
   | XLit _ | XNone | XVar _ | XFnRef _ | XLambda _ -> []
   | XFStr es | XTuple es | XArray es | XStruct (_, _, es) | XVariant (_, _, _, es) -> es
   | XCall (cl, args, _) -> (match cl with CClosure f -> [ f ] | _ -> []) @ List.map (fun a -> a.a) args
-  | XField (b, _, _) | XTupleGet (b, _) | XNeg b | XNot b | XTry b | XConv b | XFail b -> [ b ]
+  | XField (b, _, _) | XTupleGet (b, _) | XNeg b | XNot b | XTry b | XConv b | XFail b | XPack b -> [ b ]
   | XIndex (a, b) | XBin (_, a, b) -> [ a; b ]
   | XSlice (a, b, c) | XIf (a, b, c) -> [ a; b; c ]
   | XBlock (_, v) -> [ v ]
@@ -570,15 +575,26 @@ and check c (e : Syntax.expr) (expected : ty) : texpr =
   let te = check_or_infer c e (Some expected) in
   coerce c te expected
 
-(* Unify, applying the T -> T? coercion of section 5.3. *)
+(* Unify, applying the T -> T? coercion of section 5.3, and boxing into any Trait
+   where the expected type is a trait value (section 3.4). *)
 and coerce c (te : texpr) expected : texpr =
   match (repr expected, repr te.ty) with
   | _, TNever -> { te with ty = expected }
+  | TAny (tr, ta), found when (match found with TAny _ | TVar _ -> false | _ -> true) ->
+      (* a type parameter is checked through its bounds; any other type needs an impl
+         written in the program, since built-in implementations have no method table *)
+      let ok =
+        match repr found with
+        | TParam _ -> find_impl c.tb ~bounds:c.tparams tr ta found <> None
+        | _ -> List.exists (fun im -> im.itrait_ = tr && (let s = ref [] in match_ty (List.map fst im.itparams) s im.ifor_ found)) c.tb.impls
+      in
+      if not ok then err "E0204" te.l "%s has no impl of %s written in the program, so it cannot be used as %s" (show_ty found) tr (show_ty expected);
+      mk (XPack te) expected te.l
   | TNamed ("Option", [ inner ]), found
     when (match found with TNamed ("Option", _) | TVar _ -> false | _ -> true) ->
       (try unify expected found; te
        with Mismatch ->
-         unify_at te.l inner te.ty;
+         let te = coerce c te inner in
          mk (XVariant ("Option", [ inner ], 1, [ te ])) expected te.l)
   | _ ->
       unify_at te.l expected te.ty;
@@ -1120,6 +1136,7 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
                       match List.assoc_opt p c.tparams with
                       | Some bs -> List.exists (fun (t, _) -> t = tn) bs
                       | None -> false)
+                  | TAny (n, _) -> n = tn
                   | _ ->
                       List.exists (fun im -> im.itrait_ = tn && (let s = ref [] in match_ty (List.map fst im.itparams) s im.ifor_ self)) c.tb.impls
                       || (List.mem tn (prim_traits self))
@@ -1164,6 +1181,7 @@ and trait_call c l tn trargs m (sg : fsig) self (receiver : texpr option) args e
        | Some bs -> (match List.assoc_opt tn bs with Some bta -> List.iter2 (fun a b -> unify_at l a b) ta bta | None -> ())
        | None -> ())
    | TVar _ -> ()
+   | TAny (_, anyargs) -> List.iter2 (fun a b -> unify_at l a b) ta anyargs
    | t -> (
        let fits =
          List.filter_map
@@ -1768,6 +1786,7 @@ let rec zonk_e (te : texpr) : texpr =
     | XNot a -> XNot (z a)
     | XTry a -> XTry (z a)
     | XConv a -> XConv (z a)
+    | XPack a -> XPack (z a)
     | XFail a -> XFail (z a)
     | XComp (b, cs) -> XComp (z b, List.map (fun cp -> { cvar = zonk_p cp.cvar; csrc = zonk_it cp.csrc; ccond = Option.map z cp.ccond }) cs)
   in
@@ -2110,10 +2129,46 @@ let check_const tb n =
   if c.io || c.errs <> [] then err "E0503" e.loc "a constant cannot perform effects or fail";
   Hashtbl.replace tb.typed_consts n te
 
+(* A trait can be used with any only if every method takes Self as its first parameter,
+   has no type parameters of its own, and does not return Self (section 3.4). Methods
+   that take Self by mut or take are refused too: the box is shared. *)
+let validate_any_uses tb =
+  let rec mentions_self t =
+    match repr t with
+    | TParam "Self" -> true
+    | TArray t -> mentions_self t
+    | TTuple ts | TNamed (_, ts) | TErr ts | TAny (_, ts) -> List.exists mentions_self ts
+    | TFn f -> List.exists (fun (_, t) -> mentions_self t) f.fps || mentions_self f.fret
+    | _ -> false
+  in
+  let seen = Hashtbl.create 8 in
+  List.iter
+    (fun (tn, l) ->
+      match Hashtbl.find_opt tb.traits tn with
+      | None -> err "E0101" l "unknown trait '%s'" tn
+      | Some tr ->
+          let bad fmt = Printf.ksprintf (fun m -> err "E0230" l "%s cannot be used with any: %s" tn m) fmt in
+          if not (Hashtbl.mem seen tn) then begin
+            Hashtbl.replace seen tn ();
+            List.iter
+              (fun (m, (sg : fsig)) ->
+                (match sg.sparams with
+                 | (md, _, t, _) :: rest ->
+                     if (match repr t with TParam "Self" -> false | _ -> true) then bad "method %s must take Self as its first parameter" m;
+                     if md <> MBorrow then bad "method %s takes Self by %s" m (if md = MMut then "mut" else "take");
+                     if List.exists (fun (_, _, t, _) -> mentions_self t) rest then bad "method %s mentions Self in another parameter" m
+                 | [] -> bad "method %s takes no Self parameter" m);
+                if mentions_self sg.sret then bad "method %s returns Self" m;
+                if sg.slend <> None then bad "method %s lends a place, which a method table cannot hand out" m;
+                if List.length sg.stparams > List.length tr.trparams then bad "method %s has type parameters of its own" m)
+              tr.trmethods_
+          end)
+    (List.rev tb.any_uses)
+
 let new_tables () =
   { decls = Hashtbl.create 64; variants = Hashtbl.create 64; fns = Hashtbl.create 64; by_name = Hashtbl.create 64;
     bodies = Hashtbl.create 64; traits = Hashtbl.create 16; impls = []; consts = Hashtbl.create 8;
-    typed_consts = Hashtbl.create 8; lambdas = []; final_pass = false; decl_errors = [] }
+    typed_consts = Hashtbl.create 8; lambdas = []; final_pass = false; decl_errors = []; any_uses = [] }
 
 (* Check a whole program (the prelude plus one module). Effects of private functions are
    inferred by iterating to a fixpoint (section 7.2). *)
@@ -2122,6 +2177,7 @@ let check_program (prelude : Syntax.file) (user : Syntax.file) : tprog =
   let mods = [ ("core", prelude); (module_name user.path, user) ] in
   List.iter (fun (m, f) -> declare_types tb m f.items) mods;
   List.iter (fun (m, f) -> declare_items tb m f.items) mods;
+  validate_any_uses tb;
   Hashtbl.iter (fun n _ -> check_const tb n) tb.consts;
   let order = List.concat_map (fun (m, f) -> List.concat_map (function
       | IFn fd when fd.fbody <> None -> List.filter (fun u -> (Hashtbl.find tb.fns u).sloc == fd.floc) (Hashtbl.find tb.by_name fd.fname)

@@ -1,0 +1,4 @@
+# expect: E0204 3:23
+fn main():
+    let s: any Show = 5
+    print("x")
