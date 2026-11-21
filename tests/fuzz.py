@@ -216,8 +216,15 @@ class Gen:
         return "\n".join(out) + "\n"
 
 
+class Hang(Exception):
+    pass
+
+
 def run(args, path):
-    p = subprocess.run([STARNITE] + args + [path], capture_output=True, text=True, timeout=120)
+    try:
+        p = subprocess.run([STARNITE] + args + [path], capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        raise Hang(" ".join(args))
     return p.returncode, p.stdout + p.stderr
 
 
@@ -236,13 +243,22 @@ def main():
             path = os.path.join(tmp, f"fuzz{i}.stn")
             with open(path, "w") as f:
                 f.write(prog)
-            ci, oi = run(["check"], path)
-            if ci != 0:
+            try:
+                ci, oi = run(["check"], path)
+                if ci == 0:
+                    ri, out_i = run(["run", "--interp"], path)
+                    rc, out_c = run(["run"], path)
+            except Hang as h:
+                # a hang is a failure too; keep the program that caused it
+                failures += 1
+                print(f"case {seed + i}: '{h}' timed out")
+                ci = None
+            if ci is None:
+                pass
+            elif ci != 0:
                 failures += 1
                 print(f"case {seed + i}: the generator produced a program the checker rejects:\n{oi}")
             else:
-                ri, out_i = run(["run", "--interp"], path)
-                rc, out_c = run(["run"], path)
                 if ri != rc or out_i != out_c:
                     failures += 1
                     print(f"case {seed + i}: interpreter (exit {ri}) and C (exit {rc}) differ")

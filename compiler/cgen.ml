@@ -661,16 +661,9 @@ let rec expr fc (e : texpr) : r =
   | XComp (body, comps) ->
       let elt = match repr t with TArray et -> et | _ -> assert false in
       let a = fresh st "_t" in
-      let cap =
-        match comps with
-        | [ { csrc = IArray (src, _); ccond = None; _ } ] -> Some src
-        | _ -> None
-      in
-      (match cap with
-       | Some src ->
-           let sv = borrow fc (expr fc src) src.ty in
-           line fc "StnArray* %s = stn_array_new(%s, (%s)->len > 0 ? (%s)->len : 1);" a (elem_ops st elt) sv sv
-       | None -> line fc "StnArray* %s = stn_array_new(%s, 4);" a (elem_ops st elt));
+      (* the result grows by doubling; sizing it up front from the source would evaluate
+         the source twice *)
+      line fc "StnArray* %s = stn_array_new(%s, 4);" a (elem_ops st elt);
       let rec go = function
         | [] ->
             push fc FStmt;

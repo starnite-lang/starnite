@@ -214,11 +214,25 @@ let raw_lex (file : string) (src : string) ?(line0 = 1) ?(col0 = 1) () : raw lis
           let st = !i in
           let depth = ref 0 in
           while !i < n && not (src.[!i] = '}' && !depth = 0) do
-            if src.[!i] = '{' then incr depth;
-            if src.[!i] = '}' then decr depth;
-            if src.[!i] = '\n' then error "E0100" l "unterminated interpolation";
-            incr i
+            let ch = src.[!i] in
+            if ch = '\n' then error "E0100" l "unterminated interpolation";
+            if ch = '"' || ch = '\'' then begin
+              (* braces inside a string or character literal do not count *)
+              incr i;
+              while !i < n && src.[!i] <> ch do
+                if src.[!i] = '\n' then error "E0100" l "unterminated interpolation";
+                if src.[!i] = '\\' then incr i;
+                incr i
+              done;
+              if !i >= n then error "E0100" l "unterminated interpolation";
+              incr i
+            end else begin
+              if ch = '{' then incr depth;
+              if ch = '}' then decr depth;
+              incr i
+            end
           done;
+          if !i >= n then error "E0100" l "unterminated interpolation";
           parts := RExpr (String.sub src st (!i - st), el) :: !parts;
           incr i
         end else (Buffer.add_char buf ch; incr i)
@@ -252,6 +266,7 @@ let raw_lex (file : string) (src : string) ?(line0 = 1) ?(col0 = 1) () : raw lis
     else if c = '\'' then begin
       let l = loc_at !i in
       incr i;
+      if !i >= n || src.[!i] = '\n' then error "E0100" l "unterminated character literal";
       let code =
         if peek 0 = '\\' then (incr i; read_escape l)
         else begin

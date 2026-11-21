@@ -27,3 +27,12 @@ fn main():
     for y in mut ys:
         y = y + "!"
     print(f"{ys} {count}")
+    # braces inside literals do not end an interpolation
+    print(f"{'}'} {"{x}"} {len("}}")}")
+    # a comprehension evaluates its source once (found by tests/fuzz.py)
+    var calls = 0
+    fn source() -> Array[Int]:
+        calls += 1
+        [1, 2]
+    let squares = [x * x for x in source()]
+    print(f"{squares} {calls}")

@@ -4,8 +4,9 @@
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 starnite=${STARNITE:-"$here/../_build/default/compiler/main.exe"}
-out=${TMPDIR:-/tmp}/starnite-bench
-mkdir -p "$out"
+# a private directory of our own, never a fixed shared path
+out=$(mktemp -d "${TMPDIR:-/tmp}/starnite-bench.XXXXXXXX")
+trap 'rm -rf "$out"' EXIT
 best() { # best of 3 wall-clock runs, in seconds
     b=999
     for _ in 1 2 3; do

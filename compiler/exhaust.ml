@@ -7,13 +7,26 @@ type ctor = KVariant of int | KLit of string | KSingle | KErr of string
 
 type cpat = W | C of ctor * cpat list
 
+(* One key per value, so that 1 and 0x1, or two F32 literals that round alike, or 0.0
+   and -0.0, are the same constructor. *)
+let lit_key (l : Syntax.lit) (t : ty) =
+  let float_key f =
+    let f = match repr t with TF32 -> Values.f32_round f | _ -> f in
+    if f = 0.0 then "f0" else Printf.sprintf "f%h" f
+  in
+  match (l, repr t) with
+  | LInt s, (TFloat | TF32) -> float_key (float_of_string s)
+  | LInt s, _ -> "i" ^ Int64.to_string (Values.parse_int_lit s)
+  | LFloat f, _ -> float_key f
+  | LStr s, _ -> "s" ^ s
+  | LChar c, _ -> "c" ^ string_of_int c
+  | _ -> "?"
+
 let rec of_tpat = function
   | TPWild | TPVar _ -> W
   | TPLit (LBool b, _) -> C (KVariant (if b then 1 else 0), [])
   | TPLit (LUnit, _) -> C (KSingle, [])
-  | TPLit (l, _) -> C (KLit (match l with
-      | LInt s -> s | LFloat f -> string_of_float f | LStr s -> "\"" ^ s | LChar c -> "'" ^ string_of_int c
-      | _ -> "?"), [])
+  | TPLit (l, t) -> C (KLit (lit_key l t), [])
   | TPVariant (_, _, i, ps) -> C (KVariant i, List.map of_tpat ps)
   | TPStruct (_, _, ps) | TPTuple ps -> C (KSingle, List.map of_tpat ps)
   | TPErrType (t, p) -> C (KErr (show_ty t), [ of_tpat p ])
@@ -84,6 +97,9 @@ let rec witness decls (rows : cpat list list) (t : ty) : string option =
                 let args =
                   match ats with
                   | [] -> ""
+                  (* nothing matches this constructor at all: any arguments will do,
+                     and recursing into a recursive type would not terminate *)
+                  | _ when sub = [] -> "(" ^ String.concat ", " (List.map (fun _ -> "_") ats) ^ ")"
                   | [ at ] -> (match witness decls (List.map (function [ p ] -> [ p ] | p :: _ -> [ p ] | [] -> [ W ]) sub) at with Some w -> "(" ^ w ^ ")" | None -> "(_)")
                   | _ -> "(" ^ String.concat ", " (List.map (fun _ -> "_") ats) ^ ")"
                 in

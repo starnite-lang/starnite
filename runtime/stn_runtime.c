@@ -17,8 +17,9 @@ typedef struct stn_free_node { struct stn_free_node* next; } stn_free_node;
 static stn_free_node* stn_free_lists[STN_CLASSES + 1];
 
 void* stn_alloc(size_t size) {
-    size_t cls = (size + 15) / 16;
     stn_header* h;
+    /* compare before rounding up, so a huge size cannot wrap into a small class */
+    size_t cls = size <= (size_t)STN_CLASSES * 16 ? (size + 15) / 16 : STN_CLASSES + 1;
     if (cls <= STN_CLASSES) {
         if (cls == 0) cls = 1;
         stn_free_node* n = stn_free_lists[cls];
@@ -45,9 +46,14 @@ void stn_free(void* p) {
     size_t cls = h->size_class;
 #ifdef STN_DEBUG
     stn_live_objects--;
-    /* freed memory is poisoned; the header is marked so a later drop is caught */
+    /* Freed memory is poisoned and held in a quarantine, so a later drop of the same
+       object reads the poison rather than memory malloc has reused. */
     if (cls) memset(h, 0xDB, cls * 16); else memset(h, 0xDB, sizeof(stn_header));
-    free(h);
+    static void* quarantine[1 << 16];
+    static size_t next = 0;
+    if (quarantine[next]) free(quarantine[next]);
+    quarantine[next] = h;
+    next = (next + 1) % (sizeof quarantine / sizeof quarantine[0]);
     return;
 #endif
     if (cls) {
