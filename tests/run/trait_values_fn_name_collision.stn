@@ -1,0 +1,26 @@
+# A user type whose name is the generated C name of a function type. `fn(Int) -> Int` is named
+# Fn followed by a digest; a type of that name must not share its trait value or method table.
+trait Make[F]:
+    fn id(m: Self) -> Int
+
+type Maker = struct(n: Int)
+type Fnbbde85fbaa6fffb0 = struct(k: Int)
+type FnCall = struct(k: Int)
+
+impl Make[fn(Int) -> Int] for Maker:
+    fn id(m: Maker) -> Int:
+        1
+
+impl Make[Fnbbde85fbaa6fffb0] for Maker:
+    fn id(m: Maker) -> Int:
+        2
+
+impl Make[FnCall] for Maker:
+    fn id(m: Maker) -> Int:
+        3
+
+fn main() ! io:
+    let a: any Make[fn(Int) -> Int] = Maker(3)
+    let b: any Make[Fnbbde85fbaa6fffb0] = Maker(3)
+    let c: any Make[FnCall] = Maker(3)
+    print(f"{a.id()} {b.id()} {c.id()}")

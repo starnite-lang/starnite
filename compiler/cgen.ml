@@ -39,7 +39,7 @@ let pr buf fmt = Printf.bprintf buf fmt
 
 (* A name chosen in the program, as part of a C name. The C names join their parts with
    an underscore, so a name that has one, or that reads like a part of the scheme (Arr,
-   Any, E, Tup2, ...), is spelled out instead: Zq, then the name with Z written ZZ and
+   Any, E, Tup2, anything starting with Fn or with a lower-case letter, ...), is spelled out instead: Zq, then the name with Z written ZZ and
    an underscore Zu. A plain name never starts with Z, so the two kinds cannot meet,
    and two different types or traits always get different C names. *)
 let mangle_name n =
@@ -51,6 +51,11 @@ let mangle_name n =
   in
   let plain =
     n <> "" && n.[0] <> 'Z'
+    (* Fn followed by a digest is how a function type is named *)
+    && not (String.length n >= 2 && String.sub n 0 2 = "Fn")
+    (* a C name is stn_ and the name, and the runtime's own names (stn_header, stn_alloc, ...)
+       start with a lower-case letter after it *)
+    && not (n.[0] >= 'a' && n.[0] <= 'z')
     && String.for_all (fun c -> (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) n
     && (not (List.mem n reserved)) && not is_tuple_word
   in

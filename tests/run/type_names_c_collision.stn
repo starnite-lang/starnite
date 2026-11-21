@@ -1,0 +1,52 @@
+# Type and trait names that would collide with names in the generated C or in the runtime:
+# runtime symbols (stn_header, stn_alloc, stn_free), parts of the naming scheme (Arr, Any, E,
+# Tup2), names with an underscore, and names that start with Z, the escape letter.
+type header = struct(x: Int)
+type alloc = struct(y: Int)
+type free = Leaf(v: Int) | Empty
+type drop[T] = struct(item: T)
+type Arr = struct(a: Int)
+type E = struct(e: Int)
+type Tup2 = struct(t: Int)
+type Any = struct(n: Int)
+type Zebra = struct(z: Int)
+type Zq = struct(q: Int)
+type Zqx = struct(x: Int)
+type Z_a = struct(a: Int)
+type A_B = struct(ab: Int)
+
+trait Lab_el:
+    fn name(x: Self) -> Str
+
+impl Lab_el for header:
+    fn name(x: header) -> Str:
+        "header"
+
+impl Lab_el for Zq:
+    fn name(x: Zq) -> Str:
+        "Zq"
+
+impl Lab_el for A_B:
+    fn name(x: A_B) -> Str:
+        "A_B"
+
+fn main() ! io:
+    let h = header(1)
+    let a = alloc(2)
+    let f: free = Leaf(3)
+    let d = drop(Arr(4))
+    print(f"{h.x} {a.y} {d.item.a}")
+    match f:
+        Leaf(v) -> print(f"leaf {v}")
+        Empty -> print("empty")
+    let e = E(5)
+    let t = Tup2(6)
+    let n = Any(7)
+    print(f"{e.e} {t.t} {n.n}")
+    let z = Zebra(8)
+    let q = Zqx(9)
+    let za = Z_a(10)
+    print(f"{z.z} {q.x} {za.a}")
+    let xs: Array[any Lab_el] = [header(1), Zq(2), A_B(3)]
+    for x in xs:
+        print(x.name())
