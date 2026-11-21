@@ -276,6 +276,7 @@ and dup_stmt st t e =
 and drop_stmt st t e =
   match repr t with
   | TNamed ("__cell", [ ct_ ]) -> Printf.sprintf "stn_drop(%s, release_cell_%s);" e (mangle ct_)
+  | TNamed ("__unbusy", _) -> Printf.sprintf "%s->busy = 0;" e
   | TStr -> Printf.sprintf "STN_STR_DROP(%s);" e
   | TArray _ -> Printf.sprintf "stn_drop(%s, stn_array_release);" e
   | TFn _ -> Printf.sprintf "stn_closure_drop(%s);" e
@@ -759,7 +760,7 @@ and args_c fc (params : (mode * ty) list) (targs : targ list) : string list =
   List.map2
     (fun (m, pt) ta ->
       match m with
-      | MMut -> "&" ^ place_lvalue_of_expr fc ta.a
+      | MMut -> let lv = place_lvalue_of_expr fc ta.a in hold_busy fc ta.a; "&" ^ lv
       | MTake -> tmp fc ta.a.ty (own fc (expr fc ta.a) ta.a.ty)
       | MBorrow ->
           let x = expr fc ta.a in
@@ -1265,10 +1266,29 @@ and place_lvalue_of_expr fc (e : texpr) : string =
     | _ -> None
   in
   match to_place e with
-  | Some p -> place_lvalue fc p
+  | Some p ->
+      (match cell_root fc e with
+       | Some (c, l) -> line fc "if (%s->busy) stn_trap(\"shared cell busy\", %s, \"a shared cell was accessed while it was lent out\");" c (loc_args l)
+       | None -> ());
+      place_lvalue fc p
   | None ->
       (* not a place (cannot happen after type checking): pass a temporary *)
       tmp fc e.ty (own fc (expr fc e) e.ty)
+
+(* the cell behind a place expression, with the location of its root *)
+and cell_root fc (e : texpr) : (string * Syntax.loc) option =
+  match e.e with
+  | XVar v -> if is_cell fc v then Some (cell_ptr fc v, e.l) else None
+  | XField (b, _, _) | XTupleGet (b, _) | XIndex (b, _) -> cell_root fc b
+  | _ -> None
+
+(* a long access (section 13.3): the cell stays busy until the enclosing frame ends *)
+and hold_busy fc (e : texpr) =
+  match cell_root fc e with
+  | Some (c, _) ->
+      line fc "%s->busy = 1;" c;
+      (match fc.frames with f :: _ -> f.owned <- (c, TNamed ("__unbusy", [])) :: f.owned | [] -> ())
+  | None -> ()
 
 (* ---------- loops ---------- *)
 
@@ -1294,7 +1314,9 @@ and loop_over fc (src : titer) (p : tpat) (body : unit -> unit) =
   | IArray (a, MMut) -> (
       match p with
       | TPVar var ->
+          push fc FScope;
           let lv = place_lvalue_of_expr fc a in
+          hold_busy fc a;
           let et = match repr (ts fc a.ty) with TArray et -> et | _ -> assert false in
           let i = fresh st "_i" in
           line fc "for (int64_t %s = 0; %s < (%s)->len; %s++) {" i i lv i;
@@ -1309,7 +1331,8 @@ and loop_over fc (src : titer) (p : tpat) (body : unit -> unit) =
           pop fc;
           pop fc;
           fc.ind <- fc.ind - 1;
-          line fc "}"
+          line fc "}";
+          pop fc
       | _ -> unsupported a.l "for ... in mut with a pattern")
   | IArray (a, _) ->
       let et = match repr (ts fc a.ty) with TArray et -> et | _ -> assert false in

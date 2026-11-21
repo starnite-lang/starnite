@@ -1,0 +1,8 @@
+# A closure that reaches a cell while a 'for ... in mut' lends it traps (section 13.3).
+fn main():
+    var ys = ["p", "q", "r"]
+    let f = fn(): ys.clear()
+    for y in mut ys:
+        f()
+        y = y + "!"
+    print(f"{ys}")

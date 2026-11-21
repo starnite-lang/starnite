@@ -91,9 +91,16 @@ Strings are always heap buffers. The 15-byte inline form arrives with the layout
 
 | Benchmark | Starnite / C |
 |---|---|
-| centroid | 0.9x |
 | Mandelbrot | 1.1x |
-| n-body | 1.5x |
+| centroid | 1.4x |
+| n-body | 1.4x |
 | spectral norm | 2.0x |
 
-n-body and spectral norm pay for bounds checks and overflow checks in their inner loops. Removing those checks is milestone 5's interval analysis (sections 17.1 and 17.2), so their gates are not met yet.
+Only Mandelbrot meets the gate. n-body and spectral norm pay for bounds checks and overflow checks in their inner loops, and removing those is milestone 5's interval analysis (sections 17.1 and 17.2). centroid runs for about 40 ms, so its ratio is noisy.
+
+## Reading of the specification
+
+Two choices here are interpretations where the draft is silent or in tension:
+
+- Section 2.1 makes a line that starts with `-` continue the previous line, but section 5.5's patterns include negative literals. A line starting with `-` therefore starts a new line when it is a match arm, meaning it contains `->` outside brackets. Every other such line continues, as section 2.1 says.
+- Section 13.3 gives the busy flag of a shared cell only for long accesses. This compiler also counts a `for ... in mut` over a cell as a long access, and clears the flag when the statement ends. A closure that reaches the array during the loop traps instead of reading freed memory. A direct use of the array in the loop body is rejected at compile time with E0323.

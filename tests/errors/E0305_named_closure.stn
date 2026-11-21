@@ -1,0 +1,7 @@
+# expect: E0305 7:15
+fn g(mut xs: Array[Str], f: fn() -> Unit):
+    f()
+fn main():
+    var ys = ["pq"]
+    let f = fn(): ys.push("zz")
+    g(mut ys, f)

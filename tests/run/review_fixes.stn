@@ -1,0 +1,29 @@
+# Regressions from the review of starnite-lang/starnite#1.
+fn name(n: Int) -> Str:
+    # a match arm may start with a negative literal (lexer continuation rule)
+    match n:
+        0 -> "zero"
+        -1 -> "minus one"
+        _ -> "other"
+
+fn g(mut xs: Array[Str], f: fn() -> Unit):
+    xs.push("a")
+    f()
+
+fn main():
+    print(f"{name(-1)} {name(0)} {name(5)}")
+    # NaN orders the same way on both backends
+    let n = 0.0 / 0.0
+    var fs = [3.0, n, 1.0]
+    sort(mut fs)
+    print(f"{max(n, 1.0)} {min(n, 1.0)} {fs}")
+    print(f"{3min} {2kib}")
+    # a shared cell is free again once the statement that lent it ends
+    var ys = ["p"]
+    var count = 0
+    let tick = fn(): count += 1
+    let closures = [tick]
+    g(mut ys, closures[0])
+    for y in mut ys:
+        y = y + "!"
+    print(f"{ys} {count}")

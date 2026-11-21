@@ -257,6 +257,8 @@ type fctx = {
   mutable obligations : (ty * string * ty list * loc) list;
   mutable unsolved : (ty * loc) list;
   mutable moved : (int * loc) list;        (* variables moved by an explicit take (section 4.2) *)
+  mutable lent : (int * loc) list;         (* roots iterated by an enclosing 'for ... in mut' *)
+  closure_caps : (int, var list) Hashtbl.t;  (* captures of closures bound to names *)
   fname : string;
   self_ty : ty option;
 }
@@ -417,6 +419,12 @@ let instantiate (sg : fsig) =
 
 let defaults_table : (string, Syntax.expr option list) Hashtbl.t = Hashtbl.create 16
 
+let check_not_lent c l (v : var) =
+  match List.assoc_opt v.vid c.lent with
+  | Some (fl : loc) ->
+      err "E0323" l "'%s' is lent element by element by the 'for ... in mut' at line %d; the loop body cannot use it" v.vname fl.line
+  | None -> ()
+
 let union_moved a b = a @ List.filter (fun (id, _) -> not (List.mem_assoc id a)) b
 
 (* a variable from outside a loop, moved inside it, would be used again on the next pass *)
@@ -475,6 +483,11 @@ and check_or_infer c (e : Syntax.expr) (expected : ty option) : texpr =
   | Lit LUnit -> unit_e l
   | Lit (LDur (n, u)) ->
       let t = if List.mem u [ "b"; "kib"; "mib"; "gib" ] then TBytes else TDur in
+      (* the scaled value (nanoseconds or bytes) must fit in 64 bits *)
+      let scaled = Values.dur_value n u in
+      let unit_ = Values.dur_value 1L u in
+      if Int64.compare n 0L < 0 || (unit_ > 1L && Int64.compare n (Int64.div Int64.max_int unit_) > 0) || Int64.compare scaled 0L < 0 then
+        err "E0201" l "%Ld%s does not fit in %s" n u (show_ty t);
       mk (XLit (LDur (n, u))) t l
   | FStr parts ->
       let ps =
@@ -571,6 +584,7 @@ and infer_name c l n exp : texpr =
        | Some ml ->
            err "E0302" l "'%s' is used after 'take %s' at line %d; the value has moved" n n ml.line
        | None -> ());
+      check_not_lent c l v;
       mk (XVar v) v.vty l
   | None -> (
       match Hashtbl.find_opt c.tb.variants n with
@@ -738,12 +752,15 @@ and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : 
             List.iteri
               (fun j tb ->
                 if i <> j then
-                  match tb.a.e with
-                  | XLambda lam ->
-                      let (r, _) = p in
-                      if List.exists (fun v -> v.vid = r) lam.lcaps then
-                        err "E0305" tb.a.l "this closure captures a variable passed as mut to the same call"
-                  | _ -> ())
+                  let caps =
+                    match tb.a.e with
+                    | XLambda lam -> lam.lcaps
+                    | XVar v -> (try Hashtbl.find c.closure_caps v.vid with Not_found -> [])
+                    | _ -> []
+                  in
+                  let (r, _) = p in
+                  if List.exists (fun v -> v.vid = r) caps then
+                    err "E0305" tb.a.l "this closure captures a variable passed as mut to the same call")
               all
         | None -> ())
     all;
@@ -1146,6 +1163,7 @@ and place_of c (e : Syntax.expr) : place =
     | Name n -> (
         match lookup c n with
         | Some v ->
+            check_not_lent c e.loc v;
             if not (v.vmut || v.vkind = VParam MMut) then
               err "E0103" e.loc "'%s' is not mutable; declare it with var" n;
             { root = v; path = []; pty = v.vty }
@@ -1396,6 +1414,10 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
         | None -> infer c e
       in
       let tp = check_pat c p te.ty false in
+      (match (tp, te.e) with
+       | TPVar v, XLambda lam -> Hashtbl.replace c.closure_caps v.vid lam.lcaps
+       | TPVar v, XVar w when Hashtbl.mem c.closure_caps w.vid -> Hashtbl.replace c.closure_caps v.vid (Hashtbl.find c.closure_caps w.vid)
+       | _ -> ());
       (match p.p with
        | PVar _ | PWild | PTuple _ -> ()
        | _ -> Exhaust.check c.tb.decls (zonk te.ty) [ (tp, false) ] l [ l ]);
@@ -1442,7 +1464,12 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
       in
       c.loops <- c.loops + 1;
       let before = c.moved in
+      (* each element is lent as a mut place: the body must not touch the array itself *)
+      let rec root (e : Syntax.expr) = match e.d with Name n -> lookup c n | Field (b, _) | Bracket (b, _) -> root b | _ -> None in
+      let saved_lent = c.lent in
+      (if m = MMut then match root it with Some v -> c.lent <- (v.vid, it.loc) :: c.lent | None -> ());
       let tb = check_block c body None l in
+      c.lent <- saved_lent;
       c.loops <- c.loops - 1;
       pop_frame c;
       (* checked after the loop variable's frame is gone: it is fresh on every pass *)
@@ -1477,6 +1504,7 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
       if c.tb.final_pass then c.tb.lambdas <- lam :: c.tb.lambdas;
       let v = new_var fd.fname (TFn fty) false VLocal in
       bind c v l;
+      Hashtbl.replace c.closure_caps v.vid lam.lcaps;
       mks (SLocalFn (v, lam))
   | Lend _ -> err "E0320" l "lend functions (section 4.6) are not implemented yet"
   | Resume _ -> err "E0100" l "resume arrives with handlers in milestone 4"
@@ -1763,7 +1791,7 @@ let new_ctx tb (sg : fsig) self : fctx =
   { tb; frames = [ { vars = []; lam = None } ]; tparams = sg.stparams; ret = sg.sret; errs = []; io = false;
     in_try = 0; loops = 0;
     declared = (if sg.sdeclared && (sg.seff.errs <> [] || sg.sexport) then Some sg.seff.errs else None);
-    obligations = []; unsolved = []; moved = []; fname = sg.sdisplay; self_ty = self }
+    obligations = []; unsolved = []; moved = []; lent = []; closure_caps = Hashtbl.create 8; fname = sg.sdisplay; self_ty = self }
 
 let finish_ctx c l =
   List.iter

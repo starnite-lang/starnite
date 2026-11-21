@@ -35,6 +35,13 @@ type env = {
 }
 
 let out = Buffer.create 65536
+
+(* Shared cells currently lent out by a long access (section 13.3), by identity. Each
+   statement restores the list when it ends, as the C backend clears busy flags when
+   the statement's frame ends. *)
+let busy : value ref list ref = ref []
+
+let cell_busy_trap l what = trap "shared cell busy" l ("a shared cell was " ^ what ^ " while it was lent out")
 let flush_out () = print_string (Buffer.contents out); Buffer.clear out; flush stdout
 
 let tsub env t = subst env.sub t
@@ -64,7 +71,9 @@ let rec values_equal a b =
 let compare_values (t : ty) a b =
   match (repr t, a, b) with
   | TInt k, VInt x, VInt y -> compare_int k x y
-  | (TFloat | TF32), VFloat x, VFloat y -> compare x y
+  | (TFloat | TF32), VFloat x, VFloat y ->
+      (* as the C backend: (x > y) - (x < y), so NaN compares equal to everything *)
+      (if x > y then 1 else 0) - (if x < y then 1 else 0)
   | TStr, VStr x, VStr y -> compare x y
   | _, VChar x, VChar y -> compare x y
   | _, VBool x, VBool y -> compare x y
@@ -80,6 +89,40 @@ let utf8_chars s =
   go 0 []
 
 let char_str c = let b = Buffer.create 4 in Lexer.utf8_encode b c; Buffer.contents b
+
+(* the same limit as STN_MAX_ALLOC in the runtime *)
+let max_alloc = Int64.shift_left 1L 40
+let too_large loc = trap "allocation too large" loc "the requested size is too large"
+
+(* The same rule as stn_str_from_bytes in the runtime: bytes that do not start a
+   well-formed UTF-8 sequence become U+FFFD. *)
+let sanitize_utf8 (s : string) : string =
+  let n = String.length s in
+  let b = Buffer.create n in
+  let i = ref 0 in
+  while !i < n do
+    let c = Char.code s.[!i] in
+    if c < 0x80 then (Buffer.add_char b s.[!i]; incr i)
+    else begin
+      let len, min, cp0 =
+        if c >= 0xC2 && c <= 0xDF then (2, 0x80, c land 0x1F)
+        else if c >= 0xE0 && c <= 0xEF then (3, 0x800, c land 0x0F)
+        else if c >= 0xF0 && c <= 0xF4 then (4, 0x10000, c land 0x07)
+        else (0, 0, 0)
+      in
+      let ok = ref (len > 0 && !i + len <= n) and cp = ref cp0 in
+      for k = 1 to len - 1 do
+        if !ok then begin
+          let d = Char.code s.[!i + k] in
+          if d land 0xC0 <> 0x80 then ok := false else cp := (!cp lsl 6) lor (d land 0x3F)
+        end
+      done;
+      if !ok && (!cp < min || !cp > 0x10FFFF || (!cp >= 0xD800 && !cp <= 0xDFFF)) then ok := false;
+      if !ok then (Buffer.add_string b (String.sub s !i len); i := !i + len)
+      else (Buffer.add_string b "\xEF\xBF\xBD"; incr i)
+    end
+  done;
+  Buffer.contents b
 
 let is_boundary s i = i = String.length s || i = 0 || (Char.code s.[i] land 0xC0 <> 0x80)
 
@@ -147,7 +190,7 @@ and apply_convs env (convs : conv list) f =
 
 and eval_call env (cl : callee) (targs : targ list) convs loc : value =
   apply_convs env convs (fun () ->
-      let places = List.map (fun ta -> if ta.amode = MMut then Some (place_of_expr env ta.a) else None) targs in
+      let places = List.map (fun ta -> if ta.amode = MMut then (let p = place_of_expr env ta.a in hold_busy env ta.a; Some p) else None) targs in
       let vals =
         match cl with
         | CClosure _ -> []
@@ -236,7 +279,19 @@ and binop env op (t : ty) a b loc : value =
 (* ---------- places ---------- *)
 
 (* get and set functions for a place expression *)
+and cell_root env (e : texpr) : (value ref * Syntax.loc) option =
+  match e.e with
+  | XVar v when v.vcell -> Some (get_var env v, e.l)
+  | XField (b, _, _) | XTupleGet (b, _) | XIndex (b, _) -> cell_root env b
+  | _ -> None
+
+and hold_busy env (e : texpr) =
+  match cell_root env e with Some (r, _) -> busy := r :: !busy | None -> ()
+
 and place_of_expr env (e : texpr) : (unit -> value) * (value -> unit) =
+  (match cell_root env e with
+   | Some (r, l) when List.memq r !busy -> cell_busy_trap l "accessed"
+   | _ -> ());
   match e.e with
   | XVar v ->
       let r = get_var env v in
@@ -297,7 +352,10 @@ and eval env (te : texpr) : value =
       | LUnit -> VUnit
       | LDur (n, u) -> VInt (dur_value n u))
   | XFStr ps -> VStr (String.concat "" (List.map (fun p -> as_str (eval env p)) ps))
-  | XVar v -> !(get_var env v)
+  | XVar v ->
+      let r = get_var env v in
+      if v.vcell && List.memq r !busy then cell_busy_trap te.l "accessed";
+      !r
   | XFnRef (n, ts) -> VFn (n, List.map (tsub env) ts)
   | XCall (cl, args, convs) -> eval_call env cl args convs te.l
   | XField (b, i, _) -> (match eval env b with VStruct fs -> fs.(i) | _ -> failwith "field")
@@ -468,6 +526,10 @@ and match_pat env (p : tpat) (v : value) : bool =
 (* ---------- statements ---------- *)
 
 and exec env (s : tstmt) : unit =
+  let saved = !busy in
+  Fun.protect ~finally:(fun () -> busy := saved) (fun () -> exec_ env s)
+
+and exec_ env (s : tstmt) : unit =
   match s.st with
   | SLet (p, e) ->
       let v = eval env e in
@@ -475,6 +537,7 @@ and exec env (s : tstmt) : unit =
   | SVar (v, e) -> bind env v (eval env e)
   | SAssign (p, e) ->
       let x = eval env e in
+      if p.root.vcell && List.memq (get_var env p.root) !busy then cell_busy_trap s.sl "assigned";
       assign env p x
   | SExpr e -> ignore (eval env e)
   | SReturn e -> raise (Return (eval env e))
@@ -492,6 +555,7 @@ and exec env (s : tstmt) : unit =
         | IArray (arr, MMut), TPVar var ->
             (* for x in mut xs: each element is a mutable place *)
             let get, set = place_of_expr env arr in
+            hold_busy env arr;
             let n = Array.length (as_arr (get ())) in
             for i = 0 to n - 1 do
               let a = as_arr (get ()) in
@@ -540,7 +604,7 @@ and builtin env name (tys : ty list) (vals : value list) loc : value * value lis
   | "read_line@", [] -> (
       flush_out ();
       match In_channel.input_line stdin with
-      | Some l -> pure (VVariant (1, [| VStr l |]))
+      | Some l -> pure (VVariant (1, [| VStr (sanitize_utf8 l) |]))
       | None -> pure (VVariant (0, [||])))
   | "clock_ns@", [] -> pure (VInt (Int64.of_float (Unix.gettimeofday () *. 1e9)))
   | "len@Array", [ VArr a ] -> pure (VInt (Int64.of_int (Array.length a)))
@@ -562,6 +626,7 @@ and builtin env name (tys : ty list) (vals : value list) loc : value * value lis
   | "extend@Array", [ VArr a; VArr b ] -> (VUnit, [ VArr (Array.append a b); VArr b ])
   | "filled@Int", [ VInt n; x ] ->
       if Int64.compare n 0L < 0 then trap "index out of range" loc "negative length";
+      if Int64.compare n max_alloc > 0 then too_large loc;
       pure (VArr (Array.make (Int64.to_int n) x))
   | "copy@T", [ x ] -> pure x
   | "unreachable@Str", [ VStr m ] -> trap "unreachable" loc m
@@ -587,6 +652,7 @@ and builtin env name (tys : ty list) (vals : value list) loc : value * value lis
   | "ends_with@Str", [ VStr s; VStr p ] -> pure (VBool (String.ends_with ~suffix:p s))
   | "repeat@Str", [ VStr s; VInt n ] ->
       if Int64.compare n 0L < 0 then trap "invalid argument" loc "negative repeat count";
+      if n > 0L && Int64.compare (Int64.of_int (String.length s)) (Int64.div max_alloc n) > 0 then too_large loc;
       let b = Buffer.create (String.length s * Int64.to_int n) in
       for _ = 1 to Int64.to_int n do Buffer.add_string b s done;
       pure (VStr (Buffer.contents b))

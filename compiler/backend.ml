@@ -3,10 +3,18 @@
 
 type opts = { release : bool; cc : string option; keep_c : bool }
 
+(* A fresh private directory: the name is random, and an existing path is never reused,
+   so nobody else can place or swap the files that are compiled and run. *)
 let scratch_dir () =
-  let d = Filename.concat (Filename.get_temp_dir_name ()) (Printf.sprintf "starnite-%d" (Unix.getpid ())) in
-  (try Unix.mkdir d 0o700 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
-  d
+  Random.self_init ();
+  let base = Filename.get_temp_dir_name () in
+  let rec attempt n =
+    let d = Filename.concat base (Printf.sprintf "starnite-%d-%08x%08x" (Unix.getpid ()) (Random.bits ()) (Random.bits ())) in
+    match Unix.mkdir d 0o700 with
+    | () -> d
+    | exception Unix.Unix_error (Unix.EEXIST, _, _) when n < 100 -> attempt (n + 1)
+  in
+  attempt 0
 
 let write path s = Out_channel.with_open_bin path (fun oc -> output_string oc s)
 

@@ -117,7 +117,15 @@ let raw_lex (file : string) (src : string) ?(line0 = 1) ?(col0 = 1) () : raw lis
         while !i < n && peek 0 <> '}' do incr i done;
         let hex = String.sub src st (!i - st) in
         incr i;
-        (try int_of_string ("0x" ^ hex) with _ -> error "E0100" l "malformed \\u escape")
+        let cp =
+          match (if hex = "" || String.length hex > 6 then None else int_of_string_opt ("0x" ^ hex)) with
+          | Some cp -> cp
+          | None -> error "E0100" l "malformed \\u escape"
+        in
+        (* a Str is valid UTF-8 and a Char a Unicode scalar value (section 3.1) *)
+        if cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF) then
+          error "E0100" l "\\u{%s} is not a Unicode scalar value" hex;
+        cp
     | _ -> error "E0100" l "unknown escape \\%c" c
   in
   while !i < n do
@@ -179,7 +187,10 @@ let raw_lex (file : string) (src : string) ?(line0 = 1) ?(col0 = 1) () : raw lis
           let us = !i in
           while !i < n && is_alnum src.[!i] do incr i done;
           let u = String.sub src us (!i - us) in
-          if List.mem u dur_units then push (DUR (Int64.of_string s, u)) l
+          if List.mem u dur_units then
+            match Int64.of_string_opt s with
+            | Some v when Int64.compare v 0L >= 0 -> push (DUR (v, u)) l
+            | _ -> error "E0201" l "literal %s%s is too large" s u
           else error "E0100" l "unknown unit '%s' after number" u
         end else push (INT s) l
       end
@@ -268,6 +279,18 @@ let raw_lex (file : string) (src : string) ?(line0 = 1) ?(col0 = 1) () : raw lis
 
 (* Turn the raw stream into one with NEWLINE / INDENT / DEDENT (section 2.1).
    A NEWLINE raw token with bol=true is a line-start marker inserted by raw_lex. *)
+(* Does the physical line starting with these tokens contain '->' at bracket depth 0? *)
+let arm_follows (toks : raw list) =
+  let rec go depth = function
+    | [] -> false
+    | { r = NEWLINE; bol = true; _ } :: _ -> false
+    | { r = OP ("(" | "[" | "{"); _ } :: rest -> go (depth + 1) rest
+    | { r = OP (")" | "]" | "}"); _ } :: rest -> go (depth - 1) rest
+    | { r = OP "->"; _ } :: _ when depth = 0 -> true
+    | _ :: rest -> go depth rest
+  in
+  go 0 toks
+
 let layout (file : string) (raws : raw list) : token array =
   let out = ref [] in
   let emit t l = out := { t; tloc = l } :: !out in
@@ -283,6 +306,10 @@ let layout (file : string) (raws : raw list) : token array =
          | nxt :: _ ->
              let cont =
                match nxt.r with
+               | OP "-" ->
+                   (* a match arm with a negative pattern, "-1 -> ...", starts a line;
+                      any other line starting with '-' continues the previous one *)
+                   not (arm_follows rest)
                | OP o -> List.mem o continuation_ops
                | KW ("and" | "or") -> true
                | _ -> false

@@ -1,0 +1,4 @@
+before
+trap: allocation too large at tests/run/trap_too_large.stn:3:11
+the requested size is too large
+exit 2

@@ -67,6 +67,7 @@ typedef StnStrBuf* StnStr;
 
 void   stn_str_release(void* p);
 StnStr stn_str_new(const char* data, int64_t len);
+StnStr stn_str_from_bytes(const char* data, int64_t len);   /* makes the bytes valid UTF-8 */
 StnStr stn_str_concat(StnStr a, StnStr b);
 StnStr stn_str_concat_n(int n, StnStr* parts);   /* borrows parts */
 int    stn_str_eq(StnStr a, StnStr b);

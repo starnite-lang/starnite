@@ -225,7 +225,17 @@ void stn_array_release(void* p) {
     stn_free(a);
 }
 
+/* Requests above this many elements or bytes trap rather than wrap a size computation.
+   The reference interpreter applies the same limit (compiler/interp.ml). */
+#define STN_MAX_ALLOC ((int64_t)1 << 40)
+
+_Noreturn static void stn_too_large(const char* file, int line, int col) {
+    stn_trap("allocation too large", file, line, col, "the requested size is too large");
+}
+
 StnArray* stn_array_new(const StnElemOps* ops, int64_t cap) {
+    if (cap < 0 || cap > STN_MAX_ALLOC || (uint64_t)cap > (uint64_t)STN_MAX_ALLOC / (ops->size ? ops->size : 1))
+        stn_too_large("<runtime>", 0, 0);
     StnArray* a = (StnArray*)stn_alloc(sizeof(StnArray) + (size_t)cap * ops->size);
     a->len = 0; a->cap = cap; a->ops = ops;
     return a;
@@ -253,6 +263,7 @@ void stn_array_copy_for_write(StnArray** pa) {
 void stn_array_reserve(StnArray** pa, int64_t extra) {
     StnArray* a = *pa;
     int64_t need = a->len + extra;
+    if (extra > STN_MAX_ALLOC || need > STN_MAX_ALLOC) stn_too_large("<runtime>", 0, 0);
     if (stn_unique(a)) {
         if (need <= a->cap) return;
         int64_t cap = a->cap ? a->cap * 2 : 4;
@@ -355,6 +366,7 @@ void stn_array_clear(StnArray** pa) {
 
 StnArray* stn_array_filled(const StnElemOps* ops, int64_t n, const void* elem, const char* file, int line, int col) {
     if (n < 0) stn_trap("index out of range", file, line, col, "negative length");
+    if (n > STN_MAX_ALLOC || (uint64_t)n > (uint64_t)STN_MAX_ALLOC / (ops->size ? ops->size : 1)) stn_too_large(file, line, col);
     StnArray* a = stn_array_new(ops, n > 0 ? n : 1);
     for (int64_t i = 0; i < n; i++) {
         memcpy(a->data + (size_t)i * ops->size, elem, ops->size);
@@ -379,6 +391,34 @@ void stn_print(StnStr s) {
     stn_outbuf[stn_outlen++] = '\n';
 }
 
+/* A Str is always valid UTF-8 (section 3.1): each byte that does not start a well-formed
+   sequence (no overlong forms, no surrogates, nothing above U+10FFFF) becomes U+FFFD.
+   The reference interpreter applies the same rule (Interp.sanitize_utf8). */
+StnStr stn_str_from_bytes(const char* data, int64_t n) {
+    const unsigned char* b = (const unsigned char*)data;
+    char* out = (char*)malloc((size_t)n * 3 + 1);
+    int64_t i = 0, o = 0;
+    while (i < n) {
+        unsigned c = b[i];
+        if (c < 0x80) { out[o++] = (char)c; i++; continue; }
+        int len = 0; uint32_t min = 0, cp = 0;
+        if (c >= 0xC2 && c <= 0xDF) { len = 2; min = 0x80; cp = c & 0x1F; }
+        else if (c >= 0xE0 && c <= 0xEF) { len = 3; min = 0x800; cp = c & 0x0F; }
+        else if (c >= 0xF0 && c <= 0xF4) { len = 4; min = 0x10000; cp = c & 0x07; }
+        int ok = len > 0 && i + len <= n;
+        for (int k = 1; ok && k < len; k++) {
+            if ((b[i + k] & 0xC0) != 0x80) ok = 0;
+            else cp = (cp << 6) | (b[i + k] & 0x3F);
+        }
+        if (ok && (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))) ok = 0;
+        if (ok) { memcpy(out + o, b + i, (size_t)len); o += len; i += len; }
+        else { out[o++] = (char)0xEF; out[o++] = (char)0xBF; out[o++] = (char)0xBD; i++; }
+    }
+    StnStr s = stn_str_new(out, o);
+    free(out);
+    return s;
+}
+
 int stn_read_line(StnStr* out) {
     stn_flush();
     size_t cap = 128, n = 0;
@@ -389,7 +429,7 @@ int stn_read_line(StnStr* out) {
         buf[n++] = (char)c;
     }
     if (c == EOF && n == 0) { free(buf); return 0; }
-    *out = stn_str_new(buf, (int64_t)n);
+    *out = stn_str_from_bytes(buf, (int64_t)n);
     free(buf);
     return 1;
 }
@@ -408,7 +448,10 @@ StnArray* stn_str_chars(StnStr s, const StnElemOps* ops) {
     while (i < s->len) {
         uint32_t c = p[i];
         int len = 1;
-        if (c >= 0xF0) { c = ((c & 7) << 18) | ((p[i+1] & 0x3F) << 12) | ((p[i+2] & 0x3F) << 6) | (p[i+3] & 0x3F); len = 4; }
+        /* strings are valid UTF-8; the bound keeps a decode inside the buffer regardless */
+        if ((c >= 0xF0 && i + 4 > s->len) || (c >= 0xE0 && i + 3 > s->len) || (c >= 0xC0 && i + 2 > s->len)) c = 0xFFFD, len = 0;
+        if (len == 0) len = 1;
+        else if (c >= 0xF0) { c = ((c & 7) << 18) | ((p[i+1] & 0x3F) << 12) | ((p[i+2] & 0x3F) << 6) | (p[i+3] & 0x3F); len = 4; }
         else if (c >= 0xE0) { c = ((c & 15) << 12) | ((p[i+1] & 0x3F) << 6) | (p[i+2] & 0x3F); len = 3; }
         else if (c >= 0xC0) { c = ((c & 31) << 6) | (p[i+1] & 0x3F); len = 2; }
         ((uint32_t*)a->data)[a->len++] = c;
@@ -471,6 +514,7 @@ uint8_t stn_str_ends_with(StnStr s, StnStr p) {
 }
 StnStr stn_str_repeat(StnStr s, int64_t n, const char* file, int line, int col) {
     if (n < 0) stn_trap("invalid argument", file, line, col, "negative repeat count");
+    if (n > 0 && s->len > STN_MAX_ALLOC / n) stn_too_large(file, line, col);
     StnStr r = (StnStr)stn_alloc(sizeof(StnStrBuf) + (size_t)(s->len * n) + 1);
     r->len = s->len * n;
     for (int64_t i = 0; i < n; i++) memcpy(r->data + i * s->len, s->data, (size_t)s->len);

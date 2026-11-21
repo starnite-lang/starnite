@@ -160,7 +160,15 @@ let () =
         (match cmd with
          | "emit-c" -> print_string (Cgen.emit prog ~debug:(not !release))
          | "build" ->
-             let exe = match !out with Some o -> o | None -> Filename.remove_extension file in
+             let exe =
+               match !out with
+               | Some o -> o
+               | None ->
+                   (* never the source itself, which a file without an extension would be *)
+                   let base = Filename.remove_extension file in
+                   if base = file then file ^ ".out" else base
+             in
+             if exe = file then (prerr_endline "error: the output path is the source file; choose another with -o"; exit 1);
              Backend.build opts prog exe
          | _ -> exit (Backend.run opts prog file))
     | c -> Printf.eprintf "unknown command '%s'\n%s" c usage; exit 2
