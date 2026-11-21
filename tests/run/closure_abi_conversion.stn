@@ -1,0 +1,51 @@
+# A function value is called with the convention of the type it is used at: a pure named function or lambda where one that can fail is expected, in an argument, a result, an array and a trait argument.
+
+
+type Oops = Bad(n: Int)
+
+impl Show for Oops:
+    fn show(e: Oops) -> Str:
+        match e:
+            Bad(n) -> f"bad {n}"
+
+fn double(x: Int) -> Int:
+    x * 2
+
+fn apply(f: fn(Int) -> Int ! Oops, x: Int) -> Int ! Oops:
+    f(x)
+
+fn make_pure() -> fn(Int) -> Int ! Oops:
+    fn(x: Int): x + 100
+
+fn from_args() ! io:
+    print(f"{apply(double, 4)}")
+    print(f"{apply(fn(x: Int): x * 3, 4)}")
+    let g = make_pure()
+    print(f"{(try apply(g, 1)).or(-1)}")
+    let fs: Array[fn(Int) -> Int ! Oops] = [double, fn(x: Int): x - 1]
+    print(f"{(try apply(fs[0], 5)).or(-1)} {(try apply(fs[1], 5)).or(-1)}")
+
+
+trait Make[F]:
+    fn make(m: Self) -> F
+
+type Maker = struct(n: Int)
+
+fn plus(x: Int) -> Int:
+    x + 1
+
+impl Make[fn(Int) -> Int ! Oops] for Maker:
+    fn make(m: Maker) -> fn(Int) -> Int ! Oops:
+        plus
+
+fn go(m: any Make[fn(Int) -> Int ! Oops], x: Int) -> Int ! Oops:
+    let f = m.make()
+    f(x)
+
+fn from_trait_arg() ! io:
+    let a: any Make[fn(Int) -> Int ! Oops] = Maker(1)
+    print(f"{go(a, 4)}")
+
+fn main() ! io:
+    from_args()
+    from_trait_arg()
