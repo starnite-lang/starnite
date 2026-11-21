@@ -29,7 +29,7 @@ fn main():
     print(f"{ys} {count}")
     # braces inside literals do not end an interpolation
     print(f"{'}'} {"{x}"} {len("}}")}")
-    # a comprehension evaluates its source once (found by tests/fuzz.py)
+    # a comprehension evaluates its source once (found by the fuzzer, tests/fuzz)
     var calls = 0
     fn source() -> Array[Int]:
         calls += 1

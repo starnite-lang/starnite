@@ -1,4 +1,4 @@
-# Regression (found by tests/fuzz.py): a let initializer must be evaluated before the
+# Regression (found by the fuzzer, tests/fuzz): a let initializer must be evaluated before the
 # temporaries of its statement are released.
 fn main():
     let n = len(join(["x", "héllo"], "-"))

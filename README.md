@@ -54,7 +54,7 @@ tests/run.sh
 ```
 
 ```bash
-tests/fuzz.py --count 200
+dune exec tests/fuzz/fuzz.exe -- --count 200
 ```
 
 Each program in `tests/run` is run three ways (reference interpreter, debug C build, release C build), and all three must match each other and a reviewed golden output. That is oracle 3 of section 21.2, applied to a fixed corpus. The debug runtime also checks that counts balance at exit (oracle 2). `tests/errors` holds one golden test per implemented error code, with its location. `tests/unit` holds `test` blocks, and `rejects` tests that check the compiler refuses a misuse.
@@ -73,7 +73,7 @@ Working now:
 - **Arithmetic (section 17.1).** Overflow traps, wrapping operators, checked conversions, and division traps.
 - **C output (section 11).** The object header, size-class allocator, inline and boxed data layouts with field-less variants encoded in the pointer (section 3.3), copy-on-write arrays, per-type release functions, and status-byte error returns. The debug build poisons freed memory and checks counts at exit.
 - **The reference interpreter (section 21.1)**, the test runner with `assert`, `assert_fails` and `rejects` (section 20.2), and diagnostics in the format of section 19.1, plus JSON.
-- **A first differential fuzzer (section 21.2)**, `tests/fuzz.py`. It builds well-typed programs by construction and requires the interpreter and the debug C build to agree, with balanced counts.
+- **A first differential fuzzer (section 21.2)**, `tests/fuzz/fuzz.ml`. It builds well-typed programs by construction and requires the interpreter and the debug C build to agree, with balanced counts.
 
 Not done yet:
 
