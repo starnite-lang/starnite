@@ -2039,6 +2039,13 @@ let declare_items tb modname (items : item list) =
     (function
       | ITrait tr ->
           let info = Hashtbl.find tb.traits tr.trname in
+          (* a method table has one entry per name, and an impl one function *)
+          let seen = Hashtbl.create 8 in
+          List.iter
+            (fun (fd : Syntax.fn_def) ->
+              if Hashtbl.mem seen fd.fname then err "E0101" fd.floc "method '%s' is declared twice in trait %s" fd.fname tr.trname;
+              Hashtbl.replace seen fd.fname ())
+            tr.trmethods;
           let ms =
             List.map
               (fun (fd : Syntax.fn_def) ->
@@ -2091,11 +2098,15 @@ let declare_items tb modname (items : item list) =
                  o.itrait_ = trn && ty_equal o.ifor_ fty && List.length o.itargs_ = List.length targs && List.for_all2 ty_equal o.itargs_ targs)
                tb.impls
           then err "E0101" im.iloc "trait %s is already implemented for %s" trn (show_ty fty);
+          let seen_m = Hashtbl.create 8 in
           let methods =
             List.map
               (fun (fd : Syntax.fn_def) ->
                 if not (List.mem_assoc fd.fname info.trmethods_) then
                   err "E0101" fd.floc "trait %s has no method '%s'" trn fd.fname;
+                if Hashtbl.mem seen_m fd.fname then
+                  err "E0101" fd.floc "method '%s' is defined twice in this impl of %s" fd.fname trn;
+                Hashtbl.replace seen_m fd.fname ();
                 let uname = unique_name tb modname (trn ^ "_" ^ head fty ^ "_" ^ fd.fname) in
                 let sg = make_sig tb ~modname ~uname fd tps (Some fty) in
                 (* the impl's effects may be fewer than the trait's, never more *)

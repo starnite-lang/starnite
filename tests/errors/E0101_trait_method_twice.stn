@@ -1,0 +1,7 @@
+# expect: E0101 4:5
+trait Tag:
+    fn tag(x: Self) -> Int
+    fn tag(x: Self) -> Str
+
+fn main():
+    print("x")
