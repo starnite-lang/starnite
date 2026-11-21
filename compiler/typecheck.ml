@@ -179,7 +179,15 @@ let args_compat (xs : ty list) (ys : ty list) =
        (fun a b -> match (repr a, repr b) with TVar _, _ | _, TVar _ -> true | _ -> ty_equal a b)
        xs ys
 
-let rec find_impl tb ?(bounds = []) trait (targs : ty list) self : resolution option =
+(* what trait resolution reads: the impls and the type declarations. The backends have the
+   same two in the typed program, so they select an impl exactly as the checker did. *)
+type rtab = { rimpls : impl_info list; rdecls : (string, tdecl) Hashtbl.t }
+
+let rtab_of (tb : tables) = { rimpls = tb.impls; rdecls = tb.decls }
+
+let rtab_of_prog (p : tprog) = { rimpls = p.impls; rdecls = p.decls }
+
+let rec find_impl (tb : rtab) ?(bounds = []) trait (targs : ty list) self : resolution option =
   let self = repr self in
   match self with
   | TAny (n, anyargs) ->
@@ -220,7 +228,7 @@ let rec find_impl tb ?(bounds = []) trait (targs : ty list) self : resolution op
                   in
                   if ok then Some (im, !s) else None
                 else None)
-            tb.impls
+            tb.rimpls
         in
         match cands with
         | (im, s) :: _ ->
@@ -236,7 +244,7 @@ and derive tb ~bounds trait self =
     | TArray t -> f t
     | TTuple ts -> List.for_all f ts
     | TNamed (n, args) -> (
-        match Hashtbl.find_opt tb.decls n with
+        match Hashtbl.find_opt tb.rdecls n with
         | Some d -> (
             let s = List.combine d.dparams args in
             match d.dbody with
@@ -270,9 +278,13 @@ and derive tb ~bounds trait self =
   | _ -> None
 
 (* The global function implementing [meth] of [trait] for [self]. *)
-let rec impl_method tb trait targs meth self = impl_method_in tb.impls trait targs meth self
+let rec impl_method (tb : tables) ?(bounds = []) trait targs meth self = impl_method_in (rtab_of tb) ~bounds trait targs meth self
 
-and impl_method_in impls trait (targs : ty list) meth self : (string * ty list) option =
+(* The function that implements [meth] of [trait] for [self]: the first impl whose type fits
+   and whose bounds hold, as [find_impl] chooses it. Checking the bounds here too matters
+   when impls overlap: an earlier one whose bound fails must not be taken over a later one
+   that fits. *)
+and impl_method_in (rt : rtab) ?(bounds = []) trait (targs : ty list) meth self : (string * ty list) option =
   let self = repr self in
   let cands =
     List.filter_map
@@ -284,12 +296,18 @@ and impl_method_in impls trait (targs : ty list) meth self : (string * ty list) 
           if match_ty ps s im.ifor_ self
              && List.length targs = List.length im.itargs_
              && List.for_all2 (fun p a -> match_ty ps s p a) im.itargs_ targs
+             && List.for_all
+                  (fun (p, bs) ->
+                    match List.assoc_opt p !s with
+                    | None -> true
+                    | Some t -> List.for_all (fun (tr, ta) -> find_impl rt ~bounds tr (List.map (subst !s) ta) t <> None) bs)
+                  im.itparams
           then
             match List.assoc_opt meth im.imethods_ with
             | Some f -> Some (f, List.map (fun (p, _) -> try List.assoc p !s with Not_found -> TUnit) im.itparams)
             | None -> None
           else None)
-      impls
+      rt.rimpls
   in
   match cands with c :: _ -> Some c | [] -> None
 
@@ -410,7 +428,7 @@ let propagate c l (es : ty list) : conv list =
             else begin
               let fits =
                 List.filter_map
-                  (fun d -> match impl_method c.tb "From" [ e ] "from" d with Some (f, _) -> Some (d, f) | None -> None)
+                  (fun d -> match impl_method c.tb ~bounds:c.tparams "From" [ e ] "from" d with Some (f, _) -> Some (d, f) | None -> None)
                   decl
               in
               match fits with
@@ -635,9 +653,9 @@ and coerce c (te : texpr) expected : texpr =
          written in the program, since built-in implementations have no method table *)
       let ok =
         match repr found with
-        | TParam _ -> find_impl c.tb ~bounds:c.tparams tr ta found <> None
+        | TParam _ -> find_impl (rtab_of c.tb) ~bounds:c.tparams tr ta found <> None
         | _ -> (
-            match find_impl c.tb ~bounds:c.tparams tr ta found with
+            match find_impl (rtab_of c.tb) ~bounds:c.tparams tr ta found with
             | Some (RImpl _) -> true
             | Some _ -> tr = "Show"   (* the table of a built-in Show is made from the runtime's own formatting *)
             | None -> false)
@@ -772,7 +790,7 @@ and show_expr c (te : texpr) : texpr =
   match repr te.ty with
   | TStr -> te
   | t ->
-      if find_impl c.tb ~bounds:c.tparams "Show" [] t = None && (match t with TVar _ -> false | _ -> true) then
+      if find_impl (rtab_of c.tb) ~bounds:c.tparams "Show" [] t = None && (match t with TVar _ -> false | _ -> true) then
         err "E0204" te.l "%s does not implement Show" (show_ty t);
       if (match t with TVar _ -> true | _ -> false) then c.obligations <- (t, "Show", [], te.l) :: c.obligations;
       mk (XCall (CTrait ("Show", [], "show", te.ty), [ { amode = MBorrow; a = te } ], [])) TStr te.l
@@ -1052,7 +1070,7 @@ and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
           let te =
             match c.declared with
             | Some decl when c.in_try = 0 && not (mem_ty te.ty decl) -> (
-                match List.filter_map (fun d -> match impl_method c.tb "From" [ te.ty ] "from" d with Some (fn, ta) -> Some (d, fn, ta) | None -> None) decl with
+                match List.filter_map (fun d -> match impl_method c.tb ~bounds:c.tparams "From" [ te.ty ] "from" d with Some (fn, ta) -> Some (d, fn, ta) | None -> None) decl with
                 | [ (d, fn, ta) ] -> mk (XCall (CFn (fn, ta), [ { amode = MBorrow; a = te } ], [])) d te.l
                 | _ -> te)
             | _ -> te
@@ -2171,7 +2189,7 @@ let finish_ctx c l =
     (fun (t, tr, ta, l) ->
       let t = zonk t in
       if has_tvar t then ()
-      else if find_impl c.tb ~bounds:c.tparams tr (List.map zonk ta) t = None then
+      else if find_impl (rtab_of c.tb) ~bounds:c.tparams tr (List.map zonk ta) t = None then
         err "E0204" l "%s does not implement %s" (show_ty t) tr)
     c.obligations;
   List.iter (fun (t, l) -> if has_tvar t then err "E0210" l "the element type of this empty literal is never settled; add an annotation") c.unsolved

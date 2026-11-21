@@ -570,7 +570,7 @@ let lend_sig fc (e : texpr) : bool option =
   match e.e with
   | XCall (CFn (u, _), _, _) -> (Hashtbl.find fc.st.prog.fns u).fsig.slend
   | XCall (CTrait (tr, ta, m, self), _, _) -> (
-      match Typecheck.impl_method_in fc.st.prog.impls tr (List.map (ts fc) ta) m (ts fc self) with
+      match Typecheck.impl_method_in (Typecheck.rtab_of_prog fc.st.prog) tr (List.map (ts fc) ta) m (ts fc self) with
       | Some (f, _) -> (Hashtbl.find fc.st.prog.fns f).fsig.slend
       | None -> None)
   | _ -> None
@@ -891,7 +891,7 @@ and call fc (e : texpr) (cl : callee) (targs : targ list) convs : r =
       any_call fc e tr (List.map (ts fc) ta) m (ts fc self) targs convs
   | CTrait (tr, ta, m, self) -> (
       let self = ts fc self and ta = List.map (ts fc) ta in
-      match Typecheck.impl_method_in st.prog.impls tr ta m self with
+      match Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) tr ta m self with
       | Some (f, ftys) ->
           let tf = Hashtbl.find st.prog.fns f in
           call_instance fc e f ftys tf.fsig targs convs
@@ -938,7 +938,7 @@ and any_vtable st (l : Syntax.loc) (any : ty) (at : ty) : string =
         (fun (m, (sg : fsig)) ->
           let recv = Printf.sprintf "*(%s*)b->data" cc in
           let w = Printf.sprintf "vtw_%s__%s__%s" am cm (c_ident m) in
-          match Typecheck.impl_method_in st.prog.impls tr ta m at with
+          match Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) tr ta m at with
           | None when tr = "Show" && m = "show" ->
               (* the built-in Show of a primitive, tuple or derived type: formatted by the
                  runtime's own code, as a direct call would *)
@@ -1108,7 +1108,7 @@ and show_call fc t (a : string) : string =
   | TErr _ -> Printf.sprintf "stn_show_error(%s)" a
   | TAny ("Show", _) -> Printf.sprintf "%s.vt->%s(%s.box)" a (vt_member "show") a
   | _ -> (
-      match Typecheck.impl_method_in st.prog.impls "Show" [] "show" t with
+      match Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) "Show" [] "show" t with
       | Some (f, ftys) -> Printf.sprintf "%s(%s)" (!request_instance st f ftys) a
       | None -> (
           match repr t with
@@ -1140,7 +1140,7 @@ and eq_call fc t a b : string =
   | TInt _ | TFloat | TF32 | TBool | TChar | TDur | TBytes -> Printf.sprintf "((%s) == (%s))" a b
   | TUnit | TNever -> "1"
   | _ -> (
-      match Typecheck.impl_method_in st.prog.impls "Eq" [] "eq" t with
+      match Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) "Eq" [] "eq" t with
       | Some (f, ftys) -> Printf.sprintf "%s(%s, %s)" (!request_instance st f ftys) a b
       | None ->
           let n = "eq_" ^ mangle t in
@@ -1178,7 +1178,7 @@ and cmp_call fc t a b : string =
   | TStr -> Printf.sprintf "((int64_t)stn_str_cmp(%s, %s))" a b
   | TInt _ | TFloat | TF32 | TBool | TChar | TDur | TBytes -> Printf.sprintf "((int64_t)(((%s) > (%s)) - ((%s) < (%s))))" a b a b
   | _ -> (
-      match Typecheck.impl_method_in st.prog.impls "Ord" [] "cmp" t with
+      match Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) "Ord" [] "cmp" t with
       | Some (f, ftys) -> Printf.sprintf "%s(%s, %s)" (!request_instance st f ftys) a b
       | None -> "0")
 

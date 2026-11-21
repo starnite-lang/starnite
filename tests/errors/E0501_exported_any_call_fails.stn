@@ -1,0 +1,23 @@
+# expect: E0501 20:6
+type Oops = Bad(n: Int)
+
+impl Show for Oops:
+    fn show(e: Oops) -> Str:
+        "oops"
+
+trait Job:
+    fn run(j: Self, n: Int) -> Int ! Oops
+
+type Task = struct(limit: Int)
+
+impl Job for Task:
+    fn run(j: Task, n: Int) -> Int ! Oops:
+        if n > j.limit:
+            fail(Bad(n))
+        n
+
+fn go*(j: any Job) -> Int:
+    j.run(3)
+
+fn main():
+    print("x")

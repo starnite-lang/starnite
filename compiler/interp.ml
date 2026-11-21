@@ -131,7 +131,7 @@ let is_boundary s i = i = String.length s || i = 0 || (Char.code s.[i] land 0xC0
 
 (* ---------- traits ---------- *)
 
-let resolve env trait targs meth self = Typecheck.impl_method_in env.prog.impls trait targs meth self
+let resolve env trait targs meth self = Typecheck.impl_method_in (Typecheck.rtab_of_prog env.prog) trait targs meth self
 
 let rec show_value env (t : ty) (v : value) : string =
   let t = tsub env t in

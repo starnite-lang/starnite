@@ -1,0 +1,75 @@
+# Which impl is used. The generic impl comes first but its bound does not hold for Pair[Str], so the
+# later impl is the one that fits; the checker and both backends must choose the same one.
+
+trait Marker:
+    fn mark(x: Self) -> Int
+
+impl Marker for Int:
+    fn mark(x: Int) -> Int:
+        1
+
+trait Tag:
+    fn tag(x: Self) -> Str
+
+type Pair[T] = struct(a: T, b: T)
+
+impl[T: Marker] Tag for Pair[T]:
+    fn tag(x: Pair[T]) -> Str:
+        f"marked {x.a.mark()}"
+
+impl Tag for Pair[Str]:
+    fn tag(x: Pair[Str]) -> Str:
+        "strs"
+
+fn selection() ! io:
+    print(Pair(1, 2).tag())
+    print(Pair("a", "b").tag())
+    let t: any Tag = Pair("a", "b")
+    print(t.tag())
+    let u: any Tag = Pair(3, 4)
+    print(u.tag())
+
+trait Figure:
+    fn area(f: Self) -> Float
+    fn name(f: Self) -> Str
+
+type Sq = struct(side: Float)
+type Rc = struct(w: Float, h: Float)
+
+impl Figure for Sq:
+    fn area(f: Sq) -> Float:
+        f.side * f.side
+    fn name(f: Sq) -> Str:
+        "sq"
+
+impl Figure for Rc:
+    fn area(f: Rc) -> Float:
+        f.w * f.h
+    fn name(f: Rc) -> Str:
+        "rc"
+
+fn twice[T: Figure](x: T) -> Float:
+    x.area() * 2.0
+
+fn total[T: Figure](xs: Array[T]) -> Float:
+    var t = 0.0
+    for x in xs:
+        t += Figure.area(x)
+    t
+
+fn names[T: Figure](xs: Array[T]) -> Str:
+    var parts: Array[Str] = []
+    for x in xs:
+        parts.push(x.name())
+    join(parts, "+")
+
+fn generic_over_any() ! io:
+    let a: any Figure = Sq(2.0)
+    print(f"{twice(a)} {twice(Rc(2.0, 3.0))}")
+    let xs: Array[any Figure] = [Sq(1.0), Rc(2.0, 5.0), Sq(3.0)]
+    print(f"{total(xs)} {names(xs)}")
+    print(f"{total([Sq(1.0), Sq(2.0)])}")
+
+fn main() ! io:
+    selection()
+    generic_over_any()
