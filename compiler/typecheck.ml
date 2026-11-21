@@ -2100,54 +2100,61 @@ let declare_items tb modname (items : item list) =
                 let sg = make_sig tb ~modname ~uname fd tps (Some fty) in
                 (* the impl's effects may be fewer than the trait's, never more *)
                 let tsig = List.assoc fd.fname info.trmethods_ in
-                (* the impl's method must have the trait method's signature, with Self and
-                   the trait arguments filled in (a method with type parameters of its own
-                   is compared by shape only) *)
-                if List.length tsig.stparams = List.length info.trparams then begin
-                  let ts = ("Self", fty) :: List.combine info.trparams targs in
-                  if List.length sg.sparams <> List.length tsig.sparams then
-                    err "E0203" fd.floc "method '%s' takes %d parameter(s) in trait %s, but the impl has %d" fd.fname
-                      (List.length tsig.sparams) trn (List.length sg.sparams);
-                  List.iter2
-                    (fun (m1, n1, t1, _) (m2, _, t2, _) ->
-                      let t2 = subst ts t2 in
-                      if m1 <> m2 then
-                        err "E0201" fd.floc "parameter '%s' of '%s' is passed differently in trait %s" n1 fd.fname trn;
-                      if not (ty_equal t1 t2) then
-                        err "E0201" fd.floc "parameter '%s' of '%s' has type %s, but trait %s requires %s" n1 fd.fname (show_ty t1) trn (show_ty t2))
-                    sg.sparams tsig.sparams;
-                  let want = subst ts tsig.sret in
-                  if not (ty_equal sg.sret want) then
-                    err "E0201" fd.floc "'%s' returns %s, but trait %s requires %s" fd.fname (show_ty sg.sret) trn (show_ty want);
-                  (* function-typed parameters and results carry effects, which ty_equal does
-                     not see: the impl must accept whatever the trait lets a caller pass,
-                     and return nothing that does more than the trait promises *)
-                  (* An open function type (one whose effects are the caller's, section 7.2)
-                     must stay open exactly where the trait's is: it decides how the method
-                     is called, and the method table calls the impl as the trait describes. *)
-                  let rec poly_differs (impl_t : ty) (trait_t : ty) =
-                    match (repr impl_t, repr trait_t) with
-                    | TFn fi, TFn ft ->
-                        fi.feff.poly <> ft.feff.poly
-                        || List.exists2 (fun (_, a) (_, b) -> poly_differs a b) fi.fps ft.fps
-                        || poly_differs fi.fret ft.fret
-                    | TArray a, TArray b -> poly_differs a b
-                    | TTuple xs, TTuple ys when List.length xs = List.length ys -> List.exists2 poly_differs xs ys
-                    | _ -> false
-                  in
-                  List.iter2
-                    (fun (m1, n1, t1, _) (_, _, t2, _) ->
-                      let t2 = subst ts t2 in
-                      if poly_differs t1 t2 then
-                        err "E0503" fd.floc "parameter '%s' of '%s' must leave the effects of its function type open exactly where trait %s does" n1 fd.fname trn;
-                      eff_check ~invariant:(m1 = MMut) fd.floc t1 t2)
-                    sg.sparams tsig.sparams;
-                  if poly_differs sg.sret want then
-                    err "E0503" fd.floc "the function '%s' returns must leave its effects open exactly where trait %s does" fd.fname trn;
-                  eff_check fd.floc want sg.sret;
-                  if sg.slend <> tsig.slend then
-                    err "E0201" fd.floc "'%s' must %s lend, as in trait %s" fd.fname (if tsig.slend = None then "not" else "also") trn
-                end;
+                (* The impl's method must have the trait method's signature, with Self and the
+                   trait arguments filled in. A method's own type parameters are renamed to
+                   common names first, so that two spellings of one signature compare equal. *)
+                let own (s : fsig) outer = List.filteri (fun i _ -> i >= outer) (List.map fst s.stparams) in
+                let own_t = own tsig (List.length info.trparams) and own_i = own sg (List.length tps) in
+                if List.length own_t <> List.length own_i then
+                  err "E0201" fd.floc "method '%s' has %d type parameter(s) of its own in trait %s, but the impl has %d" fd.fname
+                    (List.length own_t) trn (List.length own_i);
+                let canon names = List.mapi (fun k n -> (n, TParam (Printf.sprintf "#m%d" k))) names in
+                let ts = ("Self", fty) :: List.combine info.trparams targs @ canon own_t in
+                let impl_t t = subst (canon own_i) t in
+                (* for messages: the trait's own names for its method's type parameters *)
+                let shown t = show_ty (subst (List.mapi (fun k n -> (Printf.sprintf "#m%d" k, TParam n)) own_t) t) in
+                if List.length sg.sparams <> List.length tsig.sparams then
+                  err "E0203" fd.floc "method '%s' takes %d parameter(s) in trait %s, but the impl has %d" fd.fname
+                    (List.length tsig.sparams) trn (List.length sg.sparams);
+                List.iter2
+                  (fun (m1, n1, t1, _) (m2, _, t2, _) ->
+                    let t1 = impl_t t1 and t2 = subst ts t2 in
+                    if m1 <> m2 then
+                      err "E0201" fd.floc "parameter '%s' of '%s' is passed differently in trait %s" n1 fd.fname trn;
+                    if not (ty_equal t1 t2) then
+                      err "E0201" fd.floc "parameter '%s' of '%s' has type %s, but trait %s requires %s" n1 fd.fname (shown t1) trn (shown t2))
+                  sg.sparams tsig.sparams;
+                let want = subst ts tsig.sret and have = impl_t sg.sret in
+                if not (ty_equal have want) then
+                  err "E0201" fd.floc "'%s' returns %s, but trait %s requires %s" fd.fname (shown have) trn (shown want);
+                (* function-typed parameters and results carry effects, which ty_equal does
+                   not see: the impl must accept whatever the trait lets a caller pass,
+                   and return nothing that does more than the trait promises *)
+                (* An open function type (one whose effects are the caller's, section 7.2)
+                   must stay open exactly where the trait's is: it decides how the method
+                   is called, and the method table calls the impl as the trait describes. *)
+                let rec poly_differs (impl_t : ty) (trait_t : ty) =
+                  match (repr impl_t, repr trait_t) with
+                  | TFn fi, TFn ft ->
+                      fi.feff.poly <> ft.feff.poly
+                      || List.exists2 (fun (_, a) (_, b) -> poly_differs a b) fi.fps ft.fps
+                      || poly_differs fi.fret ft.fret
+                  | TArray a, TArray b -> poly_differs a b
+                  | TTuple xs, TTuple ys when List.length xs = List.length ys -> List.exists2 poly_differs xs ys
+                  | _ -> false
+                in
+                List.iter2
+                  (fun (m1, n1, t1, _) (_, _, t2, _) ->
+                    let t1 = impl_t t1 and t2 = subst ts t2 in
+                    if poly_differs t1 t2 then
+                      err "E0503" fd.floc "parameter '%s' of '%s' must leave the effects of its function type open exactly where trait %s does" n1 fd.fname trn;
+                    eff_check ~invariant:(m1 = MMut) fd.floc t1 t2)
+                  sg.sparams tsig.sparams;
+                if poly_differs have want then
+                  err "E0503" fd.floc "the function '%s' returns must leave its effects open exactly where trait %s does" fd.fname trn;
+                eff_check fd.floc want have;
+                if sg.slend <> tsig.slend then
+                  err "E0201" fd.floc "'%s' must %s lend, as in trait %s" fd.fname (if tsig.slend = None then "not" else "also") trn;
                 (* the impl's effects may be fewer than the trait's, never more *)
                 let allowed = List.map (subst (("Self", fty) :: List.combine info.trparams targs)) tsig.seff.errs in
                 (* checked again after inference, for an impl that writes no effects *)

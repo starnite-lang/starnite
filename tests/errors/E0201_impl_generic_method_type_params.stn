@@ -1,0 +1,12 @@
+# expect: E0201 8:5
+trait Mapper:
+    fn map[T](x: Self, f: fn(Int) -> T) -> T
+
+type Box = struct(n: Int)
+
+impl Mapper for Box:
+    fn map(x: Box, f: fn(Int) -> Int) -> Int:
+        f(x.n)
+
+fn main():
+    print("x")

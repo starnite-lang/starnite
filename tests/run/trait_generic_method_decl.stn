@@ -1,0 +1,16 @@
+# A trait method with a type parameter of its own: an impl that spells it differently is
+# the same signature, and is accepted.
+trait Mapper:
+    fn map[T](x: Self, f: fn(Int) -> T) -> T
+    fn pick[A, B](x: Self, a: A, b: B) -> A
+
+type Box = struct(n: Int)
+
+impl Mapper for Box:
+    fn map[U](x: Box, f: fn(Int) -> U) -> U:
+        f(x.n)
+    fn pick[P, Q](x: Box, a: P, b: Q) -> P:
+        a
+
+fn main():
+    print("declared")
