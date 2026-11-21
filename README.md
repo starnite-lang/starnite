@@ -49,6 +49,13 @@ Exit status follows section 11.5: 0 on success, 1 when an error reaches `main`, 
 
 ## Testing
 
+CI (`.github/workflows/ci.yml`) runs on every push to `main` and every pull request:
+
+- It builds with dune.
+- It runs the conformance corpus with both GCC and Clang.
+- It runs 500 fuzz cases from a fresh seed. The seed is printed first, so a failure can be replayed, and failing programs are kept as an artifact.
+
+
 ```bash
 tests/run.sh
 ```

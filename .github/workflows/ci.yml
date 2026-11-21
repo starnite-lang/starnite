@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Continuous checks (section 21.6): every push and pull request builds the compiler,
+# runs the conformance corpus with GCC and Clang, and runs a short fuzzing campaign.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  corpus:
+    name: corpus (${{ matrix.cc }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OCaml, dune and the C compiler
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ocaml-nox ocaml-dune ${{ matrix.cc }}
+      - name: Build
+        run: dune build
+      - name: Conformance corpus
+        # each program on the reference interpreter and the debug and release C
+        # builds, golden error codes, and test blocks with rejection tests
+        run: tests/run.sh
+
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OCaml and dune
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ocaml-nox ocaml-dune gcc
+      - name: Build
+        run: dune build
+      - name: Differential fuzzing
+        # a new seed on every run, printed first; a failing case is reported by number
+        # and can be replayed with: dune exec tests/fuzz/fuzz.exe -- --seed <case> --count 1
+        run: ./_build/default/tests/fuzz/fuzz.exe --count 500 --seed $(( GITHUB_RUN_ID % 1000000000 )) --keep fuzz-failures
+      - name: Keep failing programs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures
+          path: fuzz-failures/
+          if-no-files-found: ignore
