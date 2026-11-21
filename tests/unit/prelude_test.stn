@@ -39,3 +39,8 @@ test rejects E0202 "a match must cover every case":
     let o: Int? = None
     match o:
         Some(v) -> print(f"{v}")
+
+test "a return ends the test normally":
+    if true:
+        return
+    assert false

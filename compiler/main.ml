@@ -112,7 +112,9 @@ let run_tests_interp file (user : Syntax.file) (prog : Types.tprog) =
         Printf.printf "FAIL %s (%s:%d)\n     %s\n" name l.file l.line msg
       in
       match Interp.eval env body with
-      | _ -> incr pass; Interp.flush_out (); Printf.printf "ok   %s\n" name
+      | _ | (exception Interp.Return _) ->
+          (* a return in a test block ends the test normally *)
+          incr pass; Interp.flush_out (); Printf.printf "ok   %s\n" name
       | exception Interp.Failed (t, v) -> fail_with ("failed with " ^ Interp.show_value env t v)
       | exception Interp.Assert_failed (msg, al) -> fail_with (Printf.sprintf "%s at %s:%d:%d" msg al.file al.line al.col)
       | exception Values.Trap (kind, tl, msg) -> fail_with (Printf.sprintf "trap: %s at %s:%d:%d: %s" kind tl.file tl.line tl.col msg))
@@ -171,13 +173,21 @@ let () =
                    if base = file then file ^ ".out" else base
              in
              (* compare the files themselves, so ./x.stn or a link to the source is caught too *)
-             let same =
+             let same_file out =
+               out = file
+               ||
                try
-                 let a = Unix.stat file and b = Unix.stat exe in
+                 let a = Unix.stat file and b = Unix.stat out in
                  a.Unix.st_dev = b.Unix.st_dev && a.Unix.st_ino = b.Unix.st_ino
                with Unix.Unix_error _ -> false
              in
-             if same || exe = file then (prerr_endline "error: the output path is the source file; choose another with -o"; exit 1);
+             (* every file the build writes: the executable, and the C file with --keep-c *)
+             let outputs = exe :: (if !keep then [ exe ^ ".c" ] else []) in
+             (match List.find_opt same_file outputs with
+              | Some out ->
+                  Printf.eprintf "error: %s is the source file; choose another output with -o\n" out;
+                  exit 1
+              | None -> ());
              Backend.build opts prog exe
          | _ -> exit (Backend.run opts prog file))
     | c -> Printf.eprintf "unknown command '%s'\n%s" c usage; exit 2

@@ -223,14 +223,28 @@ let read_file path = In_channel.with_open_bin path In_channel.input_all
 let run starnite tmp args path : int * string =
   let out = Filename.concat tmp "out.txt" in
   let fd = Unix.openfile out [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600 in
-  let pid = Unix.create_process starnite (Array.of_list ((starnite :: args) @ [ path ])) Unix.stdin fd fd in
+  (* the compiler runs the program it builds as a child of its own, so each invocation
+     gets a process group of its own, and the whole group is killed afterwards *)
+  let argv = Array.of_list ((starnite :: args) @ [ path ]) in
+  let pid =
+    match Unix.fork () with
+    | 0 -> (
+        try
+          ignore (Unix.setsid ());
+          Unix.dup2 fd Unix.stdout;
+          Unix.dup2 fd Unix.stderr;
+          Unix.execv starnite argv
+        with _ -> Unix._exit 127)
+    | pid -> pid
+  in
   Unix.close fd;
+  let kill_group () = try Unix.kill (-pid) Sys.sigkill with Unix.Unix_error _ -> () in
   let deadline = Unix.gettimeofday () +. 120.0 in
   let rec wait () =
     match Unix.waitpid [ Unix.WNOHANG ] pid with
     | 0, _ ->
         if Unix.gettimeofday () > deadline then begin
-          (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
+          kill_group ();
           ignore (Unix.waitpid [] pid);
           raise (Hang (String.concat " " args))
         end;
@@ -240,6 +254,8 @@ let run starnite tmp args path : int * string =
     | _, (Unix.WSIGNALED s | Unix.WSTOPPED s) -> 128 + abs s
   in
   let code = wait () in
+  (* nothing the invocation started may outlive it and write to the next case's output *)
+  kill_group ();
   (code, read_file out)
 
 let tail s n = if String.length s <= n then s else String.sub s (String.length s - n) n
