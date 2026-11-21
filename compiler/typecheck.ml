@@ -149,14 +149,14 @@ let rec match_ty (ps : string list) (s : (string * ty) list ref) pat t =
   match (repr pat, repr t) with
   | TParam n, t when List.mem n ps -> (
       match List.assoc_opt n !s with
-      | Some b -> ty_equal b t || (match repr b, t with _ -> false)
+      | Some b -> ty_equal_eff b t
       | None -> s := (n, t) :: !s; true)
   | TArray a, TArray b -> match_ty ps s a b
-  | TTuple xs, TTuple ys | TNamed (_, xs), TNamed (_, ys) ->
+  | TTuple xs, TTuple ys | TNamed (_, xs), TNamed (_, ys) | TAny (_, xs), TAny (_, ys) ->
       (match (repr pat, repr t) with
-       | TNamed (n, _), TNamed (m, _) when n <> m -> false
+       | TNamed (n, _), TNamed (m, _) | TAny (n, _), TAny (m, _) when n <> m -> false
        | _ -> List.length xs = List.length ys && List.for_all2 (match_ty ps s) xs ys)
-  | a, b -> ty_equal a b
+  | a, b -> ty_equal_eff a b
 
 type resolution =
   | RImpl of string * ty list        (* global fn, its type arguments *)
@@ -176,7 +176,7 @@ let prim_traits t =
 let args_compat (xs : ty list) (ys : ty list) =
   List.length xs = List.length ys
   && List.for_all2
-       (fun a b -> match (repr a, repr b) with TVar _, _ | _, TVar _ -> true | _ -> ty_equal a b)
+       (fun a b -> match (repr a, repr b) with TVar _, _ | _, TVar _ -> true | _ -> ty_equal_eff a b)
        xs ys
 
 (* what trait resolution reads: the impls and the type declarations. The backends have the
@@ -702,6 +702,10 @@ and eff_check ?(invariant = false) l (expected : ty) (found : ty) =
   | TArray a, TArray b -> eff_check ~invariant l a b
   | TTuple xs, TTuple ys | TNamed (_, xs), TNamed (_, ys) | TErr xs, TErr ys ->
       if List.length xs = List.length ys then List.iter2 (eff_check ~invariant l) xs ys
+  | TAny (_, xs), TAny (_, ys) ->
+      (* a trait argument can stand in any position of the trait's methods, so the
+         effects of a function in it must be exactly the expected ones *)
+      if List.length xs = List.length ys then List.iter2 (eff_check ~invariant:true l) xs ys
   | _ -> ()
 
 and check_or_infer c (e : Syntax.expr) (expected : ty option) : texpr =
@@ -1913,7 +1917,7 @@ let rec has_tvar t =
   match repr t with
   | TVar _ -> true
   | TArray t -> has_tvar t
-  | TTuple ts | TNamed (_, ts) | TErr ts -> List.exists has_tvar ts
+  | TTuple ts | TNamed (_, ts) | TErr ts | TAny (_, ts) -> List.exists has_tvar ts
   | TFn f -> List.exists (fun (_, t) -> has_tvar t) f.fps || has_tvar f.fret
   | _ -> false
 

@@ -1,0 +1,43 @@
+# A function as a trait argument keeps its effects: exactly the same ones match.
+type Oops = Bad(n: Int)
+
+impl Show for Oops:
+    fn show(e: Oops) -> Str:
+        match e:
+            Bad(n) -> f"bad {n}"
+
+trait Make[F]:
+    fn make(m: Self) -> F
+
+type Maker = struct(n: Int)
+type Plain = struct(n: Int)
+
+impl Make[fn(Int) -> Int ! Oops] for Maker:
+    fn make(m: Maker) -> fn(Int) -> Int ! Oops:
+        let n = m.n
+        fn(x: Int): if x > n: fail(Bad(x)) else: x
+
+impl Make[fn(Int) -> Int ! pure] for Plain:
+    fn make(m: Plain) -> fn(Int) -> Int ! pure:
+        let n = m.n
+        fn(x: Int): x + n
+
+fn call_failing(m: any Make[fn(Int) -> Int ! Oops], x: Int) -> Int ! Oops:
+    let f = m.make()
+    f(x)
+
+fn call_pure(m: any Make[fn(Int) -> Int ! pure], x: Int) -> Int:
+    let f = m.make()
+    f(x)
+
+fn via_bound[T: Make[fn(Int) -> Int ! Oops]](t: T, x: Int) -> Int ! Oops:
+    let f = t.make()
+    f(x)
+
+fn main() ! io:
+    let a: any Make[fn(Int) -> Int ! Oops] = Maker(3)
+    let b: any Make[fn(Int) -> Int ! pure] = Plain(10)
+    print(f"{call_pure(b, 5)}")
+    print(f"{(try call_failing(a, 2)).or(-1)} {(try call_failing(a, 9)).or(-1)}")
+    print(f"{(try via_bound(Maker(1), 1)).or(-1)} {(try via_bound(Maker(1), 4)).or(-1)}")
+    print(f"{call_failing(a, 7)}")

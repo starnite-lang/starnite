@@ -142,6 +142,26 @@ let rec ty_equal a b =
       && ty_equal f.fret g.fret
   | x, y -> x = y
 
+(* Equality that also compares the effects of function types. Where a trait argument is
+   matched, a function that can fail and one that cannot are different types: treating them
+   as one would let a failure reach code that was told it cannot happen. *)
+let rec ty_equal_eff a b =
+  match (repr a, repr b) with
+  | TFn f, TFn g ->
+      List.length f.fps = List.length g.fps
+      && List.for_all2 (fun (m, x) (n, y) -> m = n && ty_equal_eff x y) f.fps g.fps
+      && ty_equal_eff f.fret g.fret
+      && f.feff.io = g.feff.io
+      && f.feff.poly = g.feff.poly
+      && List.for_all (fun x -> List.exists (ty_equal_eff x) g.feff.errs) f.feff.errs
+      && List.for_all (fun y -> List.exists (ty_equal_eff y) f.feff.errs) g.feff.errs
+  | TArray x, TArray y -> ty_equal_eff x y
+  | (TTuple xs, TTuple ys) | (TNamed (_, xs), TNamed (_, ys)) | (TErr xs, TErr ys) | (TAny (_, xs), TAny (_, ys)) ->
+      (match (repr a, repr b) with
+       | TNamed (n, _), TNamed (m, _) | TAny (n, _), TAny (m, _) when n <> m -> false
+       | _ -> List.length xs = List.length ys && List.for_all2 ty_equal_eff xs ys)
+  | x, y -> ty_equal x y
+
 let rec unify a b =
   let a = repr a and b = repr b in
   if a == b then ()
