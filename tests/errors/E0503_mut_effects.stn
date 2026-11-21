@@ -1,0 +1,6 @@
+# expect: E0503 6:10
+fn fill(mut fs: Array[fn() -> Unit ! io]):
+    fs.push(fn(): print("io"))
+fn main():
+    var fs: Array[fn() -> Unit ! pure] = []
+    fill(mut fs)

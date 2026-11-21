@@ -76,6 +76,8 @@ let rec show_ty t =
       let ps = List.map (fun (m, t) -> (match m with MMut -> "mut " | MTake -> "take " | MBorrow -> "") ^ show_ty t) f.fps in
       let r = match repr f.fret with TUnit -> "" | t -> " -> " ^ show_ty t in
       let e = (if f.feff.io then [ "io" ] else []) @ List.map show_ty f.feff.errs in
+      (* a closed, empty effect list is written ! pure (section 7.1) *)
+      let e = if e = [] && not f.feff.poly then [ "pure" ] else e in
       "fn(" ^ String.concat ", " ps ^ ")" ^ r ^ (if e = [] then "" else " ! " ^ String.concat ", " e)
   | TParam n -> n
   | TVar { contents = Unbound _ } -> "_"

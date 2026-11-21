@@ -415,6 +415,7 @@ void stn_print(StnStr s) {
 StnStr stn_str_from_bytes(const char* data, int64_t n) {
     const unsigned char* b = (const unsigned char*)data;
     char* out = (char*)malloc((size_t)n * 3 + 1);
+    if (!out) { fputs("trap: out of memory\n", stderr); exit(2); }
     int64_t i = 0, o = 0;
     while (i < n) {
         unsigned c = b[i];
@@ -441,9 +442,14 @@ int stn_read_line(StnStr* out) {
     stn_flush();
     size_t cap = 128, n = 0;
     char* buf = (char*)malloc(cap);
+    if (!buf) { fputs("trap: out of memory\n", stderr); exit(2); }
     int c;
     while ((c = getchar()) != EOF && c != '\n') {
-        if (n + 1 >= cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+        if (n + 1 >= cap) {
+            char* grown = (char*)realloc(buf, cap * 2);
+            if (!grown) { free(buf); fputs("trap: out of memory\n", stderr); exit(2); }
+            buf = grown; cap *= 2;
+        }
         buf[n++] = (char)c;
     }
     if (c == EOF && n == 0) { free(buf); return 0; }
@@ -577,7 +583,9 @@ void stn_runtime_init(void) {}
 void stn_runtime_exit(int status) {
     stn_flush();
 #ifdef STN_DEBUG
-    if (status == 0 && stn_live_objects != 0 && getenv("STN_ALLOW_LEAKS") == NULL) {
+    /* an error that reaches main returns normally through every frame, so counts must
+       balance then too; only a trap (exit 2) leaves objects behind */
+    if ((status == 0 || status == 1) && stn_live_objects != 0 && getenv("STN_ALLOW_LEAKS") == NULL) {
         fprintf(stderr, "debug runtime: %lld object(s) still live at exit; counts do not balance\n",
                 (long long)stn_live_objects);
         exit(3);

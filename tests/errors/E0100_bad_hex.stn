@@ -1,0 +1,5 @@
+# expect: E0100 4:9
+fn main():
+    match 5:
+        0xGG -> print("a")
+        _ -> print("b")

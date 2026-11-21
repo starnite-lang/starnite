@@ -87,7 +87,44 @@ let utf8_decode s i =
   else if c land 0xF0 = 0xE0 then (((c land 0x0F) lsl 12) lor (cont 1 lsl 6) lor cont 2, 3)
   else (((c land 0x07) lsl 18) lor (cont 1 lsl 12) lor (cont 2 lsl 6) lor cont 3, 4)
 
+(* Offset of the first byte that does not start a well-formed UTF-8 sequence (no
+   overlong forms, surrogates or values above U+10FFFF), if any. *)
+let first_invalid_utf8 (s : string) : int option =
+  let n = String.length s in
+  let rec go i =
+    if i >= n then None
+    else
+      let c = Char.code s.[i] in
+      if c < 0x80 then go (i + 1)
+      else
+        let len, min, cp0 =
+          if c >= 0xC2 && c <= 0xDF then (2, 0x80, c land 0x1F)
+          else if c >= 0xE0 && c <= 0xEF then (3, 0x800, c land 0x0F)
+          else if c >= 0xF0 && c <= 0xF4 then (4, 0x10000, c land 0x07)
+          else (0, 0, 0)
+        in
+        if len = 0 || i + len > n then Some i
+        else
+          let rec cont k cp =
+            if k = len then Some cp
+            else
+              let d = Char.code s.[i + k] in
+              if d land 0xC0 <> 0x80 then None else cont (k + 1) ((cp lsl 6) lor (d land 0x3F))
+          in
+          match cont 1 cp0 with
+          | Some cp when cp >= min && cp <= 0x10FFFF && not (cp >= 0xD800 && cp <= 0xDFFF) -> go (i + len)
+          | _ -> Some i
+  in
+  go 0
+
 let raw_lex (file : string) (src : string) ?(line0 = 1) ?(col0 = 1) () : raw list =
+  (* source files are UTF-8 (section 1), so every literal holds valid text *)
+  (match first_invalid_utf8 src with
+   | Some bad ->
+       let line = ref line0 and lstart = ref 0 in
+       String.iteri (fun j ch -> if j < bad && ch = '\n' then (incr line; lstart := j + 1)) src;
+       error "E0100" { file; line = !line; col = bad - !lstart + 1 } "the source is not valid UTF-8"
+   | None -> ());
   let n = String.length src in
   let toks = ref [] in
   let i = ref 0 and line = ref line0 and lstart = ref 0 in
@@ -156,7 +193,13 @@ let raw_lex (file : string) (src : string) ?(line0 = 1) ?(col0 = 1) () : raw lis
       let st = !i in
       if c = '0' && (peek 1 = 'x' || peek 1 = 'X') then begin
         i := !i + 2;
-        while !i < n && (is_alnum src.[!i]) do incr i done;
+        while !i < n && (is_alnum src.[!i]) do
+          (match src.[!i] with
+           | '0' .. '9' | 'a' .. 'f' | 'A' .. 'F' | '_' -> ()
+           | ch -> error "E0100" l "'%c' is not a hexadecimal digit" ch);
+          incr i
+        done;
+        if !i = st + 2 then error "E0100" l "0x needs at least one hexadecimal digit";
         let s = String.sub src st (!i - st) in
         let s = String.concat "" (String.split_on_char '_' s) in
         push (INT s) l

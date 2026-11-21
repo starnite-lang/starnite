@@ -1,0 +1,7 @@
+# expect: E0503 7:9
+fn run(fs: Array[fn() -> Unit ! pure]):
+    for f in fs:
+        f()
+fn main():
+    let fs = [fn(): print("hi")]
+    run(fs)

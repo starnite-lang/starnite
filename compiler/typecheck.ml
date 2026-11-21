@@ -453,18 +453,41 @@ and coerce c (te : texpr) expected : texpr =
        with Mismatch ->
          unify_at te.l inner te.ty;
          mk (XVariant ("Option", [ inner ], 1, [ te ])) expected te.l)
-  | TFn fe, TFn ff ->
+  | _ ->
       unify_at te.l expected te.ty;
-      if (not fe.feff.poly) && not ff.feff.poly then begin
-        if ff.feff.io && not fe.feff.io then
-          err "E0503" te.l "this function performs io, which the expected type %s does not allow" (show_ty expected);
-        List.iter
-          (fun x -> if not (mem_ty x fe.feff.errs) then
-              err "E0501" te.l "this function can fail with %s, which the expected type does not allow" (show_ty x))
-          ff.feff.errs
-      end;
+      eff_check te.l expected te.ty;
       te
-  | _ -> unify_at te.l expected te.ty; te
+
+(* Unification ignores effects, so check them separately, through every type that can
+   hold a function (section 7.2): a function with more effects may not be used where
+   one with fewer is expected. Parameters are contravariant. *)
+and eff_check ?(invariant = false) l (expected : ty) (found : ty) =
+  match (repr expected, repr found) with
+  | TFn fe, TFn ff ->
+      let sub (a : eff) (b : eff) =
+        (* every effect of b must be allowed by a *)
+        if not (a.poly || b.poly) then begin
+          if b.io && not a.io then
+            err "E0503" l "this function performs io, which the expected type %s does not allow" (show_ty expected);
+          List.iter
+            (fun x -> if not (mem_ty x a.errs) then
+                err "E0501" l "this function can fail with %s, which the expected type %s does not allow" (show_ty x) (show_ty expected))
+            b.errs
+        end
+      in
+      sub fe.feff ff.feff;
+      (* through a mut argument the callee can store its own functions in the caller's
+         place, so the effects must be exactly the same *)
+      if invariant && not (fe.feff.poly || ff.feff.poly)
+         && (fe.feff.io <> ff.feff.io || List.exists (fun x -> not (mem_ty x ff.feff.errs)) fe.feff.errs) then
+        err "E0503" l "a mut argument must have exactly the parameter's effects: expected %s, found %s" (show_ty expected) (show_ty found);
+      if List.length fe.fps = List.length ff.fps then
+        List.iter2 (fun (_, pe) (_, pf) -> eff_check ~invariant l pf pe) fe.fps ff.fps;
+      eff_check ~invariant l fe.fret ff.fret
+  | TArray a, TArray b -> eff_check ~invariant l a b
+  | TTuple xs, TTuple ys | TNamed (_, xs), TNamed (_, ys) | TErr xs, TErr ys ->
+      if List.length xs = List.length ys then List.iter2 (eff_check ~invariant l) xs ys
+  | _ -> ()
 
 and check_or_infer c (e : Syntax.expr) (expected : ty option) : texpr =
   let l = e.loc in
@@ -704,6 +727,7 @@ and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : 
              | _, Some MMut -> err "E0304" a.aloc "parameter '%s' is not mut" n
              | _ -> ());
             let te = check c a.aexpr t in
+            if m = MMut then eff_check ~invariant:true a.aloc t te.ty;
             (match (a.amode, te.e) with
              | Some MTake, XVar v -> c.moved <- (v.vid, a.aloc) :: c.moved
              | Some MTake, _ -> err "E0302" a.aloc "'take' moves a variable; write it before a variable name"
@@ -1271,6 +1295,10 @@ and check_pat c (p : Syntax.pattern) (t : ty) (refutable : bool) : tpat =
         | PNeg _, LInt s -> LInt ("-" ^ s)
         | PNeg _, LFloat f -> LFloat (-. f)
         | _ -> lit in
+      (match (lit, repr t) with
+       | LInt s, TInt k -> int_fits k s l
+       | LInt s, _ -> int_fits IInt s l
+       | _ -> ());
       let lt = match lit with
         | LInt _ -> (match repr t with TInt _ as k -> k | _ -> TInt IInt)
         | LFloat _ -> (match repr t with TF32 -> TF32 | _ -> TFloat)

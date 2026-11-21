@@ -96,7 +96,9 @@ let run_interp (prog : Types.tprog) =
           Interp.flush_out ();
           Printf.eprintf "error: %s\n" (Interp.show_value env t v);
           exit 1
-      | Values.Trap (kind, l, msg) -> trap_exit kind l msg)
+      | Values.Trap (kind, l, msg) -> trap_exit kind l msg
+      (* the same report as the C backend's trap for a failed assert *)
+      | Interp.Assert_failed (_, l) -> trap_exit "assertion failed" l "assert")
 
 (* starnite test: each test runs alone; a trap fails only that test (section 22.1). *)
 let run_tests_interp file (user : Syntax.file) (prog : Types.tprog) =
@@ -168,7 +170,14 @@ let () =
                    let base = Filename.remove_extension file in
                    if base = file then file ^ ".out" else base
              in
-             if exe = file then (prerr_endline "error: the output path is the source file; choose another with -o"; exit 1);
+             (* compare the files themselves, so ./x.stn or a link to the source is caught too *)
+             let same =
+               try
+                 let a = Unix.stat file and b = Unix.stat exe in
+                 a.Unix.st_dev = b.Unix.st_dev && a.Unix.st_ino = b.Unix.st_ino
+               with Unix.Unix_error _ -> false
+             in
+             if same || exe = file then (prerr_endline "error: the output path is the source file; choose another with -o"; exit 1);
              Backend.build opts prog exe
          | _ -> exit (Backend.run opts prog file))
     | c -> Printf.eprintf "unknown command '%s'\n%s" c usage; exit 2
