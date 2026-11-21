@@ -1,0 +1,18 @@
+true
+false
+true
+false
+true
+false
+rhs c
+true
+rhs d
+false
+true
+rhs e
+rhs f
+true
+rhs g
+rhs h
+true
+exit 0

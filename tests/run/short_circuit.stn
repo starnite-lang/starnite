@@ -1,0 +1,30 @@
+# and / or run the right side only when the left does not decide the result. Covers a
+# right side that is only an expression (it could trap on overflow) and one that needs
+# statements of its own (a call that prints).
+fn say(tag: Str, v: Bool) -> Bool:
+    print(f"rhs {tag}")
+    v
+
+fn boom(x: Int) -> Bool:
+    x + 1 > 0
+
+fn main():
+    let big = 9223372036854775807
+    let t = true
+    let f = false
+    # expression-only right side: skipped, so no overflow trap
+    print(f"{t or (big + 1 > 0)}")
+    print(f"{f and (big + 1 > 0)}")
+    # expression-only right side: run, with the result it gives
+    print(f"{f or (big - 1 > 0)}")
+    print(f"{t and (big - 1 < 0)}")
+    # right side that emits statements: skipped
+    print(f"{t or say("a", true)}")
+    print(f"{f and say("b", true)}")
+    # right side that emits statements: run exactly once
+    print(f"{f or say("c", true)}")
+    print(f"{t and say("d", false)}")
+    # a call that overflows, behind a skipped and a run branch
+    print(f"{t or boom(big)}")
+    print(f"{f or say("e", false) or say("f", true)}")
+    print(f"{t and (f or say("g", true)) and not say("h", false)}")

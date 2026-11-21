@@ -1,0 +1,4 @@
+before
+trap: integer overflow at tests/run/short_circuit_trap.stn:3:7
+the result does not fit its type
+exit 2
