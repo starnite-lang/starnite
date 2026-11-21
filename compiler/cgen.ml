@@ -199,7 +199,8 @@ and ensure_type st t =
               else Printf.sprintf "%s (*%s)(StnAnyBox*%s);" ret (c_ident m) ps)
             info.trmethods_
         in
-        pr st.typedefs "struct StnVt_%s { %s };\n" m (if members = [] then "uint8_t _empty;" else String.concat " " members);
+        (* the table body goes with the prototypes, after every aggregate it mentions *)
+        pr st.protos "struct StnVt_%s { %s };\n" m (if members = [] then "uint8_t _empty;" else String.concat " " members);
         emit_helpers st t
     | TNamed _ when is_struct st t ->
         let fs = struct_fields st t in
@@ -538,56 +539,6 @@ let kname = function
 
 let unsigned_of = function
   | IInt | I64 | U64 -> "uint64_t" | I32 | U32 -> "uint32_t" | I16 | U16 -> "uint16_t" | I8 | U8 -> "uint8_t"
-
-(* The method table of [any] for the concrete type [at], and the release function of its
-   box. One wrapper per method takes the box and forwards the payload to the impl's
-   function; an impl that cannot fail is adapted to a trait method that can (section 3.4). *)
-let any_vtable st (any : ty) (at : ty) : string =
-  let tr, ta = match repr any with TAny (tr, ta) -> (tr, ta) | _ -> assert false in
-  let info = Hashtbl.find st.prog.traits tr in
-  let s = List.combine info.trparams ta in
-  let cm = mangle at and am = mangle any in
-  let cc = cty st at in
-  if not (Hashtbl.mem st.defined ("anyrel_" ^ cm)) then begin
-    Hashtbl.replace st.defined ("anyrel_" ^ cm) ();
-    pr st.protos "static void anyrel_%s(void* p);\n" cm;
-    pr st.helpers "static void anyrel_%s(void* p) { %s stn_free(p); }\n" cm
-      (if needs_rc st at then drop_stmt st at (Printf.sprintf "(*(%s*)((StnAnyBox*)p)->data)" cc) else "")
-  end;
-  let key = "vt_" ^ am ^ "__" ^ cm in
-  if not (Hashtbl.mem st.defined key) then begin
-    Hashtbl.replace st.defined key ();
-    ensure_type st any;
-    let entries =
-      List.map
-        (fun (m, (sg : fsig)) ->
-          let f, ftys =
-            match Typecheck.impl_method_in st.prog.impls tr ta m at with
-            | Some r -> r
-            | None -> unsupported Syntax.noloc "%s cannot be used as %s: its implementation of %s is built in and has no method table" (show_ty at) (show_ty any) tr
-          in
-          let impl_sg = (Hashtbl.find st.prog.fns f).fsig in
-          let iname = !request_instance st f ftys in
-          let ps = List.mapi (fun i (md, _, pt, _) -> (md, subst s pt, Printf.sprintf "p%d" i)) (List.tl sg.sparams) in
-          let ret = cty st (subst s sg.sret) in
-          let plist = String.concat "" (List.map (fun (md, pt, n) -> ", " ^ param_decl st md pt n) ps) in
-          let args = String.concat "" (List.map (fun (_, _, n) -> ", " ^ n) ps) in
-          let recv = Printf.sprintf "*(%s*)b->data" cc in
-          let w = Printf.sprintf "vtw_%s__%s__%s" am cm (c_ident m) in
-          (if sig_can_fail_sg sg then begin
-             if sig_can_fail_sg impl_sg then
-               pr st.helpers "static uint8_t %s(%s* _out, StnError* _err, StnAnyBox* b%s) { return %s(_out, _err, %s%s); }\n" w ret plist iname recv args
-             else
-               pr st.helpers "static uint8_t %s(%s* _out, StnError* _err, StnAnyBox* b%s) { *_out = %s(%s%s); return 0; }\n" w ret plist iname recv args
-           end else
-             pr st.helpers "static %s %s(StnAnyBox* b%s) { return %s(%s%s); }\n" ret w plist iname recv args);
-          (m, w))
-        info.trmethods_
-    in
-    pr st.helpers "static const StnVt_%s %s = { %s };\n" am key
-      (if entries = [] then "0" else String.concat ", " (List.map (fun (m, w) -> Printf.sprintf ".%s = %s" (c_ident m) w) entries))
-  end;
-  key
 
 (* Some m when [e] calls a lend function (section 4.6) *)
 let lend_sig fc (e : texpr) : bool option =
@@ -938,6 +889,61 @@ and call fc (e : texpr) (cl : callee) (targs : targ list) convs : r =
       line fc "}";
       { c = res; owned = true }
 
+(* The method table of [any] for the concrete type [at], and the release function of its
+   box. One wrapper per method takes the box and forwards the payload to the impl's
+   function; an impl that cannot fail is adapted to a trait method that can (section 3.4). *)
+and any_vtable st (any : ty) (at : ty) : string =
+  let tr, ta = match repr any with TAny (tr, ta) -> (tr, ta) | _ -> assert false in
+  let info = Hashtbl.find st.prog.traits tr in
+  let s = List.combine info.trparams ta in
+  let cm = mangle at and am = mangle any in
+  let cc = cty st at in
+  if not (Hashtbl.mem st.defined ("anyrel_" ^ cm)) then begin
+    Hashtbl.replace st.defined ("anyrel_" ^ cm) ();
+    pr st.protos "static void anyrel_%s(void* p);\n" cm;
+    pr st.helpers "static void anyrel_%s(void* p) { %s stn_free(p); }\n" cm
+      (if needs_rc st at then drop_stmt st at (Printf.sprintf "(*(%s*)((StnAnyBox*)p)->data)" cc) else "")
+  end;
+  let key = "vt_" ^ am ^ "__" ^ cm in
+  if not (Hashtbl.mem st.defined key) then begin
+    Hashtbl.replace st.defined key ();
+    ensure_type st any;
+    let entries =
+      List.map
+        (fun (m, (sg : fsig)) ->
+          let recv = Printf.sprintf "*(%s*)b->data" cc in
+          let w = Printf.sprintf "vtw_%s__%s__%s" am cm (c_ident m) in
+          match Typecheck.impl_method_in st.prog.impls tr ta m at with
+          | None when tr = "Show" && m = "show" ->
+              (* the built-in Show of a primitive, tuple or derived type: formatted by the
+                 runtime's own code, as a direct call would *)
+              let fc = { st; b = Buffer.create 64; ind = 0; sub = []; frames = []; can_fail = false; ret = TStr; vars = Hashtbl.create 1;
+                         self_struct = None; cached = Hashtbl.create 4; lend = None } in
+              pr st.helpers "static StnStr %s(StnAnyBox* b) { return %s; }\n" w (show_call fc at (Printf.sprintf "(%s)" recv));
+              (m, w)
+          | None -> unsupported Syntax.noloc "%s cannot be used as %s: its implementation of %s is built in and has no method table" (show_ty at) (show_ty any) tr
+          | Some (f, ftys) ->
+          let impl_sg = (Hashtbl.find st.prog.fns f).fsig in
+          let iname = !request_instance st f ftys in
+          let ps = List.mapi (fun i (md, _, pt, _) -> (md, subst s pt, Printf.sprintf "p%d" i)) (List.tl sg.sparams) in
+          let ret = cty st (subst s sg.sret) in
+          let plist = String.concat "" (List.map (fun (md, pt, n) -> ", " ^ param_decl st md pt n) ps) in
+          let args = String.concat "" (List.map (fun (_, _, n) -> ", " ^ n) ps) in
+          (if sig_can_fail_sg sg then begin
+             if sig_can_fail_sg impl_sg then
+               pr st.helpers "static uint8_t %s(%s* _out, StnError* _err, StnAnyBox* b%s) { return %s(_out, _err, %s%s); }\n" w ret plist iname recv args
+             else
+               pr st.helpers "static uint8_t %s(%s* _out, StnError* _err, StnAnyBox* b%s) { *_out = %s(%s%s); return 0; }\n" w ret plist iname recv args
+           end else
+             pr st.helpers "static %s %s(StnAnyBox* b%s) { return %s(%s%s); }\n" ret w plist iname recv args);
+          (m, w))
+        info.trmethods_
+    in
+    pr st.helpers "static const StnVt_%s %s = { %s };\n" am key
+      (if entries = [] then "0" else String.concat ", " (List.map (fun (m, w) -> Printf.sprintf ".%s = %s" (c_ident m) w) entries))
+  end;
+  key
+
 (* a call of a trait method on a trait value: through the method table of its box *)
 and any_call fc (e : texpr) tr ta m (self : ty) (targs : targ list) convs : r =
   let st = fc.st in
@@ -1071,6 +1077,7 @@ and show_call fc t (a : string) : string =
   | TDur -> Printf.sprintf "stn_show_dur(%s)" a
   | TBytes -> Printf.sprintf "stn_show_bytes(%s)" a
   | TErr _ -> Printf.sprintf "stn_show_error(%s)" a
+  | TAny ("Show", _) -> Printf.sprintf "%s.vt->show(%s.box)" a a
   | _ -> (
       match Typecheck.impl_method_in st.prog.impls "Show" [] "show" t with
       | Some (f, ftys) -> Printf.sprintf "%s(%s)" (!request_instance st f ftys) a

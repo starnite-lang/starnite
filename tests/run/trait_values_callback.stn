@@ -1,0 +1,32 @@
+# A callback passed through a trait value keeps its effects: when it fails, the caller
+# fails too (here `run` is inferred to fail with Oops), and the error reaches main.
+type Oops = Bad(n: Int)
+
+impl Show for Oops:
+    fn show(e: Oops) -> Str:
+        match e:
+            Bad(n) -> f"bad {n}"
+
+trait Visit:
+    fn visit(v: Self, f: fn(Int) -> Int) -> Int
+
+type Bag = struct(n: Int)
+
+impl Visit for Bag:
+    fn visit(v: Bag, f: fn(Int) -> Int) -> Int:
+        f(v.n)
+
+fn limit(x: Int) -> Int:
+    if x > 2:
+        fail(Bad(x))
+    x
+
+fn run(v: any Visit) -> Int:
+    v.visit(limit)
+
+fn main() ! io, Oops:
+    let v: any Visit = Bag(2)
+    print(f"{run(v)}")
+    let w: any Visit = Bag(9)
+    print(f"{(try run(w)).or(-1)}")
+    print(f"{run(w)}")

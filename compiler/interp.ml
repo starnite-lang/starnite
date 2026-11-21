@@ -147,6 +147,7 @@ let rec show_value env (t : ty) (v : value) : string =
   | TBytes, VInt n -> Int64.to_string n ^ "b"
   | TTuple ts, VTuple vs -> "(" ^ String.concat ", " (List.mapi (fun i t -> show_value env t vs.(i)) ts) ^ ")"
   | TErr _, VErr (et, x) -> show_value env et x
+  | TAny _, VAny (hidden, inner) -> show_value env hidden inner
   | _ -> (
       match resolve env "Show" [] "show" t with
       | Some (f, targs) -> as_str (call_fn env f targs [ v ] Syntax.noloc)
@@ -496,7 +497,18 @@ and eval env (te : texpr) : value =
       (* a generic function instantiated with a trait value gets one already *)
       match repr (tsub env a.ty) with
       | TAny _ -> eval env a
-      | at -> VAny (at, eval env a))
+      | at ->
+          (* as in C, only Show has a built-in method table *)
+          (match repr (tsub env te.ty) with
+           | TAny (tr, ta) when tr <> "Show" ->
+               let info = Hashtbl.find env.prog.traits tr in
+               List.iter
+                 (fun (m, _) ->
+                   if resolve env tr (List.map (tsub env) ta) m at = None then
+                     failwith (Printf.sprintf "%s cannot be used as %s: its implementation of %s is built in and has no method table" (show_ty at) (show_ty (tsub env te.ty)) tr))
+                 info.trmethods_
+           | _ -> ());
+          VAny (at, eval env a))
   | XFail a -> (
       let v = eval env a in
       match v with

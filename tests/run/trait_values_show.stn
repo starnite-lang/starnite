@@ -1,0 +1,20 @@
+# The built-in Show of primitives and tuples can be boxed as any Show, and a trait value
+# formats through its hidden type, also inside a tuple.
+type Vec = struct(x: Int, y: Int)
+
+impl Show for Vec:
+    fn show(v: Vec) -> Str:
+        f"<{v.x},{v.y}>"
+
+fn shown[T: Show](x: T) -> any Show:
+    x
+
+fn main():
+    let items: Array[any Show] = [5, "five", 2.5, true, 'c', (1, "a"), Vec(3, 4)]
+    for s in items:
+        print(s.show())
+    let pair: (any Show, Int) = (Vec(1, 2), 9)
+    print(f"{pair}")
+    print(f"{shown(42).show()} {shown(Vec(7, 8)).show()}")
+    let nested = (shown(1), shown("two"))
+    print(f"{nested}")

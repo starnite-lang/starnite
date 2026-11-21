@@ -634,7 +634,11 @@ and coerce c (te : texpr) expected : texpr =
       let ok =
         match repr found with
         | TParam _ -> find_impl c.tb ~bounds:c.tparams tr ta found <> None
-        | _ -> (match find_impl c.tb ~bounds:c.tparams tr ta found with Some (RImpl _) -> true | _ -> false)
+        | _ -> (
+            match find_impl c.tb ~bounds:c.tparams tr ta found with
+            | Some (RImpl _) -> true
+            | Some _ -> tr = "Show"   (* the table of a built-in Show is made from the runtime's own formatting *)
+            | None -> false)
       in
       if not ok then err "E0204" te.l "%s has no impl of %s written in the program, so it cannot be used as %s" (show_ty found) tr (show_ty expected);
       mk (XPack te) expected te.l
@@ -1245,9 +1249,10 @@ and trait_call c l tn trargs m (sg : fsig) self (receiver : texpr option) args e
            let sb = List.map (fun (p, _) -> (p, try List.assoc p sb with Not_found -> fresh ())) im.itparams in
            List.iter2 (fun a b -> try unify a (subst sb b) with Mismatch -> ()) ta im.itargs_
        | _ -> ()));
-  let targs, _ = check_args c l ~receiver ps args in
+  let targs, poly = check_args c l ~receiver ps args in
   c.obligations <- (self, tn, ta, l) :: c.obligations;
-  let convs = add_eff c l { sg.seff with errs = List.map (subst s) sg.seff.errs } in
+  (* the method's own effects, and those of any function argument whose effects are open *)
+  let convs = add_eff c l { sg.seff with errs = List.map (subst s) sg.seff.errs } @ List.concat_map (add_eff c l) poly in
   mk (XCall (CTrait (tn, ta, m, self), targs, convs)) ret l
 
 and infer_bracket c l (b : Syntax.expr) (args : Syntax.barg list) exp : texpr =
@@ -2082,6 +2087,17 @@ let declare_items tb modname (items : item list) =
                     err "E0201" fd.floc "'%s' returns %s, but trait %s requires %s" fd.fname (show_ty sg.sret) trn (show_ty want);
                   if sg.slend <> tsig.slend then
                     err "E0201" fd.floc "'%s' must %s lend, as in trait %s" fd.fname (if tsig.slend = None then "not" else "also") trn
+                end;
+                (* the impl's effects may be fewer than the trait's, never more *)
+                if fd.feffects <> None then begin
+                  let allowed = List.map (subst (("Self", fty) :: List.combine info.trparams targs)) tsig.seff.errs in
+                  List.iter
+                    (fun e ->
+                      if not (mem_ty e allowed) then
+                        err "E0501" fd.floc "'%s' can fail with %s, which trait %s does not allow" fd.fname (show_ty e) trn)
+                    sg.seff.errs;
+                  if sg.seff.io && not tsig.seff.io then
+                    err "E0503" fd.floc "'%s' performs io, which trait %s does not allow" fd.fname trn
                 end;
                 let sg = { sg with seff = (if fd.feffects = None then tsig.seff else sg.seff); sdeclared = true; sdisplay = "" } in
                 Hashtbl.replace tb.fns uname sg;

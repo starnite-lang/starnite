@@ -1,0 +1,18 @@
+# The aggregate that a trait method returns is met before the trait value that holds it:
+# main's first use is a call returning Wrapped, so its C type is emitted first.
+trait Tree:
+    fn wrap(t: Self) -> Wrapped
+
+type Wrapped = struct(inner: any Tree, n: Int)
+type Leaf = struct(v: Int)
+
+impl Tree for Leaf:
+    fn wrap(t: Leaf) -> Wrapped:
+        Wrapped(Leaf(t.v + 1), t.v)
+
+fn make(n: Int) -> Wrapped:
+    Wrapped(Leaf(n), n)
+
+fn main():
+    let w = make(5)
+    print(f"{w.n} {w.inner.wrap().n}")
