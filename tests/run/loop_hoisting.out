@@ -1,0 +1,8 @@
+[11, 12, 13] [1, 2, 3]
+[22, 24, 26] 72
+[x!, y!]
+[[100, 200], [300, 400]] [[1, 2], [3, 4]]
+[7, 2]
+trap: index out of range at tests/run/loop_hoisting.stn:42:11
+index 2, length 2
+exit 2

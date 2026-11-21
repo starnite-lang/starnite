@@ -1,0 +1,17 @@
+# integer kinds, wrapping operators and conversions (sections 3.1, 17.1)
+fn main():
+    let a: I8 = -128
+    let b: U8 = 255
+    print(f"{a} {b} {b +% 1} {a -% 1}")
+    let big: U64 = 18446744073709551615
+    print(f"{big} {big +% 2}")
+    print(f"{7 / 2} {-7 / 2} {7 % -2} {-7 % 2}")
+    print(f"{Int(3.99)} {Int(-3.99)} {Float(7) / 2.0}")
+    print(f"{I32(123456)} {U16(65535)} {Int('A')} {Char(9731)}")
+    let h = 0xFF + 0b1010 + 1_000
+    print(f"{h}")
+    var x = 1
+    for _ in 0..62:
+        x = x * 2
+    print(f"{x} {x *% 4}")
+    print(f"{abs(-5)} {min(3, 4)} {max(2.5, 1.5)}")

@@ -1,0 +1,19 @@
+# explicit moves with take (section 4.2)
+fn keep(take xs: Array[Int]) -> Array[Int]:
+    var ys = xs
+    ys.push(99)
+    ys
+
+fn main():
+    var a = [1, 2]
+    let b = keep(take a)
+    a = [7]
+    print(f"{a} {b}")
+    let c = [5]
+    if len(c) > 3:
+        print(f"{keep(take c)}")
+    else:
+        print(f"{c}")
+    for i in 0..2:
+        let d = [i]
+        print(f"{keep(take d)}")

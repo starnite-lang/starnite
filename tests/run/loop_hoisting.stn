@@ -1,0 +1,42 @@
+# Arrays hoisted out of loops (cgen with_hoisted): value semantics must not change.
+fn scale(mut xs: Array[Int], k: Int):
+    for i in 0..len(xs):
+        xs[i] = xs[i] * k
+
+fn total(xs: Array[Int]) -> Int:
+    var s = 0
+    var i = 0
+    while i < len(xs):
+        s += xs[i]
+        i += 1
+    s
+
+fn main():
+    var a = [1, 2, 3]
+    let b = a
+    # a is shared with b when the loop starts: the loop must copy it, once
+    for i in 0..len(a):
+        a[i] = a[i] + 10
+    print(f"{a} {b}")
+    scale(mut a, 2)
+    print(f"{a} {total(a)}")
+    var names = ["x", "y"]
+    for i in 0..len(names):
+        names[i] = names[i] + "!"
+    print(f"{names}")
+    var grid = [[1, 2], [3, 4]]
+    let before = grid
+    for i in 0..len(grid):
+        for j in 0..len(grid[i]):
+            grid[i][j] = grid[i][j] * 100
+    print(f"{grid} {before}")
+    # the array is reassigned inside the loop, so it is not hoisted
+    var c = [0]
+    for i in 0..3:
+        c = [i, i]
+        c[0] = 7
+    print(f"{c}")
+    # an out-of-range index still traps
+    var d = [1, 2]
+    for i in 0..3:
+        d[i] = i

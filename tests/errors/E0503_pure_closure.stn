@@ -1,0 +1,8 @@
+# expect: E0503 5:19
+fn apply(f: fn(Int) -> Int ! pure, x: Int) -> Int:
+    f(x)
+fn main():
+    let y = apply(fn(x): print_and_return(x), 1)
+fn print_and_return(x: Int) -> Int:
+    print("side effect")
+    x

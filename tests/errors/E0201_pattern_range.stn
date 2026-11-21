@@ -1,0 +1,6 @@
+# expect: E0201 5:9
+fn main():
+    let x: I8 = 1
+    match x:
+        300 -> print("a")
+        _ -> print("b")

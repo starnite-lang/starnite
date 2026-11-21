@@ -1,0 +1,8 @@
+# Regression: a match arm may overwrite the place its scrutinee was read from.
+fn main():
+    var xs: Array[Str?] = [Some(repeat("abc", 10)), None]
+    match xs[0]:
+        Some(s) ->
+            xs[0] = None
+            print(f"{s} {xs}")
+        None -> print("none")

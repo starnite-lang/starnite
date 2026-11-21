@@ -1,0 +1,4 @@
+# expect: E0103 4:5
+fn main():
+    let x = 1
+    x = 2

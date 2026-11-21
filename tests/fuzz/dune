@@ -1,0 +1,5 @@
+; SPDX-License-Identifier: GPL-3.0-or-later
+(executable
+ (name fuzz)
+ (libraries unix)
+ (flags (:standard -w +a-4-9-26-27-32..42-44-45-69-70 -warn-error -a)))

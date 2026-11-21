@@ -1,0 +1,4 @@
+before
+trap: assertion failed at tests/run/trap_assert.stn:4:5
+assert
+exit 2

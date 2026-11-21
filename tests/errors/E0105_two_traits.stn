@@ -1,0 +1,15 @@
+# expect: E0105 15:14
+trait A:
+    fn go(x: Self) -> Int
+trait B:
+    fn go(x: Self) -> Int
+type T = struct(n: Int)
+impl A for T:
+    fn go(x: T) -> Int:
+        1
+impl B for T:
+    fn go(x: T) -> Int:
+        2
+fn main():
+    let t = T(1)
+    let n = t.go()

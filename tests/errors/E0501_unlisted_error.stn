@@ -1,0 +1,3 @@
+# expect: E0501 3:5
+fn parse*(s: Str) -> Int:
+    parse_int(s)

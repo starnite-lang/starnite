@@ -1,0 +1,8 @@
+[1, 2, 3, 4, 5, 6, 7, 8, 9] depth 4
+[c, m, x]
+red [green, blue] true false
+3,0 1,4 true
+area 4.0 area 3.0
+zero positive and true true false
+none
+exit 0

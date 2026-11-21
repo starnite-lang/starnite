@@ -1,0 +1,5 @@
+# expect: E0203 5:5
+fn add(a: Int, b: Int) -> Int:
+    a + b
+fn main():
+    add(1)

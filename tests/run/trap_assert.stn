@@ -1,0 +1,4 @@
+# An assert in an ordinary program traps the same way on both backends.
+fn main():
+    print("before")
+    assert 1 == 2

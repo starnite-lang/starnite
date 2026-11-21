@@ -1,0 +1,4 @@
+# expect: E0102 4:17
+fn main():
+    let xs = [1]
+    print(f"{xs[Int?]}")

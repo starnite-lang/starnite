@@ -1,0 +1,70 @@
+type Vec3 = struct(x: Float, y: Float, z: Float)
+
+impl Add for Vec3:
+    fn add(a: Vec3, b: Vec3) -> Vec3:
+        Vec3(a.x + b.x, a.y + b.y, a.z + b.z)
+
+impl Div[Float] for Vec3:
+    fn div(a: Vec3, d: Float) -> Vec3:
+        Vec3(a.x / d, a.y / d, a.z / d)
+
+impl Show for Vec3:
+    fn show(self: Vec3) -> Str:
+        f"({self.x}, {self.y}, {self.z})"
+
+fn centroid(points: Array[Vec3]) -> Vec3:
+    var acc = Vec3(0.0, 0.0, 0.0)
+    for p in points:
+        acc += p
+    acc / Float(len(points))
+
+type Shape = Circle(r: Float) | Rect(w: Float, h: Float) | Empty
+
+fn area(s: Shape) -> Float:
+    match s:
+        Circle(r) -> 3.14159 * r * r
+        Rect(w, h) -> w * h
+        Empty -> 0.0
+
+type List[T] = Nil | Cons(head: T, tail: List[T])
+
+fn sum_list(xs: List[Int]) -> Int:
+    match xs:
+        Nil -> 0
+        Cons(h, t) -> h + sum_list(t)
+
+fn build(n: Int) -> List[Int]:
+    var l = Nil
+    var i = 0
+    while i < n:
+        l = Cons(i, l)
+        i += 1
+    l
+
+fn largest[T: Ord](xs: Array[T]) -> T?:
+    var best = None
+    for x in xs:
+        match best:
+            None -> best = Some(x)
+            Some(b) if x > b -> best = Some(x)
+            _ -> ()
+    best
+
+fn main():
+    let pts = [Vec3(1.0, 2.0, 3.0), Vec3(3.0, 4.0, 5.0)]
+    print(f"centroid {centroid(pts)}")
+    print(f"areas {area(Circle(1.0))} {area(Rect(2.0, 3.5))} {area(Empty)}")
+    print(f"sum {sum_list(build(100))}")
+    let squares = [x * x for x in 0..10 if x % 2 == 0]
+    print(f"squares {squares} len {len(squares)}")
+    print(f"largest {largest([3, 9, 2])} {largest(["b", "a"])} {largest([1.5])}")
+    var words = ["pear", "apple", "fig"]
+    sort(mut words)
+    print(f"sorted {words}")
+    var ys = [5, 3, 8, 1]
+    let zs = ys
+    ys.push(10)
+    ys[0] = 0
+    print(f"value semantics: ys={ys} zs={zs}")
+    let opt: Int? = 4
+    print(f"or {opt.or(0)} {None.or(7)}")

@@ -1,0 +1,6 @@
+1
+2
+3
+trap: index out of range at tests/run/trap_index.stn:5:18
+index 3, length 3
+exit 2

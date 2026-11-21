@@ -1,0 +1,5 @@
+# expect: E0323 5:9
+fn main():
+    var ys = ["p", "q"]
+    for y in mut ys:
+        ys.clear()

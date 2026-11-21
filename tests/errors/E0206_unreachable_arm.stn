@@ -1,0 +1,6 @@
+# expect: E0206 6:9
+fn main():
+    let x = 3
+    match x:
+        _ -> print("any")
+        3 -> print("three")

@@ -1,0 +1,6 @@
+# expect: E0303 6:10
+fn bump(mut x: Int):
+    x += 1
+fn main():
+    let n = 1
+    bump(mut n)

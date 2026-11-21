@@ -1,0 +1,4 @@
+# expect: E0101 4:13
+fn main():
+    let config = 1
+    let s = cofnig

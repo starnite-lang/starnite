@@ -1,0 +1,5 @@
+# expect: E0202 4:5
+type Nat = Succ(prev: Nat) | Zero
+fn main():
+    match Zero:
+        Zero -> print("z")

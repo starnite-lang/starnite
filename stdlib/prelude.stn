@@ -1,0 +1,194 @@
+# SPDX-License-Identifier: Apache-2.0
+# The core prelude (section 20.1), loaded before every module.
+# Functions declared without a body are runtime built-ins (milestone 1, section 22.1).
+
+type Option*[T] = None | Some(value: T)
+type Result*[T, E] = Ok(value: T) | Err(error: E)
+
+type ParseError* = InvalidNumber(text: Str) | OutOfRange(text: Str)
+
+trait Eq*:
+    fn eq(a: Self, b: Self) -> Bool
+trait Ord*:
+    fn cmp(a: Self, b: Self) -> Int
+trait Show*:
+    fn show(self: Self) -> Str
+trait Add*[R]:
+    fn add(a: Self, b: R) -> Self
+trait Sub*[R]:
+    fn sub(a: Self, b: R) -> Self
+trait Mul*[R]:
+    fn mul(a: Self, b: R) -> Self
+trait Div*[R]:
+    fn div(a: Self, b: R) -> Self
+trait From*[T]:
+    fn from(x: T) -> Self
+trait Default*:
+    fn default() -> Self
+trait Copy*:
+    fn copy_marker(x: Self) -> Self
+trait Hash*:
+    fn hash(x: Self) -> Int
+
+# ---- console ----
+fn print*(s: Str) ! io
+fn read_line*() -> Str? ! io
+fn clock_ns*() -> Int ! io
+
+# ---- arrays ----
+fn len*[T](xs: Array[T]) -> Int
+fn push*[T](mut xs: Array[T], take x: T)
+fn pop*[T](mut xs: Array[T]) -> T?
+fn insert*[T](mut xs: Array[T], i: Int, take x: T)
+fn remove*[T](mut xs: Array[T], i: Int) -> T
+fn clear*[T](mut xs: Array[T])
+fn filled*[T](n: Int, x: T) -> Array[T]
+fn extend*[T](mut xs: Array[T], ys: Array[T])
+fn copy*[T](x: T) -> T
+fn unreachable*[T](msg: Str) -> T
+
+# ---- strings ----
+fn len*(s: Str) -> Int
+fn chars*(s: Str) -> Array[Char]
+fn split*(s: Str, sep: Str) -> Array[Str]
+fn join*(xs: Array[Str], sep: Str) -> Str
+fn trim*(s: Str) -> Str
+fn contains*(s: Str, sub: Str) -> Bool
+fn starts_with*(s: Str, prefix: Str) -> Bool
+fn ends_with*(s: Str, suffix: Str) -> Bool
+fn repeat*(s: Str, n: Int) -> Str
+fn parse_int*(s: Str) -> Int ! ParseError
+fn parse_float*(s: Str) -> Float ! ParseError
+
+# ---- numbers ----
+fn sqrt*(x: Float) -> Float
+fn sin*(x: Float) -> Float
+fn cos*(x: Float) -> Float
+fn tan*(x: Float) -> Float
+fn exp*(x: Float) -> Float
+fn log*(x: Float) -> Float
+fn pow*(x: Float, y: Float) -> Float
+fn floor*(x: Float) -> Float
+fn ceil*(x: Float) -> Float
+fn abs*(x: Float) -> Float
+fn abs*(x: Int) -> Int
+
+fn min*[T: Ord](a: T, b: T) -> T:
+    if b < a: b else: a
+
+fn max*[T: Ord](a: T, b: T) -> T:
+    if b > a: b else: a
+
+# ---- options and results ----
+fn or*[T](o: T?, default: T) -> T:
+    match o:
+        Some(v) -> v
+        None -> default
+
+fn is_some*[T](o: T?) -> Bool:
+    match o:
+        Some(_) -> true
+        None -> false
+
+fn is_none*[T](o: T?) -> Bool:
+    match o:
+        Some(_) -> false
+        None -> true
+
+fn unwrap*[T](o: T?) -> T:
+    match o:
+        Some(v) -> v
+        None -> unreachable("unwrap of None")
+
+fn or*[T, E](r: Result[T, E], default: T) -> T:
+    match r:
+        Ok(v) -> v
+        Err(_) -> default
+
+fn is_ok*[T, E](r: Result[T, E]) -> Bool:
+    match r:
+        Ok(_) -> true
+        Err(_) -> false
+
+impl[T: Show] Show for Option[T]:
+    fn show(o: Option[T]) -> Str:
+        match o:
+            Some(v) -> f"Some({v})"
+            None -> "None"
+
+impl[T: Show, E: Show] Show for Result[T, E]:
+    fn show(r: Result[T, E]) -> Str:
+        match r:
+            Ok(v) -> f"Ok({v})"
+            Err(e) -> f"Err({e})"
+
+impl[T: Show] Show for Array[T]:
+    fn show(xs: Array[T]) -> Str:
+        var parts: Array[Str] = []
+        for x in xs:
+            parts.push(f"{x}")
+        "[" + join(parts, ", ") + "]"
+
+impl Show for ParseError:
+    fn show(e: ParseError) -> Str:
+        match e:
+            InvalidNumber(t) -> f"invalid number '{t}'"
+            OutOfRange(t) -> f"number out of range '{t}'"
+
+# ---- algorithms over arrays ----
+fn contains*[T: Eq](xs: Array[T], x: T) -> Bool:
+    for y in xs:
+        if y == x:
+            return true
+    false
+
+fn reverse*[T](mut xs: Array[T]):
+    var i = 0
+    var j = len(xs) - 1
+    while i < j:
+        let t = xs[i]
+        xs[i] = xs[j]
+        xs[j] = t
+        i += 1
+        j -= 1
+
+fn sort*[T: Ord](mut xs: Array[T]):
+    # insertion sort for short arrays, merge sort otherwise; stable
+    let n = len(xs)
+    if n < 2:
+        return
+    if n <= 16:
+        var i = 1
+        while i < n:
+            let x = xs[i]
+            var j = i
+            while j > 0 and xs[j - 1] > x:
+                xs[j] = xs[j - 1]
+                j -= 1
+            xs[j] = x
+            i += 1
+        return
+    let mid = n / 2
+    var left = xs[0..mid]
+    var right = xs[mid..n]
+    sort(mut left)
+    sort(mut right)
+    var i = 0
+    var j = 0
+    var k = 0
+    while i < len(left) and j < len(right):
+        if right[j] < left[i]:
+            xs[k] = right[j]
+            j += 1
+        else:
+            xs[k] = left[i]
+            i += 1
+        k += 1
+    while i < len(left):
+        xs[k] = left[i]
+        i += 1
+        k += 1
+    while j < len(right):
+        xs[k] = right[j]
+        j += 1
+        k += 1

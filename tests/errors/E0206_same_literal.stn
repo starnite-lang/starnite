@@ -1,0 +1,6 @@
+# expect: E0206 5:9
+fn main():
+    match 1:
+        1 -> print("a")
+        0x1 -> print("b")
+        _ -> print("c")

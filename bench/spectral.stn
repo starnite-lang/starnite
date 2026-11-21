@@ -1,0 +1,38 @@
+# spectral norm, same algorithm as spectral.c
+fn a(i: Int, j: Int) -> Float:
+    1.0 / Float((i + j) * (i + j + 1) / 2 + i + 1)
+
+fn mul_av(v: Array[Float], mut out: Array[Float]):
+    let n = len(v)
+    for i in 0..n:
+        var s = 0.0
+        for j in 0..n:
+            s += a(i, j) * v[j]
+        out[i] = s
+
+fn mul_atv(v: Array[Float], mut out: Array[Float]):
+    let n = len(v)
+    for i in 0..n:
+        var s = 0.0
+        for j in 0..n:
+            s += a(j, i) * v[j]
+        out[i] = s
+
+fn mul_atav(v: Array[Float], mut out: Array[Float], mut tmp: Array[Float]):
+    mul_av(v, mut tmp)
+    mul_atv(tmp, mut out)
+
+fn main():
+    let n = 2000
+    var u = filled(n, 1.0)
+    var v = filled(n, 0.0)
+    var tmp = filled(n, 0.0)
+    for _ in 0..10:
+        mul_atav(u, mut v, mut tmp)
+        mul_atav(v, mut u, mut tmp)
+    var vbv = 0.0
+    var vv = 0.0
+    for i in 0..n:
+        vbv += u[i] * v[i]
+        vv += v[i] * v[i]
+    print(f"{sqrt(vbv / vv)}")
