@@ -288,7 +288,8 @@ let () =
         Filename.concat (Filename.concat root "compiler") "main.exe"
   in
   Random.self_init ();
-  let seed = match !seed with Some s -> s | None -> Random.int (1 lsl 30) in
+  (* Random.bits gives 30 random bits; Random.int needs a bound below 2^30 *)
+  let seed = match !seed with Some s -> s | None -> Random.bits () in
   Printf.printf "seed %d\n%!" seed;
   let tmp = Filename.concat (Filename.get_temp_dir_name ()) (sprintf "starnite-fuzz-%d-%08x" (Unix.getpid ()) (Random.bits ())) in
   Unix.mkdir tmp 0o700;
