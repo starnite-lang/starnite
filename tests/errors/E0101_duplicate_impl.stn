@@ -1,0 +1,16 @@
+# expect: E0101 11:1
+trait Tag:
+    fn tag(x: Self) -> Str
+
+type X1 = struct(n: Int)
+
+impl Tag for X1:
+    fn tag(x: X1) -> Str:
+        "first"
+
+impl Tag for X1:
+    fn tag(x: X1) -> Str:
+        "second"
+
+fn main():
+    print("x")

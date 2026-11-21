@@ -6,7 +6,7 @@
 open Syntax
 open Types
 
-exception Unsupported of string * Syntax.loc
+exception Unsupported = Syntax.Unsupported
 
 let unsupported l fmt = Printf.ksprintf (fun m -> raise (Unsupported (m, l))) fmt
 
@@ -37,6 +37,27 @@ let pr buf fmt = Printf.bprintf buf fmt
 
 (* ---------- names ---------- *)
 
+(* A name chosen in the program, as part of a C name. The C names join their parts with
+   an underscore, so a name that has one, or that reads like a part of the scheme (Arr,
+   Any, E, Tup2, ...), is spelled out instead: Zq, then the name with Z written ZZ and
+   an underscore Zu. A plain name never starts with Z, so the two kinds cannot meet,
+   and two different types or traits always get different C names. *)
+let mangle_name n =
+  let reserved = [ "Int"; "I8"; "I16"; "I32"; "I64"; "U8"; "U16"; "U32"; "U64"; "Float"; "F32"; "Bool"; "Char"; "Unit";
+                   "Str"; "Dur"; "Bytes"; "Arr"; "Fn"; "Err"; "Any"; "E" ] in
+  let is_tuple_word =
+    String.length n > 3 && String.sub n 0 3 = "Tup"
+    && String.for_all (fun c -> c >= '0' && c <= '9') (String.sub n 3 (String.length n - 3))
+  in
+  let plain =
+    n <> "" && n.[0] <> 'Z'
+    && String.for_all (fun c -> (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) n
+    && (not (List.mem n reserved)) && not is_tuple_word
+  in
+  if plain then n
+  else
+    "Zq" ^ String.concat "" (List.map (function 'Z' -> "ZZ" | '_' -> "Zu" | c -> String.make 1 c) (List.init (String.length n) (String.get n)))
+
 let rec mangle t =
   match repr t with
   | TInt k -> ikind_name k
@@ -44,16 +65,20 @@ let rec mangle t =
   | TStr -> "Str" | TDur -> "Dur" | TBytes -> "Bytes"
   | TArray t -> "Arr_" ^ mangle t ^ "_E"
   | TTuple ts -> Printf.sprintf "Tup%d_%s_E" (List.length ts) (String.concat "_" (List.map mangle ts))
-  | TNamed (n, []) -> n
-  | TNamed (n, ts) -> n ^ "_" ^ String.concat "_" (List.map mangle ts) ^ "_E"
+  | TNamed (n, []) -> mangle_name n
+  | TNamed (n, ts) -> mangle_name n ^ "_" ^ String.concat "_" (List.map mangle ts) ^ "_E"
   | TFn _ -> "Fn"
   | TErr _ -> "Err"
-  | TAny (n, ts) -> "Any_" ^ n ^ "_" ^ String.concat "_" (List.map mangle ts) ^ "_E"
+  | TAny (n, ts) -> "Any_" ^ mangle_name n ^ "_" ^ String.concat "_" (List.map mangle ts) ^ "_E"
   | TParam p -> failwith ("cgen: unsubstituted type parameter " ^ p)
   | TVar _ -> failwith "cgen: unresolved type variable"
 
 let c_ident s =
   String.map (fun ch -> if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch = '_' then ch else '_') s
+
+(* the member of a method table that holds a trait method: prefixed, since a bare method
+   name can be a macro in the C headers (isnan, signbit, ...) *)
+let vt_member m = "m_" ^ c_ident m
 
 let c_string s =
   let b = Buffer.create (String.length s + 2) in
@@ -195,8 +220,8 @@ and ensure_type st t =
               let ps = List.map (fun (md, _, pt, _) -> match md with MMut -> cty st (subst s pt) ^ "*" | _ -> cty st (subst s pt)) (List.tl sg.sparams) in
               let ps = String.concat "" (List.map (fun p -> ", " ^ p) ps) in
               let ret = cty st (subst s sg.sret) in
-              if sig_can_fail_sg sg then Printf.sprintf "uint8_t (*%s)(%s*, StnError*, StnAnyBox*%s);" (c_ident m) ret ps
-              else Printf.sprintf "%s (*%s)(StnAnyBox*%s);" ret (c_ident m) ps)
+              if sig_can_fail_sg sg then Printf.sprintf "uint8_t (*%s)(%s*, StnError*, StnAnyBox*%s);" (vt_member m) ret ps
+              else Printf.sprintf "%s (*%s)(StnAnyBox*%s);" ret (vt_member m) ps)
             info.trmethods_
         in
         (* the table body goes with the prototypes, after every aggregate it mentions *)
@@ -735,7 +760,7 @@ let rec expr fc (e : texpr) : r =
            (* a generic function instantiated with a trait value: it is one already *)
            expr fc a
        | _ ->
-      let vt = any_vtable fc.st t at in
+      let vt = any_vtable fc.st e.l t at in
       let v = own fc (expr fc a) a.ty in
       let b = fresh st "_b" in
       line fc "StnAnyBox* %s = (StnAnyBox*)stn_alloc(sizeof(StnAnyBox) + sizeof(%s));" b (cty st at);
@@ -892,7 +917,7 @@ and call fc (e : texpr) (cl : callee) (targs : targ list) convs : r =
 (* The method table of [any] for the concrete type [at], and the release function of its
    box. One wrapper per method takes the box and forwards the payload to the impl's
    function; an impl that cannot fail is adapted to a trait method that can (section 3.4). *)
-and any_vtable st (any : ty) (at : ty) : string =
+and any_vtable st (l : Syntax.loc) (any : ty) (at : ty) : string =
   let tr, ta = match repr any with TAny (tr, ta) -> (tr, ta) | _ -> assert false in
   let info = Hashtbl.find st.prog.traits tr in
   let s = List.combine info.trparams ta in
@@ -921,9 +946,13 @@ and any_vtable st (any : ty) (at : ty) : string =
                          self_struct = None; cached = Hashtbl.create 4; lend = None } in
               pr st.helpers "static StnStr %s(StnAnyBox* b) { return %s; }\n" w (show_call fc at (Printf.sprintf "(%s)" recv));
               (m, w)
-          | None -> unsupported Syntax.noloc "%s cannot be used as %s: its implementation of %s is built in and has no method table" (show_ty at) (show_ty any) tr
+          | None -> unsupported l "%s cannot be used as %s: its implementation of %s is built in and has no method table" (show_ty at) (show_ty any) tr
           | Some (f, ftys) ->
           let impl_sg = (Hashtbl.find st.prog.fns f).fsig in
+          (* the type checker keeps an impl from failing where its trait method cannot; the
+             table calls the impl as the trait describes, so the two must agree *)
+          if sig_can_fail_sg impl_sg && not (sig_can_fail_sg sg) then
+            unsupported l "%s: the impl of %s.%s can fail, but the trait method cannot" (show_ty at) tr m;
           let iname = !request_instance st f ftys in
           let ps = List.mapi (fun i (md, _, pt, _) -> (md, subst s pt, Printf.sprintf "p%d" i)) (List.tl sg.sparams) in
           let ret = cty st (subst s sg.sret) in
@@ -940,7 +969,7 @@ and any_vtable st (any : ty) (at : ty) : string =
         info.trmethods_
     in
     pr st.helpers "static const StnVt_%s %s = { %s };\n" am key
-      (if entries = [] then "0" else String.concat ", " (List.map (fun (m, w) -> Printf.sprintf ".%s = %s" (c_ident m) w) entries))
+      (if entries = [] then "0" else String.concat ", " (List.map (fun (m, w) -> Printf.sprintf ".%s = %s" (vt_member m) w) entries))
   end;
   key
 
@@ -957,7 +986,7 @@ and any_call fc (e : texpr) tr ta m (self : ty) (targs : targ list) convs : r =
   let rv = tmp fc self (borrow fc (expr fc recv.a) recv.a.ty) in
   let avs = args_c fc ps (List.tl targs) in
   let rest = String.concat "" (List.map (fun a -> ", " ^ a) avs) in
-  let fp = Printf.sprintf "%s.vt->%s" rv (c_ident m) in
+  let fp = Printf.sprintf "%s.vt->%s" rv (vt_member m) in
   if sig_can_fail_sg sg then begin
     let res = fresh st "_r" and ev = fresh st "_e" in
     line fc "%s %s; StnError %s;" (ct fc t) res ev;
@@ -1077,7 +1106,7 @@ and show_call fc t (a : string) : string =
   | TDur -> Printf.sprintf "stn_show_dur(%s)" a
   | TBytes -> Printf.sprintf "stn_show_bytes(%s)" a
   | TErr _ -> Printf.sprintf "stn_show_error(%s)" a
-  | TAny ("Show", _) -> Printf.sprintf "%s.vt->show(%s.box)" a a
+  | TAny ("Show", _) -> Printf.sprintf "%s.vt->%s(%s.box)" a (vt_member "show") a
   | _ -> (
       match Typecheck.impl_method_in st.prog.impls "Show" [] "show" t with
       | Some (f, ftys) -> Printf.sprintf "%s(%s)" (!request_instance st f ftys) a

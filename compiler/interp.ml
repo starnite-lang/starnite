@@ -505,7 +505,7 @@ and eval env (te : texpr) : value =
                List.iter
                  (fun (m, _) ->
                    if resolve env tr (List.map (tsub env) ta) m at = None then
-                     failwith (Printf.sprintf "%s cannot be used as %s: its implementation of %s is built in and has no method table" (show_ty at) (show_ty (tsub env te.ty)) tr))
+                     raise (Syntax.Unsupported (Printf.sprintf "%s cannot be used as %s: its implementation of %s is built in and has no method table" (show_ty at) (show_ty (tsub env te.ty)) tr, te.l)))
                  info.trmethods_
            | _ -> ());
           VAny (at, eval env a))

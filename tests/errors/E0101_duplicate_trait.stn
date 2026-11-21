@@ -1,0 +1,9 @@
+# expect: E0101 5:1
+trait Tag:
+    fn a(x: Self) -> Int
+
+trait Tag:
+    fn b(x: Self) -> Str
+
+fn main():
+    print("x")

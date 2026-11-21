@@ -1,0 +1,5 @@
+ok 5
+err too big 9
+task bad 5
+free ok
+exit 0

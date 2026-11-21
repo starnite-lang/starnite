@@ -9,6 +9,9 @@ exception Error of string * loc * string (* code, location, message *)
 
 let error code loc fmt = Printf.ksprintf (fun m -> raise (Error (code, loc, m))) fmt
 
+(* a program that is valid but uses something a backend does not support yet *)
+exception Unsupported of string * loc
+
 type mode = MBorrow | MMut | MTake
 
 type ty =

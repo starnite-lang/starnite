@@ -1,0 +1,78 @@
+# generic and overlapping impls, and every kind of hidden type
+
+trait Tag:
+    fn tag(x: Self) -> Str
+    fn weight(x: Self, k: Int) -> Int
+
+type Pair[T] = struct(a: T, b: T)
+
+impl[T: Show] Tag for Pair[T]:
+    fn tag(x: Pair[T]) -> Str:
+        f"<{x.a},{x.b}>"
+    fn weight(x: Pair[T], k: Int) -> Int:
+        k * 2
+
+impl Tag for Pair[Bool]:
+    fn tag(x: Pair[Bool]) -> Str:
+        "bools"
+    fn weight(x: Pair[Bool], k: Int) -> Int:
+        k
+
+fn part1() ! io:
+    let xs: Array[any Tag] = [Pair(1, 2), Pair("a", "b"), Pair(true, false), Pair(1.5, 2.5)]
+    for x in xs:
+        print(f"{x.tag()} {x.weight(10)}")
+
+trait Describe:
+    fn describe(x: Self) -> Str
+
+impl Describe for Int:
+    fn describe(x: Int) -> Str:
+        f"int {x}"
+
+impl Describe for Float:
+    fn describe(x: Float) -> Str:
+        f"float {x}"
+
+impl Describe for Bool:
+    fn describe(x: Bool) -> Str:
+        f"bool {x}"
+
+impl Describe for Str:
+    fn describe(x: Str) -> Str:
+        f"str {x}"
+
+impl Describe for Array[Int]:
+    fn describe(x: Array[Int]) -> Str:
+        f"array {len(x)}"
+
+impl Describe for (Int, Str):
+    fn describe(x: (Int, Str)) -> Str:
+        f"tuple {x}"
+
+type Small = One(a: Int) | Two
+
+type Big = A(a: Float, b: Float, c: Float) | B
+
+impl Describe for Small:
+    fn describe(x: Small) -> Str:
+        match x:
+            One(a) -> f"one {a}"
+            Two -> "two"
+
+impl Describe for Big:
+    fn describe(x: Big) -> Str:
+        match x:
+            A(a, b, c) -> f"A {a + b + c}"
+            B -> "B"
+
+fn part2() ! io:
+    let xs: Array[any Describe] = [7, 2.5, true, "hi", [1, 2, 3], (4, "x"), One(5), Two, A(1.0, 2.0, 3.0), B]
+    for x in xs:
+        print(x.describe())
+    let ys = xs
+    print(f"{len(ys)}")
+
+fn main() ! io:
+    part1()
+    part2()

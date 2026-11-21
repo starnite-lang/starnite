@@ -49,7 +49,7 @@ let rec head t =
   | TVar _ -> "_"
   | TNever -> "_"
   | TErr _ -> "_err"
-  | TAny _ -> "any"
+  | TAny (n, _) -> "any " ^ n   (* a function for one trait value is not one for another *)
 
 (* A trait can be used with any only if every method takes Self as its first parameter,
    has no type parameters of its own, and does not return Self (section 3.4). Methods
@@ -2008,6 +2008,10 @@ let declare_items tb modname (items : item list) =
   List.iter
     (function
       | ITrait tr ->
+          (* a trait is named by its name alone until modules exist, so two with one name
+             would silently replace each other, a prelude trait included *)
+          if Hashtbl.mem tb.traits tr.trname then
+            err "E0101" tr.trloc "trait '%s' is already defined" tr.trname;
           let ps = List.map (fun g -> g.gname) tr.trgenerics in
           let info = { trname_ = tr.trname; trparams = ps; trmethods_ = [] } in
           Hashtbl.replace tb.traits tr.trname info
@@ -2063,6 +2067,12 @@ let declare_items tb modname (items : item list) =
           let targs = if targs = [] then List.map (fun _ -> fty) info.trparams else targs in
           if List.length targs <> List.length info.trparams then
             err "E0201" im.iloc "trait %s takes %d type argument(s)" trn (List.length info.trparams);
+          (* a second impl of the same trait for the same type would never be used *)
+          if List.exists
+               (fun (o : impl_info) ->
+                 o.itrait_ = trn && ty_equal o.ifor_ fty && List.length o.itargs_ = List.length targs && List.for_all2 ty_equal o.itargs_ targs)
+               tb.impls
+          then err "E0101" im.iloc "trait %s is already implemented for %s" trn (show_ty fty);
           let methods =
             List.map
               (fun (fd : Syntax.fn_def) ->
@@ -2094,23 +2104,28 @@ let declare_items tb modname (items : item list) =
                   (* function-typed parameters and results carry effects, which ty_equal does
                      not see: the impl must accept whatever the trait lets a caller pass,
                      and return nothing that does more than the trait promises *)
-                  let rec loses_poly (impl_t : ty) (trait_t : ty) =
+                  (* An open function type (one whose effects are the caller's, section 7.2)
+                     must stay open exactly where the trait's is: it decides how the method
+                     is called, and the method table calls the impl as the trait describes. *)
+                  let rec poly_differs (impl_t : ty) (trait_t : ty) =
                     match (repr impl_t, repr trait_t) with
                     | TFn fi, TFn ft ->
-                        (ft.feff.poly && not fi.feff.poly)
-                        || List.exists2 (fun (_, a) (_, b) -> loses_poly a b) fi.fps ft.fps
-                        || loses_poly fi.fret ft.fret
-                    | TArray a, TArray b -> loses_poly a b
-                    | TTuple xs, TTuple ys when List.length xs = List.length ys -> List.exists2 loses_poly xs ys
+                        fi.feff.poly <> ft.feff.poly
+                        || List.exists2 (fun (_, a) (_, b) -> poly_differs a b) fi.fps ft.fps
+                        || poly_differs fi.fret ft.fret
+                    | TArray a, TArray b -> poly_differs a b
+                    | TTuple xs, TTuple ys when List.length xs = List.length ys -> List.exists2 poly_differs xs ys
                     | _ -> false
                   in
                   List.iter2
                     (fun (m1, n1, t1, _) (_, _, t2, _) ->
                       let t2 = subst ts t2 in
-                      if loses_poly t1 t2 then
-                        err "E0503" fd.floc "parameter '%s' of '%s' must accept functions with any effects, as trait %s allows" n1 fd.fname trn;
+                      if poly_differs t1 t2 then
+                        err "E0503" fd.floc "parameter '%s' of '%s' must leave the effects of its function type open exactly where trait %s does" n1 fd.fname trn;
                       eff_check ~invariant:(m1 = MMut) fd.floc t1 t2)
                     sg.sparams tsig.sparams;
+                  if poly_differs sg.sret want then
+                    err "E0503" fd.floc "the function '%s' returns must leave its effects open exactly where trait %s does" fd.fname trn;
                   eff_check fd.floc want sg.sret;
                   if sg.slend <> tsig.slend then
                     err "E0201" fd.floc "'%s' must %s lend, as in trait %s" fd.fname (if tsig.slend = None then "not" else "also") trn

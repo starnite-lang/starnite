@@ -1,0 +1,52 @@
+# closures passed through trait values: capturing, failing, and taking a trait value
+
+trait Tag:
+    fn tag(x: Self) -> Str
+
+trait Walk:
+    fn walk(w: Self, f: fn(any Tag) -> Int) -> Int
+
+type A1 = struct(n: Int)
+type W = struct(k: Int)
+
+impl Tag for A1:
+    fn tag(x: A1) -> Str:
+        f"a{x.n}"
+
+impl Walk for W:
+    fn walk(w: W, f: fn(any Tag) -> Int) -> Int:
+        f(A1(w.k)) + f(A1(w.k + 1))
+
+fn part1() ! io:
+    let w: any Walk = W(5)
+    print(f"{w.walk(fn(t: any Tag): len(t.tag()))}")
+
+type Oops = Bad(n: Int)
+
+impl Show for Oops:
+    fn show(e: Oops) -> Str:
+        match e:
+            Bad(n) -> f"bad {n}"
+
+trait Visit:
+    fn visit(v: Self, f: fn(Int) -> Int) -> Int
+    fn both(v: Self, f: fn(Int) -> Int, g: fn(Int, Int) -> Int) -> Int
+
+type Bag = struct(n: Int)
+
+impl Visit for Bag:
+    fn visit(v: Bag, f: fn(Int) -> Int) -> Int:
+        f(v.n)
+    fn both(v: Bag, f: fn(Int) -> Int, g: fn(Int, Int) -> Int) -> Int:
+        g(f(v.n), f(v.n + 1))
+
+fn part2() ! io, Oops:
+    let v: any Visit = Bag(2)
+    let w = 10
+    print(f"{v.visit(fn(x: Int): x + w)}")
+    print(f"{v.both(fn(x: Int): x * w, fn(a: Int, b: Int): a + b)}")
+    print(f"{v.visit(fn(x: Int): fail(Bad(x)))}")
+
+fn main() ! io, Oops:
+    part1()
+    part2()

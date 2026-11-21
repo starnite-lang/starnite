@@ -1,0 +1,6 @@
+# expect: E0101 2:1
+trait Show:
+    fn render(x: Self, width: Int) -> Str
+
+fn main():
+    print("x")

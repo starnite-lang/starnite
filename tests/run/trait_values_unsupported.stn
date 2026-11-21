@@ -1,0 +1,8 @@
+# Only the built-in Show has a method table. Boxing another built-in implementation through
+# a generic bound is reported the same way, with the location, by every backend.
+fn boxed[T: Hash](x: T) -> any Hash:
+    x
+
+fn main():
+    let h = boxed(5)
+    print("not reached")

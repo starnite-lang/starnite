@@ -1,0 +1,18 @@
+# expect: E0503 14:5
+type Oops = Bad(n: Int)
+
+impl Show for Oops:
+    fn show(e: Oops) -> Str:
+        "oops"
+
+trait Visit:
+    fn visit(v: Self, f: fn(Int) -> Int ! Oops) -> Int
+
+type Bag = struct(n: Int)
+
+impl Visit for Bag:
+    fn visit(v: Bag, f: fn(Int) -> Int) -> Int:
+        f(v.n)
+
+fn main():
+    print("x")

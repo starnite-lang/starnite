@@ -1,0 +1,34 @@
+# the error of a trait method is converted at the call site through From
+
+type ConfigError = BadPort(text: Str)
+
+impl From[ParseError] for ConfigError:
+    fn from(e: ParseError) -> ConfigError:
+        match e:
+            InvalidNumber(t) -> BadPort(t)
+            OutOfRange(t) -> BadPort(t)
+
+impl Show for ConfigError:
+    fn show(e: ConfigError) -> Str:
+        match e:
+            BadPort(t) -> f"bad port '{t}'"
+
+trait Loader:
+    fn load(l: Self, text: Str) -> Int ! ParseError
+
+type Port = struct(base: Int)
+
+impl Loader for Port:
+    fn load(l: Port, text: Str) -> Int ! ParseError:
+        parse_int(text) + l.base
+
+fn go(l: any Loader, text: Str) -> Int ! ConfigError:
+    l.load(text)
+
+fn part1() ! io:
+    let l: any Loader = Port(1)
+    print(f"{(try go(l, "41")).or(-1)}")
+    print(f"{try go(l, "x")}")
+
+fn main() ! io:
+    part1()

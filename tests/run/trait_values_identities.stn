@@ -1,0 +1,72 @@
+# one trait with two argument lists, a type and a trait of one name, one method name in two traits
+
+trait Scale[N]:
+    fn scale(s: Self, by: N) -> N
+
+type Strict = struct(value: Int)
+
+impl Scale[Float] for Strict:
+    fn scale(s: Strict, by: Float) -> Float:
+        Float(s.value) * by
+
+impl Scale[Int] for Strict:
+    fn scale(s: Strict, by: Int) -> Int:
+        s.value + by
+
+fn part1() ! io:
+    let a: any Scale[Float] = Strict(4)
+    let b: any Scale[Int] = Strict(4)
+    print(f"{a.scale(2.5)} {b.scale(2)}")
+    let s = Strict(5)
+    print(f"{s.scale(2.0)} {s.scale(3)}")
+
+trait Shape:
+    fn area(s: Self) -> Float
+
+type Sq = struct(side: Float)
+type Shape = Circle(r: Float) | Rect(w: Float, h: Float)
+
+impl Shape for Sq:
+    fn area(s: Sq) -> Float:
+        s.side * s.side
+
+impl Shape for Shape:
+    fn area(s: Shape) -> Float:
+        match s:
+            Circle(r) -> 3.0 * r * r
+            Rect(w, h) -> w * h
+
+fn part2() ! io:
+    let xs: Array[any Shape] = [Sq(2.0), Circle(1.0), Rect(2.0, 3.0)]
+    for x in xs:
+        print(f"{x.area()}")
+    let c = Circle(2.0)
+    print(f"{c.area()}")
+
+trait Named:
+    fn name(x: Self) -> Str
+
+trait Titled:
+    fn name(x: Self) -> Str
+
+type P1 = struct(n: Int)
+
+impl Named for P1:
+    fn name(x: P1) -> Str:
+        "named"
+
+impl Titled for P1:
+    fn name(x: P1) -> Str:
+        "titled"
+
+fn part3() ! io:
+    let a: any Named = P1(1)
+    let b: any Titled = P1(1)
+    print(f"{a.name()} {b.name()}")
+    print(Named.name(P1(2)))
+    print(Titled.name(P1(2)))
+
+fn main() ! io:
+    part1()
+    part2()
+    part3()
