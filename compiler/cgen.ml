@@ -672,20 +672,25 @@ let rec expr fc (e : texpr) : r =
       push fc FStmt;
       let bx = expr fc b in
       let simple = Buffer.length fc.b = mark && (List.hd fc.frames).owned = [] && not bx.owned in
-      fc.frames <- saved;
-      if simple then { c = Printf.sprintf "(%s %s %s)" av (if is_and then "&&" else "||") bx.c; owned = false }
-      else begin
-      Buffer.truncate fc.b mark;
-      let res = tmp fc TBool av in
-      line fc "if (%s%s) {" (if is_and then "" else "!") res;
-      fc.ind <- fc.ind + 1;
-      push fc FStmt;
-      let bv = cond fc b in
-      line fc "%s = %s;" res bv;
-      pop fc;
-      fc.ind <- fc.ind - 1;
-      line fc "}";
-      { c = res; owned = false }
+      if simple then begin
+        fc.frames <- saved;
+        { c = Printf.sprintf "(%s %s %s)" av (if is_and then "&&" else "||") bx.c; owned = false }
+      end else begin
+        (* The right side is already generated, with its frame still open. Move its
+           statements inside the conditional instead of generating it a second time:
+           regenerating would make right-nested and/or cost exponential work. *)
+        let body = Buffer.sub fc.b mark (Buffer.length fc.b - mark) in
+        Buffer.truncate fc.b mark;
+        let res = tmp fc TBool av in
+        line fc "if (%s%s) {" (if is_and then "" else "!") res;
+        Buffer.add_string fc.b body;
+        fc.ind <- fc.ind + 1;
+        let bv = tmp fc TBool bx.c in
+        pop fc;
+        line fc "%s = %s;" res bv;
+        fc.ind <- fc.ind - 1;
+        line fc "}";
+        { c = res; owned = false }
       end
   | XBin (op, a, b) -> binop fc e op a b
   | XNeg a -> (
