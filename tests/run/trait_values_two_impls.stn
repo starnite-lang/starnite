@@ -1,0 +1,75 @@
+# One type implements one trait for function types that differ only in their effects, or only in their
+# signature. Each is its own trait value: its own C name, its own method table, its own impl.
+
+type Oops = Bad(n: Int)
+
+impl Show for Oops:
+    fn show(e: Oops) -> Str:
+        match e:
+            Bad(n) -> f"bad {n}"
+
+trait Make[F]:
+    fn make(m: Self) -> F
+    fn id(m: Self) -> Int
+
+type Maker = struct(n: Int)
+
+impl Make[fn(Int) -> Int ! Oops] for Maker:
+    fn make(m: Maker) -> fn(Int) -> Int ! Oops:
+        let n = m.n
+        fn(x: Int): if x > n: fail(Bad(x)) else: x
+    fn id(m: Maker) -> Int:
+        1
+
+impl Make[fn(Int) -> Int ! pure] for Maker:
+    fn make(m: Maker) -> fn(Int) -> Int ! pure:
+        let n = m.n
+        fn(x: Int): x + n
+    fn id(m: Maker) -> Int:
+        2
+
+fn call_failing(m: any Make[fn(Int) -> Int ! Oops], x: Int) -> Int ! Oops:
+    let f = m.make()
+    f(x)
+
+fn call_pure(m: any Make[fn(Int) -> Int ! pure], x: Int) -> Int:
+    let f = m.make()
+    f(x)
+
+fn by_effects() ! io:
+    let a: any Make[fn(Int) -> Int ! Oops] = Maker(3)
+    let b: any Make[fn(Int) -> Int ! pure] = Maker(3)
+    print(f"{a.id()} {b.id()}")
+    print(f"{call_pure(b, 5)}")
+    print(f"{(try call_failing(a, 2)).or(-1)} {(try call_failing(a, 9)).or(-1)}")
+
+trait MakeSig[F]:
+    fn make(m: Self) -> F
+    fn id(m: Self) -> Int
+
+type Maker2 = struct(n: Int)
+
+impl MakeSig[fn(Int) -> Int] for Maker2:
+    fn make(m: Maker2) -> fn(Int) -> Int:
+        let n = m.n
+        fn(x: Int): x + n
+    fn id(m: Maker2) -> Int:
+        1
+
+impl MakeSig[fn(Str) -> Str] for Maker2:
+    fn make(m: Maker2) -> fn(Str) -> Str:
+        fn(s: Str): s + "!"
+    fn id(m: Maker2) -> Int:
+        2
+
+fn by_signature() ! io:
+    let a: any MakeSig[fn(Int) -> Int] = Maker2(3)
+    let b: any MakeSig[fn(Str) -> Str] = Maker2(3)
+    print(f"{a.id()} {b.id()}")
+    let f = a.make()
+    let g = b.make()
+    print(f"{f(4)} {g("hi")}")
+
+fn main() ! io:
+    by_effects()
+    by_signature()

@@ -58,20 +58,41 @@ let mangle_name n =
   else
     "Zq" ^ String.concat "" (List.map (function 'Z' -> "ZZ" | '_' -> "Zu" | c -> String.make 1 c) (List.init (String.length n) (String.get n)))
 
-let rec mangle t =
+(* The C name of a type. Every function type is one C type, so [mangle] gives them all the
+   name Fn. [mangle_eff] keeps them apart: where two types must stay different by more
+   than their C type, because an impl is chosen by them (the trait arguments of a trait
+   value, the type an impl is for, the type arguments of an instance), a function type
+   goes into the name whole, through a digest of its parameters with their modes, its
+   result and its effects as a set. A trait value's own name always uses it for its trait
+   arguments. *)
+let rec mangle_with (fine : bool) t =
+  let go = mangle_with fine in
   match repr t with
   | TInt k -> ikind_name k
   | TFloat -> "Float" | TF32 -> "F32" | TBool -> "Bool" | TChar -> "Char" | TUnit | TNever -> "Unit"
   | TStr -> "Str" | TDur -> "Dur" | TBytes -> "Bytes"
-  | TArray t -> "Arr_" ^ mangle t ^ "_E"
-  | TTuple ts -> Printf.sprintf "Tup%d_%s_E" (List.length ts) (String.concat "_" (List.map mangle ts))
+  | TArray t -> "Arr_" ^ go t ^ "_E"
+  | TTuple ts -> Printf.sprintf "Tup%d_%s_E" (List.length ts) (String.concat "_" (List.map go ts))
   | TNamed (n, []) -> mangle_name n
-  | TNamed (n, ts) -> mangle_name n ^ "_" ^ String.concat "_" (List.map mangle ts) ^ "_E"
-  | TFn _ -> "Fn"
+  | TNamed (n, ts) -> mangle_name n ^ "_" ^ String.concat "_" (List.map go ts) ^ "_E"
+  | TFn f -> if fine then "Fn" ^ fn_digest f else "Fn"
   | TErr _ -> "Err"
-  | TAny (n, ts) -> "Any_" ^ mangle_name n ^ "_" ^ String.concat "_" (List.map mangle ts) ^ "_E"
+  | TAny (n, ts) -> "Any_" ^ mangle_name n ^ "_" ^ String.concat "_" (List.map (mangle_with true) ts) ^ "_E"
   | TParam p -> failwith ("cgen: unsubstituted type parameter " ^ p)
   | TVar _ -> failwith "cgen: unresolved type variable"
+
+and fn_digest (f : fnty) : string =
+  let errs = List.sort compare (List.map (mangle_with true) f.feff.errs) in
+  let mode = function MMut -> "mut " | MTake -> "take " | MBorrow -> "" in
+  let s =
+    Printf.sprintf "(%s)->%s!%b,%b,%s"
+      (String.concat "," (List.map (fun (m, t) -> mode m ^ mangle_with true t) f.fps))
+      (mangle_with true f.fret) f.feff.io f.feff.poly (String.concat "," errs)
+  in
+  String.sub (Digest.to_hex (Digest.string s)) 0 16
+
+let mangle t = mangle_with false t
+let mangle_eff t = mangle_with true t
 
 let c_ident s =
   String.map (fun ch -> if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch = '_' then ch else '_') s
@@ -508,7 +529,7 @@ let sig_can_fail (sg : fsig) =
 let fn_can_fail_ty (f : fnty) = f.feff.errs <> [] || f.feff.poly
 
 let inst_name uname targs =
-  "fn_" ^ c_ident uname ^ (if targs = [] then "" else "__" ^ String.concat "__" (List.map mangle targs))
+  "fn_" ^ c_ident uname ^ (if targs = [] then "" else "__" ^ String.concat "__" (List.map mangle_eff targs))
 
 let param_decl st m t name =
   match m with
@@ -921,12 +942,14 @@ and any_vtable st (l : Syntax.loc) (any : ty) (at : ty) : string =
   let tr, ta = match repr any with TAny (tr, ta) -> (tr, ta) | _ -> assert false in
   let info = Hashtbl.find st.prog.traits tr in
   let s = List.combine info.trparams ta in
-  let cm = mangle at and am = mangle any in
+  let am = mangle any and cm = mangle_eff at in
   let cc = cty st at in
-  if not (Hashtbl.mem st.defined ("anyrel_" ^ cm)) then begin
-    Hashtbl.replace st.defined ("anyrel_" ^ cm) ();
-    pr st.protos "static void anyrel_%s(void* p);\n" cm;
-    pr st.helpers "static void anyrel_%s(void* p) { %s stn_free(p); }\n" cm
+  (* the box is released by the representation of its value alone *)
+  let crel = mangle at in
+  if not (Hashtbl.mem st.defined ("anyrel_" ^ crel)) then begin
+    Hashtbl.replace st.defined ("anyrel_" ^ crel) ();
+    pr st.protos "static void anyrel_%s(void* p);\n" crel;
+    pr st.helpers "static void anyrel_%s(void* p) { %s stn_free(p); }\n" crel
       (if needs_rc st at then drop_stmt st at (Printf.sprintf "(*(%s*)((StnAnyBox*)p)->data)" cc) else "")
   end;
   let key = "vt_" ^ am ^ "__" ^ cm in

@@ -2099,7 +2099,7 @@ let declare_items tb modname (items : item list) =
           (* a second impl of the same trait for the same type would never be used *)
           if List.exists
                (fun (o : impl_info) ->
-                 o.itrait_ = trn && ty_equal o.ifor_ fty && List.length o.itargs_ = List.length targs && List.for_all2 ty_equal o.itargs_ targs)
+                 o.itrait_ = trn && ty_equal_eff o.ifor_ fty && List.length o.itargs_ = List.length targs && List.for_all2 ty_equal_eff o.itargs_ targs)
                tb.impls
           then err "E0101" im.iloc "trait %s is already implemented for %s" trn (show_ty fty);
           let seen_m = Hashtbl.create 8 in
