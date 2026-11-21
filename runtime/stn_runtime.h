@@ -108,6 +108,15 @@ static inline void stn_array_make_unique(StnArray** a) {
     if (__builtin_expect(!stn_unique(*a), 0)) stn_array_copy_for_write(a);
 }
 void      stn_array_push_slow(StnArray** a, const void* elem);
+/* A push with the element type known, so the store is a typed assignment rather
+   than a memcpy of a size read at run time. Evaluates v once. */
+#define STN_PUSH(pa, T, v) do {                                                       \
+        StnArray* stn_pa_ = *(pa);                                                    \
+        if (__builtin_expect(stn_unique(stn_pa_) && stn_pa_->len < stn_pa_->cap, 1)) \
+            ((T*)stn_pa_->data)[stn_pa_->len++] = (v);                                \
+        else { T stn_pv_ = (v); stn_array_push_slow((pa), &stn_pv_); }               \
+    } while (0)
+
 /* takes the element; constant time on average, since capacity doubles */
 static inline void stn_array_push(StnArray** pa, const void* elem) {
     StnArray* a = *pa;

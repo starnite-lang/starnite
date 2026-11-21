@@ -275,6 +275,18 @@ void stn_array_reserve(StnArray** pa, int64_t extra) {
         int64_t cap = a->cap ? a->cap * 2 : 4;
         while (cap < need) cap *= 2;
         size_t bytes = sizeof(StnArray) + (size_t)cap * a->ops->size;
+#ifndef STN_DEBUG
+        /* a large buffer already belongs to the system allocator, whose realloc can
+           move pages instead of copying them; the debug build keeps copying so that
+           every freed block goes through the poison and quarantine of stn_free */
+        if (a->h.size_class == 0 && bytes > (size_t)STN_CLASSES * 16) {
+            StnArray* b = (StnArray*)realloc(a, bytes);
+            if (!b) { fputs("trap: out of memory\n", stderr); exit(2); }
+            b->cap = cap;
+            *pa = b;
+            return;
+        }
+#endif
         StnArray* b = (StnArray*)stn_alloc(bytes);
         uint8_t sc = b->h.size_class;
         memcpy(b, a, sizeof(StnArray) + (size_t)a->len * a->ops->size);

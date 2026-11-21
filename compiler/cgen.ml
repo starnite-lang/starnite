@@ -369,6 +369,7 @@ type fc = {
   ret : ty;
   vars : (int, vinfo) Hashtbl.t;
   self_struct : string option;
+  cached : (int, string * string) Hashtbl.t;  (* arrays hoisted for a loop: data and length names *)
 }
 
 type r = { c : string; owned : bool }
@@ -538,6 +539,10 @@ let rec expr fc (e : texpr) : r =
   | XTupleGet (b, i) ->
       let bv = borrow fc (expr fc b) b.ty in
       { c = Printf.sprintf "(%s).f%d" bv i; owned = false }
+  | XIndex ({ e = XVar v; _ }, i) when Hashtbl.mem fc.cached v.vid ->
+      let d, n = Hashtbl.find fc.cached v.vid in
+      let iv = tmp fc (TInt IInt) (expr fc i).c in
+      { c = Printf.sprintf "%s[stn_index(%s, %s, %s)]" d iv n (loc_args e.l); owned = false }
   | XIndex (a, i) ->
       let av = borrow fc (expr fc a) a.ty in
       let iv = (expr fc i).c in
@@ -561,7 +566,7 @@ let rec expr fc (e : texpr) : r =
         (fun x ->
           let v = own fc (expr fc x) x.ty in
           let n = tmp fc elt v in
-          line fc "stn_array_push(&%s, &%s);" a n)
+          line fc "STN_PUSH(&%s, %s, %s);" a (cty st elt) n)
         es;
       { c = a; owned = true }
   | XStruct (_, _, es) ->
@@ -669,7 +674,7 @@ let rec expr fc (e : texpr) : r =
             push fc FStmt;
             let v = own fc (expr fc body) body.ty in
             let n = tmp fc elt v in
-            line fc "stn_array_push(&%s, &%s);" a n;
+            line fc "STN_PUSH(&%s, %s, %s);" a (cty st elt) n;
             pop fc
         | cp :: rest ->
             loop_over fc cp.csrc cp.cvar (fun () ->
@@ -1121,8 +1126,10 @@ and bind_pattern fc binds =
 
 and match_ fc t (s : texpr) arms : r =
   let st = fc.st in
-  let sv = borrow fc (expr fc s) s.ty in
-  let sv = if rc fc s.ty then sv else tmp fc s.ty sv in
+  (* The arms bind borrowed views into the scrutinee, so it must outlive the match even
+     when an arm overwrites the place it was read from: hold a reference of our own. *)
+  let sv = tmp fc s.ty (own fc (expr fc s) s.ty) in
+  if rc fc s.ty then own_in fc sv s.ty;
   let has_value = match repr t with TUnit | TNever -> false | _ -> true in
   let res = fresh st "_r" and endl = fresh st "match_end" in
   if has_value then line fc "%s %s;" (ct fc t) res;
@@ -1184,7 +1191,7 @@ and closure fc (lam : lambda) : string =
       (String.concat "" (List.map (fun (v, m) -> ", " ^ param_decl st m (ts fc v.vty) (var_name v)) params))
   in
   pr st.protos "%s;\n" header;
-  let fc' = { st; b; ind = 1; sub = fc.sub; frames = []; can_fail = true; ret = ft.fret; vars = Hashtbl.create 16; self_struct = Some name } in
+  let fc' = { st; b; ind = 1; sub = fc.sub; frames = []; can_fail = true; ret = ft.fret; vars = Hashtbl.create 16; self_struct = Some name; cached = Hashtbl.create 4 } in
   List.iter
     (fun (v : var) ->
       if is_cell fc v then Hashtbl.replace fc'.vars v.vid (VCapCell (Printf.sprintf "((%s_t*)self_)->%s" name (cap_field v), ts fc v.vty))
@@ -1247,7 +1254,13 @@ and place_lvalue fc (p : place) : string =
         line fc "stn_array_make_unique(&%s);" lv;
         go (Printf.sprintf "((%s*)(%s)->data)[stn_index(%s, (%s)->len, %s)]" (cty fc.st et) lv iv lv (loc_args ix.l)) et rest
   in
-  go root (ts fc p.root.vty) p.path
+  match (Hashtbl.find_opt fc.cached p.root.vid, p.path) with
+  | Some (d, n), PIndex ix :: rest ->
+      (* hoisted for this loop: already unshared, and its data and length are fixed *)
+      let et = match repr (ts fc p.root.vty) with TArray et -> et | _ -> assert false in
+      let iv = tmp fc (TInt IInt) (expr fc ix).c in
+      go (Printf.sprintf "%s[stn_index(%s, %s, %s)]" d iv n (loc_args ix.l)) et rest
+  | _ -> go root (ts fc p.root.vty) p.path
 
 and place_lvalue_of_expr fc (e : texpr) : string =
   let rec to_place (e : texpr) : place option =
@@ -1346,6 +1359,116 @@ and loop_over fc (src : titer) (p : tpat) (body : unit -> unit) =
       fc.ind <- fc.ind - 1;
       line fc "}"
 
+(* ---------- hoisting arrays out of loops ---------- *)
+
+(* A loop whose body uses an array variable only through element reads, element writes
+   and len cannot change that array's identity or length: nothing else can reach a
+   local or mut parameter that is not a shared cell. The array is made unshared once
+   before the loop (if the body writes it), and its data pointer and length are read
+   into locals, so the bounds checks compare against a value the C compiler knows is
+   fixed. Every check stays. *)
+and with_hoisted fc (body : texpr list) (k : unit -> unit) =
+  let cands = Hashtbl.create 4 in
+  List.iter (iter_vars (fun (v : var) ->
+      match (repr (ts fc v.vty), Hashtbl.find_opt fc.vars v.vid) with
+      | TArray _, Some (VDirect _ | VPtr _) when not (Hashtbl.mem fc.cached v.vid) -> Hashtbl.replace cands v.vid v
+      | _ -> ())) body;
+  let added = ref [] in
+  Hashtbl.iter
+    (fun _ (v : var) ->
+      match hoistable v body with
+      | Some writes ->
+          let lv = var_read fc v in
+          let et = match repr (ts fc v.vty) with TArray et -> et | _ -> assert false in
+          if writes then line fc "stn_array_make_unique(&%s);" lv;
+          let d = fresh fc.st "_d" and n = fresh fc.st "_n" in
+          line fc "%s* %s = (%s*)(%s)->data; int64_t %s = (%s)->len;" (ct fc et) d (ct fc et) lv n lv;
+          Hashtbl.replace fc.cached v.vid (d, n);
+          added := v.vid :: !added
+      | None -> ())
+    cands;
+  k ();
+  List.iter (Hashtbl.remove fc.cached) !added
+
+and iter_vars (f : var -> unit) (e : texpr) = walk_texpr (fun (x : texpr) -> match x.e with XVar v -> f v | _ -> ()) (fun _ -> ()) e
+
+(* visit every expression and statement *)
+and walk_texpr (fe : texpr -> unit) (fs : tstmt -> unit) (e : texpr) =
+  let we = walk_texpr fe fs in
+  let wit = function IRange (a, b) -> we a; we b | IArray (a, _) -> we a in
+  let rec ws (s : tstmt) =
+    fs s;
+    match s.st with
+    | SLet (_, e) | SVar (_, e) | SExpr e | SReturn e | SAssert (e, _) | SAssertFails (_, e) | SCheck e -> we e
+    | SAssign (p, e) -> List.iter (function PIndex i -> we i | _ -> ()) p.path; we e
+    | SBreak | SContinue -> ()
+    | SWhile (c, b) -> we c; we b
+    | SFor (_, it, b) -> wit it; we b
+    | SLocalFn (_, lam) -> we lam.lbody
+  in
+  fe e;
+  match e.e with
+  | XLit _ | XNone | XVar _ | XFnRef _ -> ()
+  | XFStr es | XTuple es | XArray es | XStruct (_, _, es) | XVariant (_, _, _, es) -> List.iter we es
+  | XCall (cl, args, _) -> (match cl with CClosure f -> we f | _ -> ()); List.iter (fun a -> we a.a) args
+  | XField (b, _, _) | XTupleGet (b, _) | XNeg b | XNot b | XTry b | XConv b | XFail b -> we b
+  | XIndex (a, b) | XBin (_, a, b) -> we a; we b
+  | XSlice (a, b, c) | XIf (a, b, c) -> we a; we b; we c
+  | XBlock (ss, v) -> List.iter ws ss; we v
+  | XMatch (s, arms) -> we s; List.iter (fun a -> Option.iter we a.guard; we a.body) arms
+  | XLambda lam -> we lam.lbody
+  | XComp (b, cs) -> we b; List.iter (fun cp -> wit cp.csrc; Option.iter we cp.ccond) cs
+
+(* Some writes when [v] is used only through elements and len in [body] *)
+and hoistable (v : var) (body : texpr list) : bool option =
+  let writes = ref false in
+  let is_v (e : texpr) = match e.e with XVar w -> w.vid = v.vid | _ -> false in
+  let rec ok (e : texpr) : bool =
+    match e.e with
+    | XVar w -> w.vid <> v.vid
+    | XIndex (a, i) when is_v a -> ok i
+    | XCall (CBuiltin ("len@Array", _), [ a ], _) when is_v a.a -> true
+    | XLambda lam -> (not (List.exists (fun (c : var) -> c.vid = v.vid) lam.lcaps)) && ok lam.lbody
+    | XCall (cl, args, _) ->
+        (* an element passed as mut may be written *)
+        List.iter (fun a -> if a.amode = MMut && mentions a.a then writes := true) args;
+        (match cl with CClosure f -> ok f | _ -> true) && List.for_all (fun a -> ok a.a) args
+    | _ -> children_ok e
+  and mentions (e : texpr) = let m = ref false in iter_vars (fun w -> if w.vid = v.vid then m := true) e; !m
+  and children_ok (e : texpr) : bool =
+    let good = ref true in
+    let first = ref true in
+    (* check the immediate children only; ok recurses itself *)
+    let visit_child (c : texpr) = if not (ok c) then good := false in
+    let wit = function IRange (a, b) -> visit_child a; visit_child b | IArray (a, _) -> visit_child a in
+    let rec st (s : tstmt) =
+      match s.st with
+      | SLet (_, e) | SVar (_, e) | SExpr e | SReturn e | SAssert (e, _) | SAssertFails (_, e) | SCheck e -> visit_child e
+      | SAssign (p, e) ->
+          if p.root.vid = v.vid then (match p.path with PIndex _ :: _ -> writes := true | _ -> good := false);
+          List.iter (function PIndex i -> visit_child i | _ -> ()) p.path;
+          visit_child e
+      | SBreak | SContinue -> ()
+      | SWhile (c, b) -> visit_child c; visit_child b
+      | SFor (_, it, b) -> wit it; visit_child b
+      | SLocalFn (_, lam) ->
+          if List.exists (fun (c : var) -> c.vid = v.vid) lam.lcaps then good := false;
+          visit_child lam.lbody
+    in
+    ignore first;
+    (match e.e with
+     | XLit _ | XNone | XVar _ | XFnRef _ | XLambda _ | XCall _ -> ()
+     | XFStr es | XTuple es | XArray es | XStruct (_, _, es) | XVariant (_, _, _, es) -> List.iter visit_child es
+     | XField (b, _, _) | XTupleGet (b, _) | XNeg b | XNot b | XTry b | XConv b | XFail b -> visit_child b
+     | XIndex (a, b) | XBin (_, a, b) -> visit_child a; visit_child b
+     | XSlice (a, b, c) | XIf (a, b, c) -> visit_child a; visit_child b; visit_child c
+     | XBlock (ss, x) -> List.iter st ss; visit_child x
+     | XMatch (s, arms) -> visit_child s; List.iter (fun a -> Option.iter visit_child a.guard; visit_child a.body) arms
+     | XComp (b, cs) -> visit_child b; List.iter (fun cp -> wit cp.csrc; Option.iter visit_child cp.ccond) cs);
+    !good
+  in
+  if v.vcell then None else if List.for_all ok body then Some !writes else None
+
 (* ---------- statements ---------- *)
 
 and declare_var fc (v : var) (init : string) =
@@ -1414,6 +1537,7 @@ and stmt fc (s : tstmt) =
        drop_until fc (fun f -> f.fk = FLoop);
        line fc "continue;"
    | SWhile (c, body) ->
+       with_hoisted fc [ c; body ] @@ fun () ->
        line fc "for (;;) {";
        fc.ind <- fc.ind + 1;
        push fc FLoop;
@@ -1425,7 +1549,7 @@ and stmt fc (s : tstmt) =
        pop fc;
        fc.ind <- fc.ind - 1;
        line fc "}"
-   | SFor (p, src, body) -> loop_over fc src p (fun () -> discard fc body)
+   | SFor (p, src, body) -> with_hoisted fc [ body ] (fun () -> loop_over fc src p (fun () -> discard fc body))
    | SAssert (e, _) ->
        let cv = cond fc e in
        line fc "if (!%s) stn_trap(\"assertion failed\", %s, \"assert\");" cv (loc_args s.sl)
@@ -1473,12 +1597,15 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       line fc "}";
       { c = res; owned = true }
   | "clock_ns@" -> value "stn_clock_ns()"
-  | "len@Array" -> value (Printf.sprintf "(%s)->len" (b 0))
+  | "len@Array" -> (
+      match (arg 0).a.e with
+      | XVar v when Hashtbl.mem fc.cached v.vid -> value (snd (Hashtbl.find fc.cached v.vid))
+      | _ -> value (Printf.sprintf "(%s)->len" (b 0)))
   | "len@Str" -> value (Printf.sprintf "(%s)->len" (b 0))
   | "push@Array" ->
       let lv = m 0 in
       let x = o 1 in
-      line fc "stn_array_push(&%s, &%s);" lv x;
+      line fc "STN_PUSH(&%s, %s, %s);" lv (cty st (elt ())) x;
       unit_ ()
   | "pop@Array" ->
       let lv = m 0 in
@@ -1579,12 +1706,14 @@ let compile_instance st cname uname tys =
   let plist = List.map (fun (v, m, t) -> param_decl st m t (var_name v)) params in
   let header =
     if can_fail then
-      Printf.sprintf "static uint8_t %s(%s* _out, StnError* _err%s)" cname (cty st ret) (String.concat "" (List.map (fun p -> ", " ^ p) plist))
-    else Printf.sprintf "static %s %s(%s)" (cty st ret) cname (if plist = [] then "void" else String.concat ", " plist)
+      Printf.sprintf "static inline uint8_t %s(%s* _out, StnError* _err%s)" cname (cty st ret) (String.concat "" (List.map (fun p -> ", " ^ p) plist))
+    (* inline is a hint: the C compiler weighs a body full of overflow checks as large,
+       and small Starnite functions would otherwise stay calls in hot loops *)
+    else Printf.sprintf "static inline %s %s(%s)" (cty st ret) cname (if plist = [] then "void" else String.concat ", " plist)
   in
   pr st.protos "%s;\n" header;
   let b = Buffer.create 4096 in
-  let fc = { st; b; ind = 1; sub; frames = []; can_fail; ret; vars = Hashtbl.create 32; self_struct = None } in
+  let fc = { st; b; ind = 1; sub; frames = []; can_fail; ret; vars = Hashtbl.create 32; self_struct = None; cached = Hashtbl.create 4 } in
   pr b "%s {\n" header;
   push fc FFun;
   List.iter
@@ -1646,7 +1775,7 @@ let emit_show_error st =
       List.iter
         (fun (k, id, t) ->
           Hashtbl.replace seen k ();
-          let fc = { st; b = Buffer.create 64; ind = 0; sub = []; frames = []; can_fail = false; ret = TStr; vars = Hashtbl.create 1; self_struct = None } in
+          let fc = { st; b = Buffer.create 64; ind = 0; sub = []; frames = []; can_fail = false; ret = TStr; vars = Hashtbl.create 1; self_struct = None; cached = Hashtbl.create 4 } in
           pr b "    case %d: return %s;\n" id (show_call fc t (err_val st t "e")))
         pending;
       loop ()

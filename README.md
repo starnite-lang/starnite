@@ -91,12 +91,18 @@ Strings are always heap buffers. The 15-byte inline form arrives with the layout
 
 | Benchmark | Starnite / C |
 |---|---|
-| Mandelbrot | 1.1x |
-| centroid | 1.4x |
-| n-body | 1.4x |
-| spectral norm | 2.0x |
+| centroid | 0.9x |
+| n-body | 1.0x |
+| Mandelbrot | 1.05x |
+| spectral norm | 1.15x |
 
-Only Mandelbrot meets the gate. n-body and spectral norm pay for bounds checks and overflow checks in their inner loops, and removing those is milestone 5's interval analysis (sections 17.1 and 17.2). centroid runs for about 40 ms, so its ratio is noisy.
+Three of the four meet the gate. spectral norm runs at C speed once its overflow checks are taken out; what is left is the cost of the traps section 17.1 requires. They can go only when a refinement proves the arithmetic cannot overflow, which is milestone 5's interval analysis (section 17.2). centroid runs for about 40 ms, so its ratio is noisy.
+
+What closed most of the gap:
+
+- **Arrays hoisted out of loops.** A loop body may use an array only through element reads, element writes and `len`. The array is then made unshared once before the loop, and its data pointer and length are read into locals, so `-fno-strict-aliasing` no longer forces a reload after every store. Every bounds check stays.
+- **Generated functions are `static inline`.** Bodies full of overflow checks look large to the C compiler, and small Starnite functions stayed calls in hot loops.
+- **Large arrays grow with `realloc`**, which can move pages rather than copy them.
 
 ## Reading of the specification
 
