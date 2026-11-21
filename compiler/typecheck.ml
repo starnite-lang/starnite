@@ -261,6 +261,7 @@ type fctx = {
   closure_caps : (int, var list) Hashtbl.t;  (* captures of closures bound to names *)
   fname : string;
   self_ty : ty option;
+  lend_kind : bool option;          (* Some m inside a function declared -> lend [mut] T *)
 }
 
 let push_frame c ?lam () = c.frames <- { vars = []; lam } :: c.frames
@@ -405,6 +406,7 @@ let int_fits k (s : string) l =
 let rec is_place (e : Syntax.expr) =
   match e.d with
   | Name _ -> true
+  | Call _ -> true          (* a call to a lend mut function; place_of checks *)
   | Field (b, _) -> is_place b
   | Bracket (b, [ BExpr { d = Range _; _ } ]) -> false
   | Bracket (b, [ _ ]) -> is_place b
@@ -418,6 +420,131 @@ let instantiate (sg : fsig) =
    { sg.seff with errs = List.map (subst s) sg.seff.errs })
 
 let defaults_table : (string, Syntax.expr option list) Hashtbl.t = Hashtbl.create 16
+
+(* Some m when [te] calls a lend function (lend mut when m) *)
+let lend_of tb (te : texpr) : bool option =
+  match te.e with
+  | XCall (CFn (u, _), _, _) -> (match Hashtbl.find_opt tb.fns u with Some sg -> sg.slend | None -> None)
+  | XCall (CTrait (tr, _, m, _), _, _) -> (
+      match Hashtbl.find_opt tb.traits tr with
+      | Some t -> (match List.assoc_opt m t.trmethods_ with Some sg -> sg.slend | None -> None)
+      | None -> None)
+  | _ -> None
+
+(* The variable a place expression is rooted in; for a lend call, the variable its
+   mut argument (or else its first argument) is rooted in. *)
+let rec root_var tb (te : texpr) : var option =
+  match te.e with
+  | XVar v -> Some v
+  | XField (b, _, _) | XTupleGet (b, _) | XIndex (b, _) -> root_var tb b
+  | XCall (_, args, _) when lend_of tb te <> None -> (
+      match List.find_opt (fun a -> a.amode = MMut) args with
+      | Some a -> root_var tb a.a
+      | None -> (match args with a :: _ -> root_var tb a.a | [] -> None))
+  | _ -> None
+
+(* immediate subexpressions, for the checks below *)
+let sub_exprs (e : texpr) : texpr list =
+  let it = function IRange (a, b) -> [ a; b ] | IArray (a, _) -> [ a ] in
+  match e.e with
+  | XLit _ | XNone | XVar _ | XFnRef _ | XLambda _ -> []
+  | XFStr es | XTuple es | XArray es | XStruct (_, _, es) | XVariant (_, _, _, es) -> es
+  | XCall (cl, args, _) -> (match cl with CClosure f -> [ f ] | _ -> []) @ List.map (fun a -> a.a) args
+  | XField (b, _, _) | XTupleGet (b, _) | XNeg b | XNot b | XTry b | XConv b | XFail b -> [ b ]
+  | XIndex (a, b) | XBin (_, a, b) -> [ a; b ]
+  | XSlice (a, b, c) | XIf (a, b, c) -> [ a; b; c ]
+  | XBlock (_, v) -> [ v ]
+  | XMatch (s, arms) -> s :: List.concat_map (fun a -> Option.to_list a.guard @ [ a.body ]) arms
+  | XComp (b, cs) -> b :: List.concat_map (fun cp -> it cp.csrc @ Option.to_list cp.ccond) cs
+
+let stmt_exprs (s : tstmt) : texpr list =
+  match s.st with
+  | SLet (_, e) | SVar (_, e) | SExpr e | SReturn e | SAssert (e, _) | SAssertFails (_, e) | SCheck e | SLend e -> [ e ]
+  | SAssign (p, e) -> Option.to_list p.via @ List.filter_map (function PIndex i -> Some i | _ -> None) p.path @ [ e ]
+  | SBreak | SContinue -> []
+  | SWhile (c, b) -> [ c; b ]
+  | SFor (_, IRange (a, b), body) -> [ a; b; body ]
+  | SFor (_, IArray (a, _), body) -> [ a; body ]
+  | SLocalFn _ -> []
+
+let block_stmts (e : texpr) = match e.e with XBlock (ss, _) -> ss | _ -> []
+
+(* E0321 and E0323 (sections 4.3 and 4.6): a lend mut place counts as a use of its root
+   for the whole statement *)
+let check_lend_exclusivity tb (s : tstmt) =
+  let calls = ref [] in
+  let rec collect (e : texpr) =
+    (match lend_of tb e with
+     | Some true -> (match root_var tb e with Some v -> calls := (v, e) :: !calls | None -> ())
+     | _ -> ());
+    List.iter collect (sub_exprs e);
+    List.iter collect_s (block_stmts e)
+  and collect_s st = List.iter collect (stmt_exprs st) in
+  collect_s s;
+  (* x += 1 on a lent place reads and writes it through copies of one call, which share
+     its source location: count them once *)
+  let calls = List.fold_left (fun acc (v, e) -> if List.exists (fun (_, (e' : texpr)) -> e'.l = e.l) acc then acc else acc @ [ (v, e) ]) [] (List.rev !calls) in
+  let rec dup = function
+    | [] -> ()
+    | (v, e) :: rest ->
+        (match List.find_opt (fun (w, e2) -> w.vid = v.vid) rest with
+         | Some (_, e2) -> err "E0321" e2.l "two lend mut places from '%s' in one statement; use split_at_mut or swap, or two statements" v.vname
+         | None -> ());
+        dup rest
+  in
+  dup calls;
+  List.iter
+    (fun ((v : var), (call : texpr)) ->
+      let rec uses (e : texpr) =
+        if e == call || (e.l = call.l && lend_of tb e = Some true) then
+          (* the lent place itself: only its other arguments count *)
+          (match e.e with
+           | XCall (_, args, _) -> List.iter (fun a -> if a.amode <> MMut then uses a.a) args
+           | _ -> ())
+        else begin
+          (match e.e with
+           | XVar w when w.vid = v.vid ->
+               err "E0323" e.l "'%s' is lent by a lend mut call in this statement; read it into a let first" v.vname
+           | _ -> ());
+          List.iter uses (sub_exprs e);
+          List.iter uses_s (block_stmts e)
+        end
+      and uses_s st =
+        (match st.st with
+         | SAssign (p, _) when p.via = None && p.root.vid = v.vid ->
+             err "E0323" st.sl "'%s' is lent by a lend mut call in this statement" v.vname
+         | _ -> ());
+        List.iter uses (stmt_exprs st)
+      in
+      uses_s s)
+    calls
+
+(* E0322: every path of a lend function ends with exactly one lend, and nothing runs after it *)
+let rec ends_in_lend (e : texpr) =
+  match e.e with
+  | XBlock (ss, v) -> (match List.rev ss with { st = SLend _; _ } :: _ -> true | _ -> ends_in_lend v)
+  | XIf (_, a, b) -> ends_in_lend a && ends_in_lend b
+  | XMatch (_, arms) -> arms <> [] && List.for_all (fun a -> ends_in_lend a.body) arms
+  | _ -> false
+
+let rec check_lend_positions ~tail (e : texpr) =
+  match e.e with
+  | XBlock (ss, v) ->
+      let n = List.length ss in
+      List.iteri
+        (fun i st ->
+          match st.st with
+          | SLend _ ->
+              if not (tail && i = n - 1) then err "E0322" st.sl "nothing may run after lend, and lend must end its path"
+          | SReturn _ -> err "E0322" st.sl "a lend function ends each path with lend, not return"
+          | _ -> List.iter (check_lend_positions ~tail:false) (stmt_exprs st))
+        ss;
+      check_lend_positions ~tail v
+  | XIf (c, a, b) -> check_lend_positions ~tail:false c; check_lend_positions ~tail a; check_lend_positions ~tail b
+  | XMatch (sc, arms) ->
+      check_lend_positions ~tail:false sc;
+      List.iter (fun a -> Option.iter (check_lend_positions ~tail:false) a.guard; check_lend_positions ~tail a.body) arms
+  | _ -> List.iter (check_lend_positions ~tail:false) (sub_exprs e)
 
 let check_not_lent c l (v : var) =
   match List.assoc_opt v.vid c.lent with
@@ -619,6 +746,8 @@ and infer_name c l n exp : texpr =
               match lookup_fns c n with
               | [ u ] ->
                   let sg = Hashtbl.find c.tb.fns u in
+                  if sg.slend <> None then
+                    err "E0320" l "'%s' lends a place, so it cannot be used as a function value" n;
                   let s, ps, ret, eff = instantiate sg in
                   let ty = TFn { fps = List.map (fun (m, _, t, _) -> (m, t)) ps; fret = ret; feff = eff } in
                   (match exp with Some t -> unify_at l t ty | None -> ());
@@ -727,6 +856,8 @@ and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : 
              | _, Some MMut -> err "E0304" a.aloc "parameter '%s' is not mut" n
              | _ -> ());
             let te = check c a.aexpr t in
+            if m = MTake && lend_of c.tb te <> None then
+              err "E0320" a.aloc "a lent place cannot be stored; copy it with let first";
             if m = MMut then eff_check ~invariant:true a.aloc t te.ty;
             (match (a.amode, te.e) with
              | Some MTake, XVar v -> c.moved <- (v.vid, a.aloc) :: c.moved
@@ -1026,14 +1157,29 @@ and trait_call c l tn trargs m (sg : fsig) self (receiver : texpr option) args e
   let s = ("Self", self) :: List.combine tr.trparams ta in
   let ps = List.map (fun (md, n, t, d) -> (md, n, subst s t, d)) sg.sparams in
   let ret = subst s sg.sret in
-  let targs, _ = check_args c l ~receiver ps args in
-  (* pick the impl's trait arguments when exactly one impl fits *)
+  (* pick the trait arguments from the bound, or from the one impl that fits Self *)
   (match repr self with
    | TParam p -> (
        match List.assoc_opt p c.tparams with
        | Some bs -> (match List.assoc_opt tn bs with Some bta -> List.iter2 (fun a b -> unify_at l a b) ta bta | None -> ())
        | None -> ())
-   | _ -> ());
+   | TVar _ -> ()
+   | t -> (
+       let fits =
+         List.filter_map
+           (fun im ->
+             if im.itrait_ <> tn then None
+             else
+               let sb = ref [] in
+               if match_ty (List.map fst im.itparams) sb im.ifor_ t then Some (im, !sb) else None)
+           c.tb.impls
+       in
+       match fits with
+       | [ (im, sb) ] when List.length im.itargs_ = List.length ta ->
+           let sb = List.map (fun (p, _) -> (p, try List.assoc p sb with Not_found -> fresh ())) im.itparams in
+           List.iter2 (fun a b -> try unify a (subst sb b) with Mismatch -> ()) ta im.itargs_
+       | _ -> ()));
+  let targs, _ = check_args c l ~receiver ps args in
   c.obligations <- (self, tn, ta, l) :: c.obligations;
   let convs = add_eff c l { sg.seff with errs = List.map (subst s) sg.seff.errs } in
   mk (XCall (CTrait (tn, ta, m, self), targs, convs)) ret l
@@ -1057,9 +1203,25 @@ and infer_bracket c l (b : Syntax.expr) (args : Syntax.barg list) exp : texpr =
               let ti = check c i (TInt IInt) in
               mk (XIndex (tb, ti)) t l
           | TStr -> err "E0201" l "index a Str through chars(s)[i], or slice it with s[a..b]"
-          | t -> err "E0201" l "%s cannot be indexed" (show_ty t))
+          | _ -> index_call c l ~mut_:false tb i)
   | [ BType t ] -> err "E0102" (ty_loc t) "type in brackets after a name that is not generic"
   | _ -> err "E0201" l "indexing takes one index"
+
+(* c[k] on a type that is not an Array: the trait Index (or IndexMut for a place), whose
+   methods are lend functions (section 4.6) *)
+and index_call c l ~mut_ (base : texpr) (key : Syntax.expr) : texpr =
+  let tn, m = if mut_ then ("IndexMut", "at_mut") else ("Index", "at") in
+  let tr = Hashtbl.find c.tb.traits tn in
+  let sg = List.assoc m tr.trmethods_ in
+  (match repr base.ty with
+   | TParam p ->
+       if not (match List.assoc_opt p c.tparams with Some bs -> List.mem_assoc tn bs | None -> false) then
+         err "E0204" l "%s cannot be indexed: it has no %s bound" (show_ty base.ty) tn
+   | TVar _ -> err "E0201" l "the type of this value must be known before indexing; add an annotation"
+   | t ->
+       if not (List.exists (fun im -> im.itrait_ = tn && (let s = ref [] in match_ty (List.map fst im.itparams) s im.ifor_ t)) c.tb.impls) then
+         err "E0204" l "%s cannot be indexed%s; it does not implement %s" (show_ty t) (if mut_ then " as a place" else "") tn);
+  trait_call c l tn [] m sg base.ty (Some base) [ ({ aname = None; amode = None; aexpr = key; aloc = key.loc } : Syntax.arg) ] None
 
 and infer_lambda c l ps body exp : texpr =
   let expected_fn = match exp with Some (TFn f) -> Some f | _ -> None in
@@ -1190,8 +1352,14 @@ and place_of c (e : Syntax.expr) : place =
             check_not_lent c e.loc v;
             if not (v.vmut || v.vkind = VParam MMut) then
               err "E0103" e.loc "'%s' is not mutable; declare it with var" n;
-            { root = v; path = []; pty = v.vty }
+            { root = v; via = None; path = []; pty = v.vty }
         | None -> unknown_name c e.loc n)
+    | Call _ -> (
+        let te = infer c e in
+        match (lend_of c.tb te, root_var c.tb te) with
+        | Some true, Some v -> { root = v; via = Some te; path = []; pty = te.ty }
+        | Some false, _ -> err "E0103" e.loc "this lent place is read-only; assign through a lend mut function"
+        | _ -> err "E0103" e.loc "a call is a place only when it calls a lend mut function")
     | Field (b, f) -> (
         let p = go b in
         match repr p.pty with
@@ -1215,7 +1383,10 @@ and place_of c (e : Syntax.expr) : place =
         let p = go b in
         match repr p.pty with
         | TArray t -> { p with path = p.path @ [ PIndex (check c i (TInt IInt)) ]; pty = t }
-        | t -> err "E0201" e.loc "%s cannot be indexed" (show_ty t))
+        | _ ->
+            (* the base place is lent to IndexMut.at_mut, which lends the element back *)
+            let call = index_call c e.loc ~mut_:true (fix_place_types c (place_expr p e.loc)) i in
+            { root = p.root; via = Some call; path = []; pty = call.ty })
     | _ -> err "E0103" e.loc "the left side of an assignment must be a variable, field or element"
   in
   go e
@@ -1232,13 +1403,13 @@ and place_expr (p : place) l : texpr =
       | PField (i, f) -> { e = XField (acc, i, f); ty = TUnit; l }
       | PTupleIx i -> { e = XTupleGet (acc, i); ty = TUnit; l }
       | PIndex ix -> { e = XIndex (acc, ix); ty = TUnit; l })
-    (mk (XVar p.root) p.root.vty l) p.path
+    (match p.via with Some call -> call | None -> mk (XVar p.root) p.root.vty l) p.path
   |> fun te -> { te with ty = p.pty }
 
 and fix_place_types c (te : texpr) : texpr =
   (* recompute intermediate types of a place expression *)
   match te.e with
-  | XVar _ -> te
+  | XVar _ | XCall _ -> te
   | XField (b, i, f) -> let b = fix_place_types c b in { (field_of c te.l b f) with l = te.l }
   | XTupleGet (b, i) -> let b = fix_place_types c b in (match repr b.ty with TTuple ts -> { te with e = XTupleGet (b, i); ty = List.nth ts i } | _ -> te)
   | XIndex (b, i) -> let b = fix_place_types c b in (match repr b.ty with TArray t -> { te with e = XIndex (b, i); ty = t } | _ -> te)
@@ -1374,7 +1545,7 @@ and check_block c (b : Syntax.block) (want : ty option) l : texpr =
         | If _ | Match _ -> (List.rev acc, check_stmt_expr c s want)
         | _ ->
             let ts = check_stmt c s in
-            let v = match ts.st with SReturn _ | SBreak | SContinue -> mk (XLit LUnit) TNever s.sloc | SExpr { ty = TNever; _ } -> mk (XLit LUnit) TNever s.sloc | _ -> unit_e s.sloc in
+            let v = match ts.st with SReturn _ | SBreak | SContinue | SLend _ -> mk (XLit LUnit) TNever s.sloc | SExpr { ty = TNever; _ } -> mk (XLit LUnit) TNever s.sloc | _ -> unit_e s.sloc in
             (List.rev (ts :: acc), v))
     | s :: rest -> go (check_stmt c s :: acc) rest
   in
@@ -1461,7 +1632,9 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
       mks (SVar (v, te))
   | Assign (lhs, op, rhs) -> check_assign c l lhs op rhs
   | Return e ->
+      if c.lend_kind <> None then err "E0322" l "a lend function ends each path with lend, not return";
       let te = match e with Some e -> check c e c.ret | None -> unify_at l c.ret TUnit; unit_e l in
+      if lend_of c.tb te <> None then err "E0320" l "a lent place cannot be returned; copy it with let first";
       mks (SReturn te)
   | Break -> if c.loops = 0 then err "E0100" l "break outside a loop"; mks SBreak
   | Continue -> if c.loops = 0 then err "E0100" l "continue outside a loop"; mks SContinue
@@ -1521,7 +1694,7 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
           let t = conv_ty c.tb (List.map fst c.tparams) c.self_ty (Option.get p.pty) in
           let v = new_var p.pname t (p.pmode = MMut) (VParam p.pmode) in
           bind c v p.ploc; v) ps in
-      let c' = { c with declared = None; errs = []; io = false; in_try = 0; loops = 0; ret } in
+      let c' = { c with declared = None; errs = []; io = false; in_try = 0; loops = 0; ret; lend_kind = None } in
       let body = check_block c' (Option.get fd.fbody) (Some ret) l in
       pop_frame c;
       c.obligations <- c'.obligations @ c.obligations;
@@ -1534,7 +1707,29 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
       bind c v l;
       Hashtbl.replace c.closure_caps v.vid lam.lcaps;
       mks (SLocalFn (v, lam))
-  | Lend _ -> err "E0320" l "lend functions (section 4.6) are not implemented yet"
+  | Lend (m, e) ->
+      (match c.lend_kind with
+       | None -> err "E0322" l "lend is allowed only in a function declared -> lend T or -> lend mut T"
+       | Some km when km <> m ->
+           err "E0322" l (if km then "this function is declared -> lend mut; write lend mut" else "this function is declared -> lend; write lend, not lend mut")
+       | Some _ -> ());
+      let te = infer c e in
+      let rec lent_root (x : texpr) =
+        match x.e with
+        | XVar v -> Some v
+        | XField (b, _, _) | XTupleGet (b, _) | XIndex (b, _) -> lent_root b
+        | XCall _ when lend_of c.tb x <> None -> root_var c.tb x   (* lend at(g, x, y) lends on *)
+        | _ -> None
+      in
+      let ok =
+        match lent_root te with
+        | Some v -> (match v.vkind with VParam MMut -> true | VParam MBorrow -> not m | _ -> false)
+        | None -> false
+      in
+      if not ok then
+        err "E0320" e.loc (if m then "lend mut must name a place inside a mut parameter" else "lend must name a place inside a parameter");
+      unify_at e.loc c.ret te.ty;
+      mks (SLend te)
   | Resume _ -> err "E0100" l "resume arrives with handlers in milestone 4"
 
 
@@ -1603,7 +1798,7 @@ and zonk_s (s : tstmt) : tstmt =
     | SVar (v, e) -> v.vty <- zonk v.vty; SVar (v, zonk_e e)
     | SAssign (p, e) ->
         p.root.vty <- zonk p.root.vty;
-        SAssign ({ p with path = List.map (function PIndex i -> PIndex (zonk_e i) | x -> x) p.path; pty = zonk p.pty }, zonk_e e)
+        SAssign ({ p with via = Option.map zonk_e p.via; path = List.map (function PIndex i -> PIndex (zonk_e i) | x -> x) p.path; pty = zonk p.pty }, zonk_e e)
     | SExpr e -> SExpr (zonk_e e)
     | SReturn e -> SReturn (zonk_e e)
     | SBreak | SContinue -> s.st
@@ -1613,6 +1808,7 @@ and zonk_s (s : tstmt) : tstmt =
     | SAssertFails (t, e) -> SAssertFails (zonk t, zonk_e e)
     | SCheck e -> SCheck (zonk_e e)
     | SLocalFn (v, lam) -> v.vty <- zonk v.vty; SLocalFn (v, zonk_lam lam)
+    | SLend e -> SLend (zonk_e e)
   in
   { s with st }
 
@@ -1668,9 +1864,9 @@ let make_sig tb ~modname ~uname (fd : Syntax.fn_def) (extra_tps : (string * (str
     | Some es -> (true, conv_effects tb names self es)
     | None -> (fd.fexport, no_eff)
   in
-  if fd.fret_lend <> None then err "E0320" fd.floc "lend functions (section 4.6) are not implemented yet";
   { sname = uname; sdisplay = fd.fname; stparams = tps; sparams = params; sret = ret; seff = eff;
-    sdeclared = declared; sexport = fd.fexport; sloc = fd.floc; smodule = modname }
+    sdeclared = declared; sexport = fd.fexport; sloc = fd.floc; smodule = modname;
+    slend = (match fd.fret_lend with Some "lend mut" -> Some true | Some _ -> Some false | None -> None) }
 
 let register_fn tb (sg : fsig) =
   Hashtbl.replace tb.fns sg.sname sg;
@@ -1819,7 +2015,7 @@ let new_ctx tb (sg : fsig) self : fctx =
   { tb; frames = [ { vars = []; lam = None } ]; tparams = sg.stparams; ret = sg.sret; errs = []; io = false;
     in_try = 0; loops = 0;
     declared = (if sg.sdeclared && (sg.seff.errs <> [] || sg.sexport) then Some sg.seff.errs else None);
-    obligations = []; unsolved = []; moved = []; lent = []; closure_caps = Hashtbl.create 8; fname = sg.sdisplay; self_ty = self }
+    obligations = []; unsolved = []; moved = []; lent = []; closure_caps = Hashtbl.create 8; fname = sg.sdisplay; self_ty = self; lend_kind = sg.slend }
 
 let finish_ctx c l =
   List.iter
@@ -1830,6 +2026,36 @@ let finish_ctx c l =
         err "E0204" l "%s does not implement %s" (show_ty t) tr)
     c.obligations;
   List.iter (fun (t, l) -> if has_tvar t then err "E0210" l "the element type of this empty literal is never settled; add an annotation") c.unsolved
+
+(* E0322 on the syntax, before types: a lend function's body is a block whose every path
+   ends with exactly one lend, with nothing after it and no return *)
+let check_lend_paths (sg : fsig) (body : Syntax.block) =
+  let rec no_lend_inside (b : Syntax.block) =
+    List.iter
+      (fun (st : Syntax.stmt) ->
+        match st.s with
+        | Lend _ -> err "E0322" st.sloc "a lend must end its path; it cannot appear here"
+        | Return _ -> err "E0322" st.sloc "a lend function ends each path with lend, not return"
+        | If (bs, e) -> List.iter (fun (_, b) -> no_lend_inside b) bs; Option.iter no_lend_inside e
+        | Match (_, arms) -> List.iter (fun (a : Syntax.arm) -> no_lend_inside a.abody) arms
+        | For (_, _, _, _, b) | While (_, b) -> no_lend_inside b
+        | _ -> ())
+      b
+  in
+  let rec ends (b : Syntax.block) (where : loc) =
+    match List.rev b with
+    | [] -> err "E0322" where "every path of '%s' must end with lend" sg.sdisplay
+    | last :: before ->
+        no_lend_inside (List.rev before);
+        (match last.s with
+         | Lend _ -> ()
+         | If (bs, Some e) -> List.iter (fun (_, b) -> ends b last.sloc) bs; ends e last.sloc
+         | If (_, None) -> err "E0322" last.sloc "this if has no else, so one path of '%s' does not end with lend" sg.sdisplay
+         | Match (_, arms) -> List.iter (fun (a : Syntax.arm) -> ends a.abody a.arm_loc) arms
+         | Return _ -> err "E0322" last.sloc "a lend function ends each path with lend, not return"
+         | _ -> err "E0322" last.sloc "every path of '%s' must end with lend; nothing may run after it" sg.sdisplay)
+  in
+  ends body sg.sloc
 
 let check_fn tb uname : tfn =
   let sg = Hashtbl.find tb.fns uname in
@@ -1844,9 +2070,24 @@ let check_fn tb uname : tfn =
         v)
       sg.sparams
   in
+  if sg.slend <> None then check_lend_paths sg (Option.get fd.fbody);
   let body = check_block c (Option.get fd.fbody) (Some sg.sret) sg.sloc in
   finish_ctx c sg.sloc;
   let body = zonk_e body in
+  if tb.final_pass then begin
+    (* every statement, at any depth *)
+    let rec visit (e : texpr) =
+      List.iter (fun st -> check_lend_exclusivity tb st; List.iter visit (stmt_exprs st)) (block_stmts e);
+      (match e.e with XLambda lam -> visit lam.lbody | _ -> ());
+      List.iter visit (sub_exprs e)
+    in
+    visit body
+  end;
+  if sg.slend <> None && tb.final_pass then begin
+    check_lend_positions ~tail:true body;
+    if not (ends_in_lend body) then err "E0322" sg.sloc "every path of '%s' must end with lend" sg.sdisplay;
+    if c.errs <> [] then err "E0501" sg.sloc "a lend function cannot fail in this version"
+  end;
   (* effects: inferred for private functions, checked for exported ones *)
   if sg.sdeclared && sg.sdisplay <> "" then begin
     if c.io && not sg.seff.io && tb.final_pass then
@@ -1861,7 +2102,7 @@ let check_fn tb uname : tfn =
 let check_const tb n =
   let e, t, _ = Hashtbl.find tb.consts n in
   let sg = { sname = "const:" ^ n; sdisplay = n; stparams = []; sparams = []; sret = TUnit; seff = no_eff; sdeclared = false;
-             sexport = false; sloc = e.loc; smodule = "" } in
+             sexport = false; sloc = e.loc; smodule = ""; slend = None } in
   let c = new_ctx tb sg None in
   let te = match t with Some t -> check c e t | None -> infer c e in
   finish_ctx c e.loc;
@@ -1903,7 +2144,7 @@ let check_program (prelude : Syntax.file) (user : Syntax.file) : tprog =
       (function
         | ITest t when t.tsrejects = None ->
             let sg = { sname = "test"; sdisplay = t.tsname; stparams = []; sparams = []; sret = TUnit; seff = no_eff;
-                       sdeclared = false; sexport = false; sloc = t.tsloc; smodule = module_name user.path } in
+                       sdeclared = false; sexport = false; sloc = t.tsloc; smodule = module_name user.path; slend = None } in
             let c = new_ctx tb sg None in
             let body = check_block c t.tsbody (Some TUnit) t.tsloc in
             finish_ctx c t.tsloc;

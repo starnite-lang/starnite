@@ -23,6 +23,8 @@ type value =
 
 exception Failed of ty * value
 exception Partial of value list * exn
+(* raised by a lend statement: the lent place, as get and set functions (section 4.6) *)
+exception Lent of ((unit -> value) * (value -> unit))
 exception Assert_failed of string * Syntax.loc
 exception Return of value
 exception Break
@@ -188,7 +190,45 @@ and apply_convs env (convs : conv list) f =
         raise (Failed (tsub env cv.cto, v'))
     | None -> raise (Failed (t, v)))
 
+(* the function a lend callee runs, if it is a lend function *)
+and lend_target env (cl : callee) : (tfn * (string * ty) list) option =
+  let found =
+    match cl with
+    | CFn (name, tys) ->
+        let tf = Hashtbl.find env.prog.fns name in
+        Some (tf, List.combine (List.map fst tf.fsig.stparams) (List.map (tsub env) tys))
+    | CTrait (tr, ta, m, self) -> (
+        match resolve env tr (List.map (tsub env) ta) m (tsub env self) with
+        | Some (f, ftys) ->
+            let tf = Hashtbl.find env.prog.fns f in
+            Some (tf, List.combine (List.map fst tf.fsig.stparams) ftys)
+        | None -> None)
+    | _ -> None
+  in
+  match found with Some (tf, _) when tf.fsig.slend <> None -> found | _ -> None
+
+(* Run a lend function up to its lend statement and return the lent place. Writing to
+   the place writes into the callee's copy of its mut parameters, which are then
+   copied back to the caller's places, as for any mut argument (section 4.2). *)
+and lend_place env (tf, sub) (targs : targ list) : (unit -> value) * (value -> unit) =
+  let places = List.map (fun ta -> if ta.amode = MMut then (let p = place_of_expr env ta.a in hold_busy env ta.a; Some p) else None) targs in
+  let vals = List.map2 (fun ta p -> match p with Some (get, _) -> get () | None -> eval env ta.a) targs places in
+  let env' = { env with vars = Hashtbl.create 16; sub } in
+  List.iter2 (fun v a -> bind env' v a) tf.fparams vals;
+  let get, set =
+    match eval env' tf.fbody with
+    | _ -> failwith "interp: a lend function ended without lend"
+    | exception Lent p -> p
+  in
+  let write_back () =
+    List.iter2 (fun p (v : var) -> match p with Some (_, put) -> put !(get_var env' v) | None -> ()) places tf.fparams
+  in
+  (get, fun x -> set x; write_back ())
+
 and eval_call env (cl : callee) (targs : targ list) convs loc : value =
+  match lend_target env cl with
+  | Some target -> fst (lend_place env target targs) ()
+  | None ->
   apply_convs env convs (fun () ->
       let places = List.map (fun ta -> if ta.amode = MMut then (let p = place_of_expr env ta.a in hold_busy env ta.a; Some p) else None) targs in
       let vals =
@@ -289,6 +329,9 @@ and hold_busy env (e : texpr) =
   match cell_root env e with Some (r, _) -> busy := r :: !busy | None -> ()
 
 and place_of_expr env (e : texpr) : (unit -> value) * (value -> unit) =
+  match e.e with
+  | XCall (cl, targs, _) when lend_target env cl <> None -> lend_place env (Option.get (lend_target env cl)) targs
+  | _ ->
   (match cell_root env e with
    | Some (r, l) when List.memq r !busy -> cell_busy_trap l "accessed"
    | _ -> ());
@@ -316,7 +359,12 @@ and place_of_expr env (e : texpr) : (unit -> value) * (value -> unit) =
       ((fun () -> v), fun _ -> ())
 
 and assign env (p : place) (x : value) =
-  let r = get_var env p.root in
+  (* a place starts at a variable or at the place a lend mut call lends *)
+  let get, set =
+    match p.via with
+    | Some call -> place_of_expr env call
+    | None -> let r = get_var env p.root in ((fun () -> !r), fun v -> r := v)
+  in
   let rec upd (cur : value) path =
     match path with
     | [] -> x
@@ -333,7 +381,7 @@ and assign env (p : place) (x : value) =
         VArr a
   in
   (* indices are evaluated before the old value is read *)
-  r := upd !r p.path
+  set (upd (get ()) p.path)
 
 (* ---------- expressions ---------- *)
 
@@ -583,6 +631,7 @@ and exec_ env (s : tstmt) : unit =
   | SLocalFn (v, lam) ->
       let caps = List.map (fun (cv : var) -> (cv.vid, get_var env cv)) lam.lcaps in
       bind env v (VClosure (lam, caps, env.sub))
+  | SLend e -> raise (Lent (place_of_expr env e))
 
 (* When assert e fails, show the value of each side of a comparison (section 20.2). *)
 and describe_assert env (e : texpr) : string =

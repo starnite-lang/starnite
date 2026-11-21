@@ -29,6 +29,12 @@ trait Copy*:
     fn copy_marker(x: Self) -> Self
 trait Hash*:
     fn hash(x: Self) -> Int
+# c[k] on a type that is not an Array (sections 3.4 and 4.6): both methods lend out a
+# place inside the collection instead of returning a copy
+trait Index*[K, V]:
+    fn at(c: Self, k: K) -> lend V
+trait IndexMut*[K, V]:
+    fn at_mut(mut c: Self, k: K) -> lend mut V
 
 # ---- console ----
 fn print*(s: Str) ! io

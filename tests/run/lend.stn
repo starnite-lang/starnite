@@ -1,0 +1,64 @@
+# lend functions and the Index traits (sections 3.4 and 4.6)
+type Cell = struct(alive: Bool, neighbours: Int)
+type Grid* = struct(width: Int, cells: Array[Cell])
+
+fn at*(g: Grid, x: Int, y: Int) -> lend Cell:
+    lend g.cells[y * g.width + x]
+
+fn at_mut*(mut g: Grid, x: Int, y: Int) -> lend mut Cell:
+    lend mut g.cells[y * g.width + x]
+
+# a lend function may lend on what another lends
+fn corner(g: Grid) -> lend Cell:
+    lend at(g, 0, 0)
+
+# every path ends in exactly one lend
+fn edge_mut(mut g: Grid, left: Bool) -> lend mut Cell:
+    if left:
+        lend mut g.cells[0]
+    else:
+        lend mut g.cells[len(g.cells) - 1]
+
+impl Index[(Int, Int), Cell] for Grid:
+    fn at(g: Grid, k: (Int, Int)) -> lend Cell:
+        lend g.cells[k.1 * g.width + k.0]
+
+impl IndexMut[(Int, Int), Cell] for Grid:
+    fn at_mut(mut g: Grid, k: (Int, Int)) -> lend mut Cell:
+        lend mut g.cells[k.1 * g.width + k.0]
+
+# a growable stack of strings with element access through the traits
+type Stack = struct(items: Array[Str])
+
+impl Index[Int, Str] for Stack:
+    fn at(s: Stack, i: Int) -> lend Str:
+        lend s.items[len(s.items) - 1 - i]
+
+impl IndexMut[Int, Str] for Stack:
+    fn at_mut(mut s: Stack, i: Int) -> lend mut Str:
+        lend mut s.items[len(s.items) - 1 - i]
+
+fn main():
+    var grid = Grid(3, filled(9, Cell(false, 0)))
+    let before = grid
+    at_mut(mut grid, 2, 1).alive = true
+    at_mut(mut grid, 0, 0).neighbours += 5
+    let n = at(grid, 0, 0).neighbours
+    let c = at(grid, 2, 1)
+    print(f"{n} {c.alive} {before.cells[5].alive} {grid.cells[5].alive} {corner(grid).neighbours}")
+    edge_mut(mut grid, false).neighbours = 8
+    edge_mut(mut grid, true).neighbours -= 1
+    print(f"{grid.cells[8].neighbours} {grid.cells[0].neighbours}")
+    # the same through c[k]
+    grid[(1, 1)].alive = true
+    # the right side may not read grid while grid[k] lends it (E0323): read it first
+    let base = grid[(0, 0)].neighbours
+    grid[(1, 1)].neighbours = base + 10
+    let mid = grid[(1, 1)]
+    print(f"{mid.alive} {mid.neighbours} {before[(1, 1)].alive}")
+    var s = Stack(["a", "b", "c"])
+    let t = s
+    let top = s[0]
+    s[0] = top + "!"
+    s[2] = "z"
+    print(f"{s[0]} {s[1]} {s[2]} {s.items} {t.items}")
