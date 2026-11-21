@@ -135,6 +135,17 @@ void      stn_array_clear(StnArray** a);
 StnArray* stn_array_filled(const StnElemOps* ops, int64_t n, const void* elem, const char* file, int line, int col);
 
 _Noreturn void stn_index_trap(int64_t i, int64_t len, const char* file, int line, int col);
+/* No array holds more than STN_MAX_ALLOC elements: every path that creates or grows one
+   traps beyond it (stn_array_new, stn_array_reserve, stn_array_filled). Saying so
+   when a length is read lets the C compiler bound loop counters and index arithmetic
+   derived from it, and drop the overflow and sign checks it can then prove redundant. */
+#define STN_MAX_ALLOC ((int64_t)1 << 40)
+static inline int64_t stn_len(const StnArray* a) {
+    int64_t n = a->len;
+    if (n < 0 || n > STN_MAX_ALLOC) __builtin_unreachable();
+    return n;
+}
+
 static inline int64_t stn_index(int64_t i, int64_t len, const char* file, int line, int col) {
     if (__builtin_expect((uint64_t)i >= (uint64_t)len, 0)) stn_index_trap(i, len, file, line, col);
     return i;

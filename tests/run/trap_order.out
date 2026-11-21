@@ -1,0 +1,3 @@
+trap: integer overflow at tests/run/trap_order.stn:6:16
+the result does not fit its type
+exit 2
