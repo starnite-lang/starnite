@@ -1,0 +1,17 @@
+# expect: E0201 16:17
+trait Figure:
+    fn area(f: Self) -> Float
+
+type Square = struct(side: Float)
+
+impl Figure for Square:
+    fn area(f: Square) -> Float:
+        f.side * f.side
+
+fn replace(mut x: any Figure):
+    x = Square(9.0)
+
+fn main():
+    var square = Square(1.0)
+    replace(mut square)
+    print(f"{square.area()}")

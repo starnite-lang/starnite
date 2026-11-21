@@ -23,6 +23,7 @@ type tables = {
   mutable decl_errors : (string * loc * string) list;
   mutable any_uses : (string * int * loc) list;         (* every `any Trait` written before the traits were known *)
   mutable traits_ready : bool;                          (* traits are complete: validate `any` uses on the spot *)
+  mutable impl_contracts : (string * ty list * bool * loc * string * string) list;   (* impl fn, errors and io its trait method allows, where, name, trait *)
 }
 
 let builtin_prefix = "builtin:"
@@ -61,7 +62,7 @@ let validate_any_use tb ((tn, argc, l) : string * int * loc) =
     | TParam "Self" -> true
     | TArray t -> mentions_self t
     | TTuple ts | TNamed (_, ts) | TErr ts | TAny (_, ts) -> List.exists mentions_self ts
-    | TFn f -> List.exists (fun (_, t) -> mentions_self t) f.fps || mentions_self f.fret
+    | TFn f -> List.exists (fun (_, t) -> mentions_self t) f.fps || mentions_self f.fret || List.exists mentions_self f.feff.errs
     | _ -> false
   in
   match Hashtbl.find_opt tb.traits tn with
@@ -79,6 +80,7 @@ let validate_any_use tb ((tn, argc, l) : string * int * loc) =
                if List.exists (fun (_, _, t, _) -> mentions_self t) rest then bad "method %s mentions Self in another parameter" m
            | [] -> bad "method %s takes no Self parameter" m);
           if mentions_self sg.sret then bad "method %s returns Self" m;
+          if List.exists mentions_self sg.seff.errs then bad "method %s fails with Self, which would expose the hidden type" m;
           if sg.slend <> None then bad "method %s lends a place, which a method table cannot hand out" m;
           if List.length sg.stparams > List.length tr.trparams then bad "method %s has type parameters of its own" m)
         tr.trmethods_
@@ -905,7 +907,8 @@ and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : 
   let params_rest, recv_targ =
     match (receiver, params) with
     | Some r, (m, _, t, _) :: rest ->
-        let r = coerce c r t in
+        (* a mut argument is the place itself: boxing it would write to a copy *)
+        let r = if m = MMut then (unify_at r.l t r.ty; r) else coerce c r t in
         (rest, [ { amode = m; a = r } ])
     | Some _, [] -> err "E0203" l "this function takes no arguments"
     | None, _ -> (params, [])
@@ -923,7 +926,10 @@ and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : 
              | MMut, _ -> err "E0304" a.aloc "parameter '%s' is mut; write 'mut' at the call site" n
              | _, Some MMut -> err "E0304" a.aloc "parameter '%s' is not mut" n
              | _ -> ());
-            let te = check c a.aexpr t in
+            let te =
+              if m = MMut then (let te = check_or_infer c a.aexpr (Some t) in unify_at te.l t te.ty; te)
+              else check c a.aexpr t
+            in
             if m = MTake && lend_of c.tb te <> None then
               err "E0320" a.aloc "a lent place cannot be stored; copy it with let first";
             if m = MMut then eff_check ~invariant:true a.aloc t te.ty;
@@ -2085,12 +2091,35 @@ let declare_items tb modname (items : item list) =
                   let want = subst ts tsig.sret in
                   if not (ty_equal sg.sret want) then
                     err "E0201" fd.floc "'%s' returns %s, but trait %s requires %s" fd.fname (show_ty sg.sret) trn (show_ty want);
+                  (* function-typed parameters and results carry effects, which ty_equal does
+                     not see: the impl must accept whatever the trait lets a caller pass,
+                     and return nothing that does more than the trait promises *)
+                  let rec loses_poly (impl_t : ty) (trait_t : ty) =
+                    match (repr impl_t, repr trait_t) with
+                    | TFn fi, TFn ft ->
+                        (ft.feff.poly && not fi.feff.poly)
+                        || List.exists2 (fun (_, a) (_, b) -> loses_poly a b) fi.fps ft.fps
+                        || loses_poly fi.fret ft.fret
+                    | TArray a, TArray b -> loses_poly a b
+                    | TTuple xs, TTuple ys when List.length xs = List.length ys -> List.exists2 loses_poly xs ys
+                    | _ -> false
+                  in
+                  List.iter2
+                    (fun (m1, n1, t1, _) (_, _, t2, _) ->
+                      let t2 = subst ts t2 in
+                      if loses_poly t1 t2 then
+                        err "E0503" fd.floc "parameter '%s' of '%s' must accept functions with any effects, as trait %s allows" n1 fd.fname trn;
+                      eff_check ~invariant:(m1 = MMut) fd.floc t1 t2)
+                    sg.sparams tsig.sparams;
+                  eff_check fd.floc want sg.sret;
                   if sg.slend <> tsig.slend then
                     err "E0201" fd.floc "'%s' must %s lend, as in trait %s" fd.fname (if tsig.slend = None then "not" else "also") trn
                 end;
                 (* the impl's effects may be fewer than the trait's, never more *)
+                let allowed = List.map (subst (("Self", fty) :: List.combine info.trparams targs)) tsig.seff.errs in
+                (* checked again after inference, for an impl that writes no effects *)
+                tb.impl_contracts <- (uname, allowed, tsig.seff.io, fd.floc, fd.fname, trn) :: tb.impl_contracts;
                 if fd.feffects <> None then begin
-                  let allowed = List.map (subst (("Self", fty) :: List.combine info.trparams targs)) tsig.seff.errs in
                   List.iter
                     (fun e ->
                       if not (mem_ty e allowed) then
@@ -2218,7 +2247,7 @@ let check_const tb n =
 let new_tables () =
   { decls = Hashtbl.create 64; variants = Hashtbl.create 64; fns = Hashtbl.create 64; by_name = Hashtbl.create 64;
     bodies = Hashtbl.create 64; traits = Hashtbl.create 16; impls = []; consts = Hashtbl.create 8;
-    typed_consts = Hashtbl.create 8; lambdas = []; final_pass = false; decl_errors = []; any_uses = []; traits_ready = false }
+    typed_consts = Hashtbl.create 8; lambdas = []; final_pass = false; decl_errors = []; any_uses = []; traits_ready = false; impl_contracts = [] }
 
 (* Check a whole program (the prelude plus one module). Effects of private functions are
    inferred by iterating to a fixpoint (section 7.2). *)
@@ -2241,6 +2270,17 @@ let check_program (prelude : Syntax.file) (user : Syntax.file) : tprog =
     if snapshot () <> before && n < 50 then iterate (n + 1)
   in
   iterate 0;
+  (* an impl method, written with or without effects, does no more than its trait method
+     allows: the method table of an any value calls it through the trait's signature *)
+  List.iter
+    (fun (u, allowed, allow_io, l, mn, trn) ->
+      let sg = Hashtbl.find tb.fns u in
+      List.iter
+        (fun e ->
+          if not (mem_ty e allowed) then err "E0501" l "'%s' can fail with %s, which trait %s does not allow" mn (show_ty e) trn)
+        sg.seff.errs;
+      if sg.seff.io && not allow_io then err "E0503" l "'%s' performs io, which trait %s does not allow" mn trn)
+    (List.rev tb.impl_contracts);
   tb.final_pass <- true;
   let fns = Hashtbl.create 64 in
   List.iter (fun u -> Hashtbl.replace fns u (check_fn tb u)) order;

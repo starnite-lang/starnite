@@ -1,0 +1,13 @@
+# expect: E0503 8:5
+trait Named:
+    fn size(x: Self) -> Int
+
+type Box = struct(n: Int)
+
+impl Named for Box:
+    fn size(x: Box) -> Int:
+        print("x")
+        x.n
+
+fn main():
+    print("x")
