@@ -1,0 +1,3 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A module for the test of a method that two traits of two modules both provide.
+type Pt* = struct(x: Int)

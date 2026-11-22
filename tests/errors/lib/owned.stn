@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A module for the test of an impl that is in neither the module of its trait nor that of its type.
+trait Read*:
+    fn read(self: Self) -> Int
+
+type Counter* = struct(n: Int)

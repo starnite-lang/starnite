@@ -8,15 +8,21 @@ let err = Syntax.error
 
 (* ---------- global tables ---------- *)
 
+type const_info = { ce : Syntax.expr; cty : ty option; cl : loc; cmod : string; cex : bool }
+
 type tables = {
   decls : (string, tdecl) Hashtbl.t;
-  variants : (string, string * int) Hashtbl.t;         (* variant name -> type, index *)
+  variants : (string, string * int) Hashtbl.t;         (* variant key -> type key, index *)
   fns : (string, fsig) Hashtbl.t;                       (* unique name -> sig *)
   by_name : (string, string list) Hashtbl.t;            (* display name -> unique names *)
   bodies : (string, Syntax.fn_def * (string * ty) list) Hashtbl.t;  (* unique -> def, Self binding *)
   traits : (string, trait_info) Hashtbl.t;
   mutable impls : impl_info list;
-  consts : (string, Syntax.expr * ty option * loc) Hashtbl.t;
+  consts : (string, const_info) Hashtbl.t;
+  mutable tenv : (string * ty) list;                    (* type names bound to types, for the default of a parameter: the type parameters of its function, as the call instantiates them *)
+  mutable cur : string;                                 (* the module being declared or checked (section 3.5) *)
+  mutable entry : string;                               (* the module of the file given to the compiler *)
+  imports : (string, (string * string) list) Hashtbl.t; (* module -> (name it is imported as, module path) *)
   typed_consts : (string, texpr) Hashtbl.t;
   mutable lambdas : lambda list;
   mutable final_pass : bool;
@@ -34,6 +40,138 @@ let prim_names =
     ("U8", TInt U8); ("U16", TInt U16); ("U32", TInt U32); ("U64", TInt U64);
     ("Float", TFloat); ("F32", TF32); ("Bool", TBool); ("Char", TChar); ("Unit", TUnit);
     ("Str", TStr); ("Duration", TDur); ("Bytes", TBytes) ]
+
+(* ---------- modules (section 3.5) ---------- *)
+
+(* The key of the item [n] of module [m] in the global tables. The prelude and the module
+   of the file given to the compiler keep their names as written, so a program of one file
+   is checked and compiled as it always was; the items of any other module are keyed
+   `path.Name`, so two modules can both have a type, a trait or a constant of one name. *)
+let gkey tb m n = if m = "core" || m = tb.entry then n else m ^ "." ^ n
+
+(* `alias.name` as written in the program, or as put together by the checker for a name
+   qualified with an import; a name in the source has no dot *)
+let split_qual n =
+  match String.index_opt n '.' with
+  | Some i -> Some (String.sub n 0 i, String.sub n (i + 1) (String.length n - i - 1))
+  | None -> None
+
+(* the module that [alias] names in the current module *)
+let import_of tb alias =
+  match Hashtbl.find_opt tb.imports tb.cur with Some l -> List.assoc_opt alias l | None -> None
+
+type 'a found = Found of string * 'a | Private of string * string | Absent
+
+(* what a constructor in a pattern names: a variant of a type (its key, the variant's index),
+   or a struct *)
+type ctor = CVariant of string * int | CStruct of string * tdecl
+
+(* The item named [n] in [tbl], seen from the current module: one of the module itself or of
+   the prelude, or, written `alias.name`, an exported one of an imported module. [owner] says
+   which module an entry belongs to. *)
+let find_item tb (tbl : (string, 'a) Hashtbl.t) ~(owner : 'a -> string) ~(exported : 'a -> bool) (n : string) : 'a found =
+  match split_qual n with
+  | Some (alias, x) -> (
+      match import_of tb alias with
+      | None -> Absent
+      | Some m -> (
+          let k = gkey tb m x in
+          match Hashtbl.find_opt tbl k with
+          | Some v when owner v = m -> if exported v then Found (k, v) else Private (m, x)
+          | _ -> Absent))
+  | None -> (
+      let own = gkey tb tb.cur n in
+      match Hashtbl.find_opt tbl own with
+      | Some v when owner v = tb.cur -> Found (own, v)
+      | _ -> (
+          match Hashtbl.find_opt tbl n with Some v when owner v = "core" -> Found (n, v) | _ -> Absent))
+
+let find_decl tb n = find_item tb tb.decls ~owner:(fun (d : tdecl) -> d.dmodule) ~exported:(fun d -> d.dexport) n
+let find_trait tb n = find_item tb tb.traits ~owner:(fun (t : trait_info) -> t.trmodule) ~exported:(fun t -> t.trexport) n
+let find_const tb n = find_item tb tb.consts ~owner:(fun (k : const_info) -> k.cmod) ~exported:(fun k -> k.cex) n
+
+(* a variant belongs to the module, and has the export mark, of its type *)
+let find_variant tb n =
+  let d tk = Hashtbl.find tb.decls tk in
+  find_item tb tb.variants ~owner:(fun (tk, _) -> (d tk).dmodule) ~exported:(fun (tk, _) -> (d tk).dexport) n
+
+let found_opt = function Found (k, v) -> Some (k, v) | Private _ | Absent -> None
+
+(* The functions the name [n] can mean in the current module: its own and the prelude's, or,
+   written `alias.name`, the exported ones of an imported module. *)
+let visible_fns tb n =
+  let all x = try Hashtbl.find tb.by_name x with Not_found -> [] in
+  let sg u = Hashtbl.find tb.fns u in
+  match split_qual n with
+  | Some (alias, x) -> (
+      match import_of tb alias with
+      | Some m -> List.filter (fun u -> (sg u).smodule = m && (sg u).sexport) (all x)
+      | None -> [])
+  | None -> List.filter (fun u -> (sg u).smodule = tb.cur || (sg u).smodule = "core") (all n)
+
+(* The module that defines a type, for the lookup of a method (section 4.7); built-in types
+   belong to the prelude. *)
+let module_of_type tb t =
+  match Types.repr t with
+  | TNamed (n, _) | TAny (n, _) -> (
+      match Hashtbl.find_opt tb.decls n with
+      | Some d -> d.dmodule
+      | None -> (match Hashtbl.find_opt tb.traits n with Some tr -> tr.trmodule | None -> "core"))
+  | _ -> "core"
+
+(* A trait is in scope in the module that defines it, in the prelude, and in a module that
+   imports the module that defines it, if the trait is exported (section 4.7). *)
+let trait_visible tb (tr : trait_info) =
+  tr.trmodule = tb.cur || tr.trmodule = "core"
+  || (tr.trexport
+      && match Hashtbl.find_opt tb.imports tb.cur with
+         | Some l -> List.exists (fun (_, m) -> m = tr.trmodule) l
+         | None -> false)
+
+(* The functions that the method call x.m(...) can mean: those of the current module and the
+   prelude, and the exported ones of the module that defines the type of x. *)
+let method_fns tb self m =
+  let home = module_of_type tb self in
+  let sg u = Hashtbl.find tb.fns u in
+  List.filter
+    (fun u -> (sg u).smodule = tb.cur || (sg u).smodule = "core" || ((sg u).smodule = home && (sg u).sexport))
+    (try Hashtbl.find tb.by_name m with Not_found -> [])
+
+(* Of the functions a method call can mean, those of the module that defines the type of the
+   receiver come first (section 4.7); only when none of them fits does the call find those of the
+   calling module and of the prelude. *)
+let prefer_owner tb self us =
+  let home = module_of_type tb self in
+  match List.filter (fun u -> (Hashtbl.find tb.fns u).smodule = home) us with [] -> us | owners -> owners
+
+(* The modules that define a type (section 3.4): the module that declares it, if a module of the
+   program does; and for what the prelude's constructors make (Array, Option, tuples, functions),
+   the modules that define what they are applied to. *)
+let rec type_modules tb t : string list =
+  match repr t with
+  | TNamed (n, args) -> (
+      match Hashtbl.find_opt tb.decls n with
+      (* a type that a module of the program declares is that module's, whatever it is applied to *)
+      | Some d when d.dmodule <> "core" -> [ d.dmodule ]
+      (* Option, Result and the like are the prelude's, and made from what they are applied to *)
+      | _ -> List.concat_map (type_modules tb) args)
+  | TAny (n, args) ->
+      (match Hashtbl.find_opt tb.traits n with Some tr -> [ tr.trmodule ] | None -> []) @ List.concat_map (type_modules tb) args
+  | TArray t -> type_modules tb t
+  | TTuple ts | TErr ts -> List.concat_map (type_modules tb) ts
+  | TFn f -> List.concat_map (type_modules tb) (List.map snd f.fps @ [ f.fret ])
+  | _ -> []
+
+(* The default of a parameter or a field is written in the module that declares it, and its
+   names mean what they mean there. *)
+let default_modules : (Syntax.expr * string) list ref = ref []
+
+let in_module tb m f =
+  let saved = tb.cur in
+  tb.cur <- m;
+  match f () with
+  | r -> tb.cur <- saved; r
+  | exception e -> tb.cur <- saved; raise e
 
 (* The "head" of a type, used for overloading on the first parameter (section 4.7). *)
 let rec head t =
@@ -96,27 +234,35 @@ let rec conv_ty tb (tps : string list) (self : ty option) (t : Syntax.ty) : ty =
   | TyPath ([ "Self" ], [], l) -> (
       match self with Some s -> s | None -> err "E0101" l "Self is only valid inside a trait or impl")
   | TyPath ([ n ], [], _) when List.mem n tps -> TParam n
-  | TyPath ([ n ], args, l) -> (
-      match List.assoc_opt n prim_names with
-      | Some p -> if args <> [] then err "E0102" l "type %s takes no type arguments" n else p
-      | None ->
-          if n = "Array" then
-            match args with [ a ] -> TArray (conv_ty tb tps self a) | _ -> err "E0201" l "Array takes one type argument"
-          else
-            match Hashtbl.find_opt tb.decls n with
-            | Some d ->
-                if List.length d.dparams <> List.length args then
-                  err "E0201" l "type %s takes %d type argument(s), found %d" n (List.length d.dparams) (List.length args);
-                let args = List.map (conv_ty tb tps self) args in
-                (match d.dbody with
-                 | DAlias a -> subst (List.combine d.dparams args) a
-                 | _ -> TNamed (n, args))
-            | None -> err "E0101" l "unknown type '%s'" n)
-  | TyPath (p, _, l) -> err "E0101" l "unknown type '%s' (modules arrive with imports)" (String.concat "." p)
+  | TyPath ([ n ], [], _) when List.mem_assoc n tb.tenv -> List.assoc n tb.tenv
+  | TyPath ([ n ], args, l) when List.mem_assoc n prim_names ->
+      if args <> [] then err "E0102" l "type %s takes no type arguments" n else List.assoc n prim_names
+  | TyPath ([ "Array" ], args, l) -> (
+      match args with [ a ] -> TArray (conv_ty tb tps self a) | _ -> err "E0201" l "Array takes one type argument")
+  | TyPath ((([ _ ] | [ _; _ ]) as p), args, l) -> (
+      (* a type of this module or the prelude, or `alias.Name`, an exported type of an import *)
+      let n = String.concat "." p in
+      match find_decl tb n with
+      | Found (k, d) ->
+          if List.length d.dparams <> List.length args then
+            err "E0201" l "type %s takes %d type argument(s), found %d" n (List.length d.dparams) (List.length args);
+          let args = List.map (conv_ty tb tps self) args in
+          (match d.dbody with
+           | DAlias a -> subst (List.combine d.dparams args) a
+           | _ -> TNamed (k, args))
+      | Private (m, x) -> err "E0101" l "type '%s' is private to module %s; mark it with * where it is defined" x m
+      | Absent -> err "E0101" l "unknown type '%s'" n)
+  | TyPath (p, _, l) -> err "E0101" l "unknown type '%s'" (String.concat "." p)
   | TyAny (n, args, l) ->
-      let use_ = (n, List.length args, l) in
+      let k =
+        match find_trait tb n with
+        | Found (k, _) -> k
+        | Private (m, x) -> err "E0101" l "trait '%s' is private to module %s; mark it with * where it is defined" x m
+        | Absent -> err "E0101" l "unknown trait '%s'" n
+      in
+      let use_ = (k, List.length args, l) in
       if tb.traits_ready then validate_any_use tb use_ else tb.any_uses <- use_ :: tb.any_uses;
-      TAny (n, List.map (conv_ty tb tps self) args)
+      TAny (k, List.map (conv_ty tb tps self) args)
   | TyFn (ps, ret, effs, _) ->
       let fps = List.map (fun (m, t) -> (m, conv_ty tb tps self t)) ps in
       let fret = match ret with Some r -> conv_ty tb tps self r | None -> TUnit in
@@ -320,7 +466,8 @@ type frame = { mutable vars : (string * var) list; lam : lamrec option }
 type fctx = {
   tb : tables;
   mutable frames : frame list;
-  tparams : (string * (string * ty list) list) list;
+  tparams : (string * (string * ty list) list) list;   (* the type parameters in scope and their bounds: the evidence for a bound *)
+  mutable tnames : string list;      (* the names a written type may use for them: none in a default, which writes its own *)
   mutable ret : ty;
   mutable errs : ty list;           (* collected errors of the current function or try *)
   mutable io : bool;
@@ -333,7 +480,7 @@ type fctx = {
   mutable lent : (int * loc) list;         (* roots iterated by an enclosing 'for ... in mut' *)
   closure_caps : (int, var list) Hashtbl.t;  (* captures of closures bound to names *)
   fname : string;
-  self_ty : ty option;
+  mutable self_ty : ty option;
   lend_kind : bool option;          (* Some m inside a function declared -> lend [mut] T *)
   retries : int ref;                (* retries left for the outermost call being checked; shared with closures *)
   hint_failed : (string, (string * var * string) list) Hashtbl.t;
@@ -347,6 +494,7 @@ type fctx = {
    there is one. The matching of arguments to parameters is made when the first of them is
    needed, so that an error in the receiver comes before one in the number of arguments. *)
 type args_state = {
+  a_tenv : (string * ty) list;   (* the type parameters of the callee, as this call instantiates them *)
   a_receiver : texpr option;
   a_params : (mode * string * ty * Syntax.expr option) list;
   a_args : Syntax.arg list;
@@ -473,6 +621,41 @@ let check_known_bounds c l (sg : fsig) s =
           bs)
     sg.stparams
 
+(* Whether the receiver [self] can be the first argument of the function [u]: the type fits, and a
+   bound on a type parameter that the receiver fixes holds. Nothing stays bound. *)
+let fits_receiver c self u =
+  let sg = Hashtbl.find c.tb.fns u in
+  match sg.sparams with
+  | (_, _, t, _) :: _ ->
+      let s = List.map (fun (p, _) -> (p, fresh ())) sg.stparams in
+      let mark = open_speculation () in
+      let ok =
+        (try
+           unify self (subst s t);
+           (try check_known_bounds c noloc sg s; true with Syntax.Error _ -> false)
+         with Mismatch -> false)
+      in
+      undo_speculation mark;
+      close_speculation ();
+      ok
+  | [] -> false
+
+(* The bounds of an impl hold for what it was matched to, as trait dispatch asks of it: a bound on
+   a type that is not known yet is not decided here. *)
+let impl_bounds_hold c (im : impl_info) (s : (string * ty) list) : bool =
+  List.for_all
+    (fun (p, bs) ->
+      match List.assoc_opt p s with
+      | None -> true
+      | Some t ->
+          let t = zonk t in
+          List.for_all
+            (fun (tr, ta) ->
+              let ta = List.map (fun x -> zonk (subst s x)) ta in
+              has_tvar t || List.exists has_tvar ta || find_impl (rtab_of c.tb) ~bounds:c.tparams tr ta t <> None)
+            bs)
+    im.itparams
+
 (* The type variables of a call that its expected type would bind to the result: those it
    binds, and whether they are all variables of the call itself, which s lists. None if it
    binds nothing. The binding is undone. *)
@@ -511,7 +694,40 @@ let edit_distance a b =
   d.(n).(m)
 
 let unknown_name c l name =
-  let cands = all_names c @ List.of_seq (Hashtbl.to_seq_keys c.tb.by_name) in
+  (* `alias.name`: say whether the module has the item and keeps it private, or has none *)
+  (match split_qual name with
+   | Some (alias, x) -> (
+       match import_of c.tb alias with
+       | Some m ->
+           let private_item =
+             (match find_decl c.tb name with Private _ -> true | _ -> false)
+             || (match find_trait c.tb name with Private _ -> true | _ -> false)
+             || (match find_const c.tb name with Private _ -> true | _ -> false)
+             || (match find_variant c.tb name with Private _ -> true | _ -> false)
+             || List.exists (fun u -> (Hashtbl.find c.tb.fns u).smodule = m) (try Hashtbl.find c.tb.by_name x with Not_found -> [])
+           in
+           if private_item then err "E0101" l "'%s' is private to module %s; mark it with * where it is defined" x m
+           else err "E0101" l "module %s has no item '%s'" m x
+       | None -> ())
+   | None -> ());
+  (* an exported item of an imported module is reached through the module's name *)
+  (match split_qual name with
+   | Some _ -> ()
+   | None -> (
+       let in_module =
+         List.find_opt
+           (fun (alias, _) ->
+             let q = alias ^ "." ^ name in
+             visible_fns c.tb q <> []
+             || found_opt (find_decl c.tb q) <> None || found_opt (find_trait c.tb q) <> None
+             || found_opt (find_const c.tb q) <> None || found_opt (find_variant c.tb q) <> None)
+           (match Hashtbl.find_opt c.tb.imports c.tb.cur with Some l -> l | None -> [])
+       in
+       match in_module with
+       | Some (alias, m) -> err "E0101" l "unknown name '%s'; module %s has it, so write %s.%s" name m alias name
+       | None -> ()));
+  (* only the functions this module can see are worth suggesting *)
+  let cands = all_names c @ List.filter (fun n -> visible_fns c.tb n <> []) (List.of_seq (Hashtbl.to_seq_keys c.tb.by_name)) in
   let best =
     List.fold_left
       (fun acc n ->
@@ -524,6 +740,11 @@ let unknown_name c l name =
   match best with
   | Some (n, _) -> err "E0101" l "unknown name '%s'; did you mean '%s'?" name n
   | None -> err "E0101" l "unknown name '%s'" name
+
+(* The fields of a type are visible with the type, which is private unless marked (section 3.5). *)
+let check_field_visible tb l (d : tdecl) f t =
+  if (not d.dexport) && d.dmodule <> tb.cur && d.dmodule <> "core" then
+    err "E0101" l "field '%s' of %s is private: the type is private to module %s" f (show_ty t) d.dmodule
 
 let mismatch l expected found =
   err "E0201" l "expected %s, found %s" (show_ty expected) (show_ty found)
@@ -614,7 +835,7 @@ let rec is_place (e : Syntax.expr) =
   | Bracket (b, [ _ ]) -> is_place b
   | _ -> false
 
-let lookup_fns c name = try Hashtbl.find c.tb.by_name name with Not_found -> []
+let lookup_fns c name = visible_fns c.tb name
 
 let instantiate (sg : fsig) =
   let s = List.map (fun (p, _) -> (p, fresh ())) sg.stparams in
@@ -622,6 +843,9 @@ let instantiate (sg : fsig) =
    { sg.seff with errs = List.map (subst s) sg.seff.errs })
 
 let defaults_table : (string, Syntax.expr option list) Hashtbl.t = Hashtbl.create 16
+
+(* check_const, which comes after the expressions: a constant is checked when it is first used *)
+let ensure_const : (tables -> string -> unit) ref = ref (fun _ _ -> ())
 
 (* Some m when [te] calls a lend function (lend mut when m) *)
 let lend_of tb (te : texpr) : bool option =
@@ -870,7 +1094,7 @@ and check_or_infer c (e : Syntax.expr) (expected : ty option) : texpr =
       in
       mk (XFStr ps) TStr l
   | Name n -> infer_name c l n exp
-  | Field (b, f) -> infer_field c l b f
+  | Field (b, f) -> infer_field c l b f exp
   | Call (f, args) -> infer_call c l f args exp
   | Bracket (b, args) -> infer_bracket c l b args exp
   | Tuple es ->
@@ -958,10 +1182,10 @@ and infer_name c l n exp : texpr =
       check_not_lent c l v;
       mk (XVar v) v.vty l
   | None -> (
-      match Hashtbl.find_opt c.tb.variants n with
-      | Some (tn, idx) -> construct_variant c l tn idx n [] exp
+      match found_opt (find_variant c.tb n) with
+      | Some (_, (tn, idx)) -> construct_variant c l tn idx n [] exp
       | None -> (
-          match Hashtbl.find_opt c.tb.typed_consts n with
+          match (match found_opt (find_const c.tb n) with Some (k, _) -> !ensure_const c.tb k; Hashtbl.find_opt c.tb.typed_consts k | None -> None) with
           | Some te -> te
           | None -> (
               match lookup_fns c n with
@@ -976,13 +1200,29 @@ and infer_name c l n exp : texpr =
               | _ :: _ -> err "E0201" l "'%s' is overloaded; call it directly" n
               | [] -> unknown_name c l n)))
 
-and infer_field c l b f : texpr =
-  (* qualified variant: Shape.Circle *)
+(* `alias.name`, with `alias` an import of this module and not a variable, as the one name
+   the checker looks up (section 3.5) *)
+and norm_qual c (e : Syntax.expr) : Syntax.expr =
+  match e.d with
+  | Field ({ d = Name a; _ }, f) when lookup c a = None && import_of c.tb a <> None -> { e with d = Name (a ^ "." ^ f) }
+  | _ -> e
+
+(* variant [v] of the type [tk], if it has one *)
+and variant_of_type c tk v : int option =
+  let d = Hashtbl.find c.tb.decls tk in
+  match Hashtbl.find_opt c.tb.variants (gkey c.tb d.dmodule v) with Some (tk', idx) when tk' = tk -> Some idx | _ -> None
+
+and infer_field c l b f exp : texpr =
+  let b = norm_qual c b in
   match b.d with
-  | Name tn when lookup c tn = None && Hashtbl.mem c.tb.decls tn -> (
-      match Hashtbl.find_opt c.tb.variants f with
-      | Some (tn', idx) when tn' = tn -> construct_variant c l tn idx f [] None
-      | _ -> err "E0101" l "type %s has no variant %s" tn f)
+  (* a name of an imported module: alias.f *)
+  | Name a when lookup c a = None && import_of c.tb a <> None -> infer_name c l (a ^ "." ^ f) exp
+  (* qualified variant: Shape.Circle *)
+  | Name tn when lookup c tn = None && found_opt (find_decl c.tb tn) <> None -> (
+      let tk, _ = Option.get (found_opt (find_decl c.tb tn)) in
+      match variant_of_type c tk f with
+      | Some idx -> construct_variant c l tk idx f [] None
+      | None -> err "E0101" l "type %s has no variant %s" tn f)
   | _ ->
       let tb = infer c b in
       field_of c l tb f
@@ -995,6 +1235,7 @@ and field_of c l (tb : texpr) f : texpr =
       | _ -> err "E0201" l "tuple %s has no field %s" (show_ty tb.ty) f)
   | TNamed (n, args) -> (
       let d = Hashtbl.find c.tb.decls n in
+      check_field_visible c.tb l d f tb.ty;
       match d.dbody with
       | DStruct fs -> (
           let s = List.combine d.dparams args in
@@ -1105,7 +1346,27 @@ and args_check c l (st : args_state) (slots : int list) : targ list =
             { amode = m; a = te }
         | None -> (
             match d with
-            | Some d -> { amode = m; a = check c d t }
+            | Some d ->
+                (* A default is written in the module that declares the parameter, and its names
+                   are that module's: the variables of the caller are not in scope in it, so a
+                   caller's `let RATE = 99` does not change a default `by: Int = RATE`. It is
+                   still evaluated here, at the call, and its effects are the call's. *)
+                let dm = try List.assq d !default_modules with Not_found -> c.tb.cur in
+                (* nor are the names of its type parameters, or its Self: a type written in the default is
+                   the module's own, not one that the caller happens to have a parameter of that name for.
+                   The bounds of the caller's parameters stay, as evidence for the types that reach the default *)
+                let caller_frames = c.frames and caller_tnames = c.tnames and caller_self = c.self_ty and caller_tenv = c.tb.tenv in
+                c.frames <- [ { vars = []; lam = None } ];
+                c.tnames <- [];
+                c.self_ty <- None;
+                (* a type parameter of the function the default belongs to means what this call made of it *)
+                c.tb.tenv <- st.a_tenv;
+                let te =
+                  Fun.protect
+                    ~finally:(fun () -> c.frames <- caller_frames; c.tnames <- caller_tnames; c.self_ty <- caller_self; c.tb.tenv <- caller_tenv)
+                    (fun () -> in_module c.tb dm (fun () -> check c d t))
+                in
+                { amode = m; a = te }
             | None -> assert false))
   in
   let rec go = function [] -> [] | i :: rest -> (let ta = slot i in ta :: go rest) in
@@ -1174,8 +1435,8 @@ and args_finish c l (st : args_state) (all : targ list) : targ list * eff list =
   (all, !poly_effs)
 
 (* Check the arguments of a call against instantiated parameters. *)
-and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : targ list * eff list =
-  let st = { a_receiver = receiver; a_params = params; a_args = args; a_matched = None } in
+and check_args c l ~tenv ~(receiver : texpr option) params (args : Syntax.arg list) : targ list * eff list =
+  let st = { a_tenv = tenv; a_receiver = receiver; a_params = params; a_args = args; a_matched = None } in
   args_finish c l st (args_check c l st (List.init (List.length params) Fun.id))
 
 and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
@@ -1183,7 +1444,7 @@ and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
   (* the budget of retries belongs to one outermost call and the calls nested in it *)
   if !speculating = 0 then c.retries := retry_budget;
   let s, ps, ret, eff = instantiate sg in
-  let st = { a_receiver = receiver; a_params = ps; a_args = args; a_matched = None } in
+  let st = { a_tenv = s; a_receiver = receiver; a_params = ps; a_args = args; a_matched = None } in
   let n = List.length ps in
   let all_slots = List.init n Fun.id in
   (* The expected type is a hint for the result: the parameters are bound to it before the
@@ -1313,6 +1574,7 @@ and pick_overload c l name (cands : string list) (first : texpr option) : string
           | _ -> err "E0105" l "'%s' matches more than one function" name)
 
 and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
+  let f = norm_qual c f in
   match f.d with
   | Name "fail" when lookup c "fail" = None -> (
       match args with
@@ -1350,10 +1612,11 @@ and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
           if not ok then err "E0201" l "cannot convert %s to %s" (show_ty te.ty) n;
           mk (XConv te) target l
       | _ -> err "E0203" l "%s(...) takes one argument" n)
-  | Name n when lookup c n = None && Hashtbl.mem c.tb.decls n && not (Hashtbl.mem c.tb.variants n) ->
-      construct_struct c l n args exp
-  | Name n when lookup c n = None && Hashtbl.mem c.tb.variants n ->
-      let tn, idx = Hashtbl.find c.tb.variants n in
+  | Name n when lookup c n = None && found_opt (find_decl c.tb n) <> None && found_opt (find_variant c.tb n) = None ->
+      let k, _ = Option.get (found_opt (find_decl c.tb n)) in
+      construct_struct c l k args exp
+  | Name n when lookup c n = None && found_opt (find_variant c.tb n) <> None ->
+      let _, (tn, idx) = Option.get (found_opt (find_variant c.tb n)) in
       construct_variant c l tn idx n args exp
   | Name n when lookup c n = None && lookup_fns c n <> [] ->
       let cands = lookup_fns c n in
@@ -1371,7 +1634,7 @@ and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
       (match repr tf.ty with
        | TFn ft ->
            let ps = List.mapi (fun i (m, t) -> (m, Printf.sprintf "arg%d" i, t, None)) ft.fps in
-           let targs, _ = check_args c l ~receiver:None ps args in
+           let targs, _ = check_args c l ~tenv:[] ~receiver:None ps args in
            let convs = add_eff c l { ft.feff with poly = false } in
            mk (XCall (CClosure tf, targs, convs)) ft.fret l
        | TVar _ -> err "E0201" l "the type of this function value must be known; add an annotation"
@@ -1386,7 +1649,7 @@ and construct_struct c l n args exp : texpr =
       (match exp with Some t -> (try unify t ty with Mismatch -> ()) | None -> ());
       let defaults = struct_defaults c n in
       let params = List.map2 (fun fi dflt -> (MTake, fi.fname_, subst s fi.fty, dflt)) fs defaults in
-      let targs, _ = check_args c l ~receiver:None params args in
+      let targs, _ = check_args c l ~tenv:s ~receiver:None params args in
       mk (XStruct (n, List.map snd s, List.map (fun a -> a.a) targs)) ty l
   | _ -> err "E0201" l "%s is not a struct" n
 
@@ -1398,40 +1661,83 @@ and construct_variant c l tn idx vn (args : Syntax.arg list) exp : texpr =
   match d.dbody with
   | DData vs ->
       let v = List.nth vs idx in
+      (* [vn] is the name as written, which may be qualified with a module *)
+      let shown_vn = vn in
+      let vn = v.vname_ in
       let s = List.map (fun p -> (p, fresh ())) d.dparams in
       let ty = TNamed (tn, List.map snd s) in
       (match exp with
        | Some t -> (try unify t ty with Mismatch -> ())
        | None -> ());
-      if v.vfields = [] && args <> [] then err "E0203" l "variant %s takes no arguments" vn;
+      if v.vfields = [] && args <> [] then err "E0203" l "variant %s takes no arguments" shown_vn;
       let defaults = try Hashtbl.find defaults_table (tn ^ "." ^ vn) with Not_found -> List.map (fun _ -> None) v.vfields in
       let params = List.map2 (fun fi dflt -> (MTake, fi.fname_, subst s fi.fty, dflt)) v.vfields defaults in
-      let targs, _ = if v.vfields = [] then ([], []) else check_args c l ~receiver:None params args in
+      let targs, _ = if v.vfields = [] then ([], []) else check_args c l ~tenv:s ~receiver:None params args in
       if v.vfields <> [] && args = [] && List.exists (fun d -> d = None) defaults then
-        err "E0203" l "variant %s needs %d argument(s)" vn (List.length v.vfields);
+        err "E0203" l "variant %s needs %d argument(s)" shown_vn (List.length v.vfields);
       List.iter (fun (_, t) -> ()) s;
       let te = mk (XVariant (tn, List.map snd s, idx, List.map (fun a -> a.a) targs)) ty l in
       te
   | _ -> err "E0201" l "%s is not a data type" tn
 
+(* The type an expression has when checked on its own, with nothing that the check did kept: for
+   choosing among functions by their first argument. None if it does not check by itself. *)
+and probe_type c (e : Syntax.expr) : ty option =
+  let snap = snapshot c in
+  let mark = open_speculation () in
+  let r = (try Some (zonk (infer c e).ty) with Syntax.Error _ -> None) in
+  undo_speculation mark;
+  close_speculation ();
+  restore c snap;
+  r
+
 and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
+  let b = norm_qual c b in
   match b.d with
-  (* T.f(args) and Trait.f(args) *)
-  | Name tn when lookup c tn = None && Hashtbl.mem c.tb.traits tn ->
-      let tr = Hashtbl.find c.tb.traits tn in
+  (* T.f(args) and Trait.f(args), the type or trait written alias.T when it is one of an import *)
+  | Name tn when lookup c tn = None && found_opt (find_trait c.tb tn) <> None ->
+      let tk, tr = Option.get (found_opt (find_trait c.tb tn)) in
       let sg = try List.assoc m tr.trmethods_ with Not_found -> err "E0101" l "trait %s has no method %s" tn m in
       let self = fresh () in
       (match (exp, repr sg.sret) with Some t, TParam "Self" -> unify_at l t self | _ -> ());
-      trait_call c l tn [] m sg self None args exp
-  | Name tn when lookup c tn = None && Hashtbl.mem c.tb.decls tn && Hashtbl.mem c.tb.variants m ->
-      let tn', idx = Hashtbl.find c.tb.variants m in
-      if tn' <> tn then err "E0101" l "type %s has no variant %s" tn m;
-      construct_variant c l tn idx m args exp
-  | Name tn when lookup c tn = None && (Hashtbl.mem c.tb.decls tn || List.mem_assoc tn prim_names) ->
-      let cands = lookup_fns c m in
-      let ok = List.filter (fun u ->
+      trait_call c l tk [] m sg self None args exp
+  | Name tn when lookup c tn = None && (match found_opt (find_decl c.tb tn) with Some (tk, _) -> variant_of_type c tk m <> None | None -> false) ->
+      let tk, _ = Option.get (found_opt (find_decl c.tb tn)) in
+      construct_variant c l tk (Option.get (variant_of_type c tk m)) m args exp
+  | Name tn when lookup c tn = None && (found_opt (find_decl c.tb tn) <> None || List.mem_assoc tn prim_names) ->
+      let self_ty = match found_opt (find_decl c.tb tn) with Some (tk, _) -> TNamed (tk, []) | None -> List.assoc tn prim_names in
+      let cands = method_fns c.tb self_ty m in
+      let by_head = List.filter (fun u ->
           let sg = Hashtbl.find c.tb.fns u in
-          sg.smodule <> "" && (match sg.sparams with (_, _, t, _) :: _ -> head t = tn | [] -> true)) cands in
+          sg.smodule <> "" && (match sg.sparams with (_, _, t, _) :: _ -> head t = head self_ty | [] -> true)) cands in
+      (* With several functions for this kind of type, the call must first be one they accept: the
+         ordinary matching of its arguments to their parameters, by position and by name, with the
+         parameters that have no default all given and nothing left over. Of those, the ones that take
+         the argument of the first parameter, as a receiver would be taken (its instantiation of the
+         type, and the bounds it fixes), come first. If a step leaves none, the call is a type error
+         against the candidates the step began with. *)
+      let matched u = try Some (match_args c l (Hashtbl.find c.tb.fns u).sparams args) with Syntax.Error _ -> None in
+      let accepting = match by_head with _ :: _ :: _ -> List.filter (fun u -> matched u <> None) by_head | _ -> by_head in
+      let accepting = if accepting = [] then by_head else accepting in
+      let fitting =
+        match accepting with
+        | _ :: _ :: _ ->
+            (* the type of each argument is found once *)
+            let probed = ref [] in
+            let type_of (a : Syntax.arg) =
+              match List.assq_opt a.aexpr !probed with
+              | Some t -> t
+              | None -> let t = probe_type c a.aexpr in probed := (a.aexpr, t) :: !probed; t
+            in
+            List.filter
+              (fun u ->
+                match matched u with
+                | Some ((_, _, _, Some a, _) :: _) -> (match type_of a with Some t -> fits_receiver c t u | None -> true)
+                | _ -> true)
+              accepting
+        | _ -> accepting
+      in
+      let ok = prefer_owner c.tb self_ty (if fitting = [] then accepting else fitting) in
       (match ok with
        | [] -> err "E0101" l "no function %s for type %s" m tn
        | u :: _ -> call_sig c l u ~receiver:None args exp)
@@ -1440,25 +1746,50 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
       (* a field holding a function is not a method (section 4.7) *)
       let self = repr tb.ty in
       let h = head self in
-      let fn_cands =
-        List.filter
-          (fun u ->
-            let sg = Hashtbl.find c.tb.fns u in
-            match sg.sparams with
-            | (_, _, t, _) :: _ -> head t = h && h <> "_param"
-            | [] -> false)
-          (lookup_fns c m)
+      (* whether the other arguments of the call fit the parameters after the receiver *)
+      let takes_args (sg : fsig) =
+        try ignore (match_args c l (match sg.sparams with _ :: rest -> rest | [] -> []) args); true with Syntax.Error _ -> false
       in
-      let generic_cands =
+      let fn_cands =
+        let by_head =
+          List.filter
+            (fun u ->
+              let sg = Hashtbl.find c.tb.fns u in
+              match sg.sparams with
+              | (_, _, t, _) :: _ -> head t = h && h <> "_param"
+              | [] -> false)
+            (method_fns c.tb self m)
+        in
+        (* of the functions for this kind of type, those that accept the other arguments of the call, by
+           position and by name, and take this receiver: a function of Box[Int] is not a method of a
+           Box[Str], nor is one whose bound the receiver breaks. The others are kept for the error. *)
+        prefer_owner c.tb self
+          (List.filter (fun u -> takes_args (Hashtbl.find c.tb.fns u) && fits_receiver c self u) by_head)
+      in
+      (* what the call is an error against, if nothing takes this receiver with these arguments: the
+         functions for this kind of type, and only after the traits are looked at *)
+      let misfit_fns () =
+        prefer_owner c.tb self
+          (List.filter
+             (fun u ->
+               match (Hashtbl.find c.tb.fns u).sparams with
+               | (_, _, t, _) :: _ -> head t = h && h <> "_param"
+               | [] -> false)
+             (method_fns c.tb self m))
+      in
+      let generic_all =
         List.filter
           (fun u ->
-            let sg = Hashtbl.find c.tb.fns u in
-            match sg.sparams with
+            match (Hashtbl.find c.tb.fns u).sparams with
             | (_, _, t, _) :: _ -> (match repr t with TParam _ -> true | _ -> false)
             | [] -> false)
-          (lookup_fns c m)
+          (method_fns c.tb self m)
       in
-      let trait_cands =
+      let generic_cands =
+        prefer_owner c.tb self
+          (List.filter (fun u -> takes_args (Hashtbl.find c.tb.fns u) && fits_receiver c self u) generic_all)
+      in
+      let trait_all =
         Hashtbl.fold
           (fun tn tr acc ->
             match List.assoc_opt m tr.trmethods_ with
@@ -1471,14 +1802,19 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
                       | None -> false)
                   | TAny (n, _) -> n = tn
                   | _ ->
-                      List.exists (fun im -> im.itrait_ = tn && (let s = ref [] in match_ty (List.map fst im.itparams) s im.ifor_ self)) c.tb.impls
-                      || (List.mem tn (prim_traits self))
+                      (* the methods of a trait are found where the trait is in scope (section 4.7) *)
+                      trait_visible c.tb tr
+                      && (List.exists (fun im -> im.itrait_ = tn && (let s = ref [] in match_ty (List.map fst im.itparams) s im.ifor_ self && impl_bounds_hold c im !s)) c.tb.impls
+                          || (List.mem tn (prim_traits self)))
                 in
                 if has then (tn, sg) :: acc else acc
             | None -> acc)
           c.tb.traits []
       in
+      (* the methods that accept the other arguments of the call; the others are kept for the error *)
+      let trait_cands = List.filter (fun (_, sg) -> takes_args sg) trait_all in
       let recv_mode u = match (Hashtbl.find c.tb.fns u).sparams with (m, _, _, _) :: _ -> m | [] -> MBorrow in
+      let trait_recv_mode (sg : fsig) = match sg.sparams with (m, _, _, _) :: _ -> m | [] -> MBorrow in
       let check_recv mode =
         if mode = MMut && not (mutable_place c b) then
           err "E0303" b.loc "the receiver of this call is passed as mut and must be a mutable place"
@@ -1486,11 +1822,24 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
       match (fn_cands, trait_cands) with
       | [ u ], _ -> check_recv (recv_mode u); call_sig c l u ~receiver:(Some tb) args exp
       | _ :: _ :: _, _ -> err "E0105" l "'%s' matches more than one function" m
-      | [], [ (tn, sg) ] -> trait_call c l tn [] m sg self (Some tb) args exp
+      | [], [ (tn, sg) ] -> check_recv (trait_recv_mode sg); trait_call c l tn [] m sg self (Some tb) args exp
       | [], _ :: _ :: _ -> err "E0105" l "method '%s' matches more than one trait; write Trait.%s(x, ...)" m m
       | [], [] -> (
           match generic_cands with
           | u :: _ -> check_recv (recv_mode u); call_sig c l u ~receiver:(Some tb) args exp
+          | [] when misfit_fns () <> [] -> (
+              (* nothing takes the receiver with these arguments, and no trait or generic function does:
+                 the call is checked against the functions for this kind of type, which reports why not *)
+              match misfit_fns () with
+              | [ u ] -> check_recv (recv_mode u); call_sig c l u ~receiver:(Some tb) args exp
+              | _ -> err "E0105" l "'%s' matches more than one function" m)
+          | [] when trait_all <> [] -> (
+              match trait_all with
+              | [ (tn, sg) ] -> check_recv (trait_recv_mode sg); trait_call c l tn [] m sg self (Some tb) args exp
+              | _ -> err "E0105" l "method '%s' matches more than one trait; write Trait.%s(x, ...)" m m)
+          | [] when generic_all <> [] ->
+              let u = List.hd (prefer_owner c.tb self generic_all) in
+              check_recv (recv_mode u); call_sig c l u ~receiver:(Some tb) args exp
           | [] -> (
               match self with
               | TNamed _ | TTuple _ -> (
@@ -1522,7 +1871,8 @@ and trait_call c l tn trargs m (sg : fsig) self (receiver : texpr option) args e
              if im.itrait_ <> tn then None
              else
                let sb = ref [] in
-               if match_ty (List.map fst im.itparams) sb im.ifor_ t then Some (im, !sb) else None)
+               (* the impls that apply to Self: of its shape, and with the bounds that trait dispatch asks for *)
+               if match_ty (List.map fst im.itparams) sb im.ifor_ t && impl_bounds_hold c im !sb then Some (im, !sb) else None)
            c.tb.impls
        in
        match fits with
@@ -1530,7 +1880,7 @@ and trait_call c l tn trargs m (sg : fsig) self (receiver : texpr option) args e
            let sb = List.map (fun (p, _) -> (p, try List.assoc p sb with Not_found -> fresh ())) im.itparams in
            List.iter2 (fun a b -> try unify a (subst sb b) with Mismatch -> ()) ta im.itargs_
        | _ -> ()));
-  let targs, poly = check_args c l ~receiver ps args in
+  let targs, poly = check_args c l ~tenv:[] ~receiver ps args in
   c.obligations <- (self, tn, ta, l) :: c.obligations;
   (* the method's own effects, and those of any function argument whose effects are open *)
   let convs = add_eff c l { sg.seff with errs = List.map (subst s) sg.seff.errs } @ List.concat_map (add_eff c l) poly in
@@ -1546,7 +1896,7 @@ and infer_bracket c l (b : Syntax.expr) (args : Syntax.barg list) exp : texpr =
        | TArray _ | TStr -> mk (XSlice (tb, tlo, thi)) tb.ty l
        | t -> err "E0201" l "%s cannot be sliced" (show_ty t))
   | [ BExpr i ] -> (
-      match b.d with
+      match (norm_qual c b).d with
       | Name n when lookup c n = None && lookup_fns c n <> [] -> err "E0102" l "explicit type arguments arrive later; '%s' infers them" n
       | _ ->
           let tb = infer c b in
@@ -1588,7 +1938,7 @@ and infer_lambda c l ps body exp : texpr =
       (fun i (p : Syntax.param) ->
         let t =
           match p.pty with
-          | Some t -> conv_ty c.tb (List.map fst c.tparams) c.self_ty t
+          | Some t -> conv_ty c.tb c.tnames c.self_ty t
           | None -> (
               match expected_fn with
               | Some f -> snd (List.nth f.fps i)
@@ -1717,6 +2067,7 @@ and place_of c (e : Syntax.expr) : place =
         match repr p.pty with
         | TNamed (tn, args) -> (
             let d = Hashtbl.find c.tb.decls tn in
+            check_field_visible c.tb e.loc d f p.pty;
             match d.dbody with
             | DStruct fs ->
                 let s = List.combine d.dparams args in
@@ -1805,6 +2156,25 @@ and infer_binop_typed c l op (ta : texpr) (b : Syntax.expr) : texpr =
 
 (* ---------- patterns ---------- *)
 
+(* What the constructor path of a pattern names: a variant, written alone, after its type
+   (Shape.Circle), after a module (shapes.Circle), or after both; or a struct. *)
+and resolve_ctor_path c (path : string list) : ctor option =
+  let variant_of w = match found_opt (find_variant c.tb w) with Some (_, (tn, idx)) -> Some (CVariant (tn, idx)) | None -> None in
+  let struct_of w = match found_opt (find_decl c.tb w) with Some (k, d) -> Some (CStruct (k, d)) | None -> None in
+  let by_type tw v =
+    match found_opt (find_decl c.tb tw) with
+    | Some (tk, _) -> (match variant_of_type c tk v with Some idx -> Some (CVariant (tk, idx)) | None -> None)
+    | None -> None
+  in
+  match path with
+  | [ n ] -> (match variant_of n with Some r -> Some r | None -> struct_of n)
+  | [ a; x ] when import_of c.tb a <> None -> (
+      let q = a ^ "." ^ x in
+      match variant_of q with Some r -> Some r | None -> struct_of q)
+  | [ a; x ] -> by_type a x
+  | [ a; t; v ] when import_of c.tb a <> None -> by_type (a ^ "." ^ t) v
+  | _ -> None
+
 and check_pat c (p : Syntax.pattern) (t : ty) (refutable : bool) : tpat =
   let l = p.ploc_ in
   match p.p with
@@ -1839,6 +2209,7 @@ and check_pat c (p : Syntax.pattern) (t : ty) (refutable : bool) : tpat =
   | PCtor (path, args) -> (
       let name = List.nth path (List.length path - 1) in
       let args = match args with Some a -> a | None -> [] in
+      let ctor = resolve_ctor_path c path in
       match repr t with
       | TErr members ->
           (* inside Err(...) on a union: a constructor of one member type *)
@@ -1847,8 +2218,10 @@ and check_pat c (p : Syntax.pattern) (t : ty) (refutable : bool) : tpat =
               (fun m ->
                 match repr m with
                 | TNamed (tn, _) -> (
-                    tn = name
-                    || match Hashtbl.find_opt c.tb.variants name with Some (tn', _) -> tn' = tn | None -> false)
+                    match ctor with
+                    | Some (CVariant (tn', _)) -> tn' = tn
+                    | Some (CStruct (k, _)) -> k = tn
+                    | None -> false)
                 | _ -> false)
               members
           in
@@ -1856,8 +2229,8 @@ and check_pat c (p : Syntax.pattern) (t : ty) (refutable : bool) : tpat =
            | Some m -> TPErrType (m, check_pat c p m refutable)
            | None -> err "E0201" l "%s is not one of the error types %s" name (show_ty t))
       | rt -> (
-          match Hashtbl.find_opt c.tb.variants name with
-          | Some (tn, idx) ->
+          match ctor with
+          | Some (CVariant (tn, idx)) ->
               let d = Hashtbl.find c.tb.decls tn in
               let targs =
                 match rt with
@@ -1871,18 +2244,16 @@ and check_pat c (p : Syntax.pattern) (t : ty) (refutable : bool) : tpat =
                 err "E0203" l "variant %s has %d field(s), the pattern gives %d" name (List.length v.vfields) (List.length args);
               let sub = List.map2 (fun p fi -> check_pat c p (subst s fi.fty) refutable) args v.vfields in
               TPVariant (tn, targs, idx, sub)
-          | None -> (
-              match Hashtbl.find_opt c.tb.decls name with
-              | Some { dbody = DStruct fs; dparams; _ } ->
-                  let targs =
-                    match rt with
-                    | TNamed (tn', args) when tn' = name -> args
-                    | _ -> err "E0201" l "pattern %s does not match %s" name (show_ty t)
-                  in
-                  let s = List.combine dparams targs in
-                  if List.length args <> List.length fs then err "E0203" l "struct %s has %d field(s)" name (List.length fs);
-                  TPStruct (name, targs, List.map2 (fun p fi -> check_pat c p (subst s fi.fty) refutable) args fs)
-              | _ -> err "E0101" l "unknown variant '%s'" name)))
+          | Some (CStruct (k, { dbody = DStruct fs; dparams; _ })) ->
+              let targs =
+                match rt with
+                | TNamed (tn', args) when tn' = k -> args
+                | _ -> err "E0201" l "pattern %s does not match %s" name (show_ty t)
+              in
+              let s = List.combine dparams targs in
+              if List.length args <> List.length fs then err "E0203" l "struct %s has %d field(s)" name (List.length fs);
+              TPStruct (k, targs, List.map2 (fun p fi -> check_pat c p (subst s fi.fty) refutable) args fs)
+          | _ -> err "E0101" l "unknown variant '%s'" (String.concat "." path)))
 
 (* ---------- statements and blocks ---------- *)
 
@@ -1961,7 +2332,7 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
   | Let (p, t, e) ->
       let te =
         match t with
-        | Some t -> check c e (conv_ty c.tb (List.map fst c.tparams) c.self_ty t)
+        | Some t -> check c e (conv_ty c.tb c.tnames c.self_ty t)
         | None -> infer c e
       in
       let tp = check_pat c p te.ty false in
@@ -1976,7 +2347,7 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
   | Var (_, n, t, e) ->
       let te =
         match t with
-        | Some t -> check c e (conv_ty c.tb (List.map fst c.tparams) c.self_ty t)
+        | Some t -> check c e (conv_ty c.tb c.tnames c.self_ty t)
         | None -> infer c e
       in
       let v = new_var n te.ty true VLocal in
@@ -1993,7 +2364,7 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
   | Check e -> mks (SCheck (check c e TBool))
   | Assert e -> mks (SAssert (check c e TBool, ""))
   | AssertFails (t, e) ->
-      let et = conv_ty c.tb (List.map fst c.tparams) c.self_ty t in
+      let et = conv_ty c.tb c.tnames c.self_ty t in
       let saved = c.errs in
       c.errs <- [];
       c.in_try <- c.in_try + 1;
@@ -2039,11 +2410,11 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
   | LocalFn fd ->
       (* a local fn is a closure bound to an immutable name (section 2.2) *)
       let ps = fd.fparams in
-      let ret = match fd.fret with Some t -> conv_ty c.tb (List.map fst c.tparams) c.self_ty t | None -> TUnit in
+      let ret = match fd.fret with Some t -> conv_ty c.tb c.tnames c.self_ty t | None -> TUnit in
       let lr = { caps = [] } in
       push_frame c ~lam:lr ();
       let params = List.map (fun (p : Syntax.param) ->
-          let t = conv_ty c.tb (List.map fst c.tparams) c.self_ty (Option.get p.pty) in
+          let t = conv_ty c.tb c.tnames c.self_ty (Option.get p.pty) in
           let v = new_var p.pname t (p.pmode = MMut) (VParam p.pmode) in
           bind c v p.ploc; v) ps in
       let c' = { c with declared = None; errs = []; io = false; in_try = 0; loops = 0; ret; lend_kind = None } in
@@ -2179,9 +2550,13 @@ let tparams_of tb (gs : gparam list) self =
         List.map
           (fun b ->
             match b with
-            | TyPath ([ tr ], args, l) ->
-                if not (Hashtbl.mem tb.traits tr) then err "E0101" l "unknown trait '%s'" tr;
-                let info = Hashtbl.find tb.traits tr in
+            | TyPath ((([ _ ] | [ _; _ ]) as p), args, l) ->
+                let tr, info =
+                  match find_trait tb (String.concat "." p) with
+                  | Found (k, info) -> (k, info)
+                  | Private (m, x) -> err "E0101" l "trait '%s' is private to module %s; mark it with * where it is defined" x m
+                  | Absent -> err "E0101" l "unknown trait '%s'" (String.concat "." p)
+                in
                 let args = List.map (conv_ty tb names self) args in
                 (* a bound such as T: Add means Add[T] *)
                 let args = if args = [] then List.map (fun _ -> TParam g.gname) info.trparams else args in
@@ -2191,6 +2566,11 @@ let tparams_of tb (gs : gparam list) self =
     gs
 
 let make_sig tb ~modname ~uname (fd : Syntax.fn_def) (extra_tps : (string * (string * ty list) list) list) self : fsig =
+  in_module tb modname @@ fun () ->
+  List.iter
+    (fun (p : Syntax.param) ->
+      match p.pdefault with Some e -> default_modules := (e, modname) :: !default_modules | None -> ())
+    fd.fparams;
   let own = tparams_of tb fd.fgenerics self in
   let tps = extra_tps @ own in
   let names = List.map fst tps in
@@ -2218,29 +2598,53 @@ let register_fn tb (sg : fsig) =
   Hashtbl.replace tb.by_name sg.sdisplay (prev @ [ sg.sname ])
 
 let unique_name tb modname name =
-  let base = modname ^ "__" ^ name in
+  (* a name in a C identifier: the dots of a module path become underscores, and the check
+     against the names taken keeps two paths that come to the same spelling apart *)
+  let base = String.map (fun c -> if c = '.' then '_' else c) (modname ^ "__" ^ name) in
   if not (Hashtbl.mem tb.fns base) then base
   else
     let rec go i = let n = Printf.sprintf "%s_%d" base i in if Hashtbl.mem tb.fns n then go (i + 1) else n in
     go 2
 
-let declare_types tb modname (items : item list) =
-  (* first the names, so that types can refer to each other *)
+(* Traits are named first of all, in every module, so that `any Trait` in a type can be
+   resolved wherever the trait is. *)
+let declare_trait_names tb modname (items : item list) =
+  List.iter
+    (function
+      | ITrait tr ->
+          let k = gkey tb modname tr.trname in
+          (* a trait is named by its name alone in the prelude and in the entry module, so
+             two with one name would silently replace each other *)
+          if Hashtbl.mem tb.traits k then err "E0101" tr.trloc "trait '%s' is already defined" tr.trname;
+          let ps = List.map (fun g -> g.gname) tr.trgenerics in
+          Hashtbl.replace tb.traits k
+            { trname_ = k; trparams = ps; trmethods_ = []; trmodule = modname; trexport = tr.trexport }
+      | _ -> ())
+    items
+
+(* then the names of the types, so that types can refer to each other, in every module *)
+let declare_type_names tb modname (items : item list) =
   List.iter
     (function
       | IType td ->
-          if Hashtbl.mem tb.decls td.tname || List.mem_assoc td.tname prim_names then
+          let k = gkey tb modname td.tname in
+          if Hashtbl.mem tb.decls k || List.mem_assoc td.tname prim_names then
             err "E0101" td.tloc "type '%s' is already defined" td.tname;
           if td.tresource then err "E0400" td.tloc "resource types arrive in milestone 4";
-          Hashtbl.replace tb.decls td.tname
-            { dname = td.tname; dparams = List.map (fun g -> g.gname) td.tgenerics; dbody = DStruct [];
+          Hashtbl.replace tb.decls k
+            { dname = k; dparams = List.map (fun g -> g.gname) td.tgenerics; dbody = DStruct [];
               dexport = td.texport; dopen = td.topen; dloc = td.tloc; dmodule = modname }
       | _ -> ())
-    items;
+    items
+
+let declare_type_bodies tb modname (items : item list) =
+  in_module tb modname @@ fun () ->
+  let note_defaults fs = List.iter (fun f -> match f.fddefault with Some e -> default_modules := (e, modname) :: !default_modules | None -> ()) fs in
   List.iter
     (function
       | IType td ->
-          let d = Hashtbl.find tb.decls td.tname in
+          let k = gkey tb modname td.tname in
+          let d = Hashtbl.find tb.decls k in
           let ps = d.dparams in
           let conv_fields fs =
             List.mapi (fun i f -> { fname_ = (match f.fdname with Some n -> n | None -> string_of_int i); fty = conv_ty tb ps None f.fdty }) fs
@@ -2248,18 +2652,22 @@ let declare_types tb modname (items : item list) =
           let body =
             match td.tbody with
             | BStruct fs ->
-                Hashtbl.replace defaults_table td.tname (List.map (fun f -> f.fddefault) fs);
+                note_defaults fs;
+                Hashtbl.replace defaults_table k (List.map (fun f -> f.fddefault) fs);
                 DStruct (conv_fields fs)
-            | BData [ { vname; vfields = None; _ } ] when (Hashtbl.mem tb.decls vname || List.mem_assoc vname prim_names) && vname <> td.tname ->
+            | BData [ { vname; vfields = None; _ } ]
+              when (found_opt (find_decl tb vname) <> None || List.mem_assoc vname prim_names) && vname <> td.tname ->
                 DAlias (conv_ty tb ps None (TyPath ([ vname ], [], td.tloc)))
             | BData vs ->
                 DData
                   (List.mapi
                      (fun i (v : Syntax.variant) ->
-                       if Hashtbl.mem tb.variants v.vname then err "E0101" v.vloc "variant '%s' is already defined" v.vname;
-                       Hashtbl.replace tb.variants v.vname (td.tname, i);
+                       let vk = gkey tb modname v.vname in
+                       if Hashtbl.mem tb.variants vk then err "E0101" v.vloc "variant '%s' is already defined" v.vname;
+                       Hashtbl.replace tb.variants vk (k, i);
                        let fs = match v.vfields with Some fs -> fs | None -> [] in
-                       Hashtbl.replace defaults_table (td.tname ^ "." ^ v.vname) (List.map (fun f -> f.fddefault) fs);
+                       note_defaults fs;
+                       Hashtbl.replace defaults_table (k ^ "." ^ v.vname) (List.map (fun f -> f.fddefault) fs);
                        { vname_ = v.vname; vfields = conv_fields fs; vnamed = List.for_all (fun f -> f.fdname <> None) fs; vindex = i })
                      vs)
             | BAlias t -> DAlias (conv_ty tb ps None t)
@@ -2270,23 +2678,13 @@ let declare_types tb modname (items : item list) =
     items
 
 let declare_items tb modname (items : item list) =
-  (* traits *)
+  in_module tb modname @@ fun () ->
+  (* traits: their names are declared already *)
   List.iter
     (function
       | ITrait tr ->
-          (* a trait is named by its name alone until modules exist, so two with one name
-             would silently replace each other, a prelude trait included *)
-          if Hashtbl.mem tb.traits tr.trname then
-            err "E0101" tr.trloc "trait '%s' is already defined" tr.trname;
-          let ps = List.map (fun g -> g.gname) tr.trgenerics in
-          let info = { trname_ = tr.trname; trparams = ps; trmethods_ = [] } in
-          Hashtbl.replace tb.traits tr.trname info
-      | _ -> ())
-    items;
-  List.iter
-    (function
-      | ITrait tr ->
-          let info = Hashtbl.find tb.traits tr.trname in
+          let tk = gkey tb modname tr.trname in
+          let info = Hashtbl.find tb.traits tk in
           (* a method table has one entry per name, and an impl one function *)
           let seen = Hashtbl.create 8 in
           List.iter
@@ -2297,11 +2695,11 @@ let declare_items tb modname (items : item list) =
           let ms =
             List.map
               (fun (fd : Syntax.fn_def) ->
-                let sg = make_sig tb ~modname ~uname:(tr.trname ^ "." ^ fd.fname) fd (List.map (fun p -> (p, [])) info.trparams) (Some (TParam "Self")) in
+                let sg = make_sig tb ~modname ~uname:(tk ^ "." ^ fd.fname) fd (List.map (fun p -> (p, [])) info.trparams) (Some (TParam "Self")) in
                 (fd.fname, { sg with sdeclared = true }))
               tr.trmethods
           in
-          Hashtbl.replace tb.traits tr.trname { info with trmethods_ = ms }
+          Hashtbl.replace tb.traits tk { info with trmethods_ = ms }
       | _ -> ())
     items;
   (* functions *)
@@ -2320,18 +2718,23 @@ let declare_items tb modname (items : item list) =
           let sg = if fd.fbody = None then { sg with sdeclared = true } else sg in
           register_fn tb sg;
           if fd.fbody <> None then Hashtbl.replace tb.bodies uname (fd, [])
-      | IConst (n, _, t, e, l) -> Hashtbl.replace tb.consts n (e, Option.map (conv_ty tb [] None) t, l)
+      | IConst (n, ex, t, e, l) ->
+          let k = gkey tb modname n in
+          if Hashtbl.mem tb.consts k then err "E0101" l "constant '%s' is already defined" n;
+          default_modules := (e, modname) :: !default_modules;
+          Hashtbl.replace tb.consts k { ce = e; cty = Option.map (conv_ty tb [] None) t; cl = l; cmod = modname; cex = ex }
       | _ -> ())
     items;
   (* impls *)
   List.iter
     (function
       | IImpl im ->
-          let trn = String.concat "." im.itrait in
-          let info =
-            match Hashtbl.find_opt tb.traits trn with
-            | Some i -> i
-            | None -> err "E0101" im.iloc "unknown trait '%s'" trn
+          let written = String.concat "." im.itrait in
+          let trn, info =
+            match find_trait tb written with
+            | Found (k, i) -> (k, i)
+            | Private (m, x) -> err "E0101" im.iloc "trait '%s' is private to module %s; mark it with * where it is defined" x m
+            | Absent -> err "E0101" im.iloc "unknown trait '%s'" written
           in
           let tps0 = List.map (fun g -> g.gname) im.igenerics in
           let fty = conv_ty tb tps0 None im.ifor in
@@ -2343,6 +2746,12 @@ let declare_items tb modname (items : item list) =
                  "%s cannot be implemented for %s: a call on a trait value uses only the methods of its own trait; add the method to that trait, or write a function that takes %s"
                  trn (show_ty fty) (show_ty fty)
            | _ -> ());
+          (* an impl is in the module that defines the trait or the module that defines the type
+             (section 3.4), so that two modules cannot give one type and trait two meanings *)
+          if info.trmodule <> modname && not (List.mem modname (type_modules tb fty)) then
+            err "E0101" im.iloc
+              "this impl of %s for %s is in module %s, which defines neither: an impl must be in the module that defines the trait (%s) or the one that defines the type"
+              trn (show_ty fty) modname info.trmodule;
           let tps = tparams_of tb im.igenerics (Some fty) in
           let targs = List.map (conv_ty tb tps0 (Some fty)) im.itargs in
           let targs = if targs = [] then List.map (fun _ -> fty) info.trparams else targs in
@@ -2453,7 +2862,7 @@ let declare_items tb modname (items : item list) =
 (* ---------- checking bodies ---------- *)
 
 let new_ctx tb (sg : fsig) self : fctx =
-  { tb; frames = [ { vars = []; lam = None } ]; tparams = sg.stparams; ret = sg.sret; errs = []; io = false;
+  { tb; frames = [ { vars = []; lam = None } ]; tparams = sg.stparams; tnames = List.map fst sg.stparams; ret = sg.sret; errs = []; io = false;
     in_try = 0; loops = 0;
     declared = (if sg.sdeclared && (sg.seff.errs <> [] || sg.sexport) then Some sg.seff.errs else None);
     obligations = []; unsolved = []; moved = []; lent = []; closure_caps = Hashtbl.create 8; fname = sg.sdisplay; self_ty = self; lend_kind = sg.slend; retries = ref retry_budget; hint_failed = Hashtbl.create 16;
@@ -2501,6 +2910,7 @@ let check_lend_paths (sg : fsig) (body : Syntax.block) =
 
 let check_fn tb uname : tfn =
   let sg = Hashtbl.find tb.fns uname in
+  in_module tb sg.smodule @@ fun () ->
   let fd, selfb = Hashtbl.find tb.bodies uname in
   let self = List.assoc_opt "Self" selfb in
   let c = new_ctx tb sg self in
@@ -2541,28 +2951,67 @@ let check_fn tb uname : tfn =
   else if sg.seff.errs = [] && not sg.sexport then sg.seff <- { sg.seff with errs = c.errs; io = sg.seff.io || c.io };
   { fsig = sg; fparams = params; fbody = body }
 
+(* A constant is checked when first needed, so one may use another that comes later in its
+   module, or in another module; two that need each other are an error. *)
+let const_in_progress : string list ref = ref []
+
 let check_const tb n =
-  let e, t, _ = Hashtbl.find tb.consts n in
-  let sg = { sname = "const:" ^ n; sdisplay = n; stparams = []; sparams = []; sret = TUnit; seff = no_eff; sdeclared = false;
-             sexport = false; sloc = e.loc; smodule = ""; slend = None } in
-  let c = new_ctx tb sg None in
-  let te = match t with Some t -> check c e t | None -> infer c e in
-  finish_ctx c e.loc;
-  let te = zonk_e te in
-  if c.io || c.errs <> [] then err "E0503" e.loc "a constant cannot perform effects or fail";
-  Hashtbl.replace tb.typed_consts n te
+  if not (Hashtbl.mem tb.typed_consts n) then begin
+    let { ce = e; cty = t; cmod; _ } = Hashtbl.find tb.consts n in
+    if List.mem n !const_in_progress then
+      err "E0101" e.loc "the constant '%s' is defined in terms of itself" (match split_qual n with Some (_, x) -> x | None -> n);
+    const_in_progress := n :: !const_in_progress;
+    Fun.protect ~finally:(fun () -> const_in_progress := List.filter (fun x -> x <> n) !const_in_progress) @@ fun () ->
+    in_module tb cmod @@ fun () ->
+    let sg = { sname = "const:" ^ n; sdisplay = n; stparams = []; sparams = []; sret = TUnit; seff = no_eff; sdeclared = false;
+               sexport = false; sloc = e.loc; smodule = ""; slend = None } in
+    let c = new_ctx tb sg None in
+    let te = match t with Some t -> check c e t | None -> infer c e in
+    finish_ctx c e.loc;
+    let te = zonk_e te in
+    if c.io || c.errs <> [] then err "E0503" e.loc "a constant cannot perform effects or fail";
+    Hashtbl.replace tb.typed_consts n te
+  end
+
+let () = ensure_const := check_const
 
 let new_tables () =
   { decls = Hashtbl.create 64; variants = Hashtbl.create 64; fns = Hashtbl.create 64; by_name = Hashtbl.create 64;
     bodies = Hashtbl.create 64; traits = Hashtbl.create 16; impls = []; consts = Hashtbl.create 8;
+    tenv = []; cur = "core"; entry = ""; imports = Hashtbl.create 8;
     typed_consts = Hashtbl.create 8; lambdas = []; final_pass = false; decl_errors = []; any_uses = []; traits_ready = false; impl_contracts = [] }
 
-(* Check a whole program (the prelude plus one module). Effects of private functions are
-   inferred by iterating to a fixpoint (section 7.2). *)
-let check_program (prelude : Syntax.file) (user : Syntax.file) : tprog =
+(* what a module imports: the name it is known by here (`import a.b` makes `b`, and
+   `import a.b as c` makes `c`) and the path of the module *)
+let imports_of (f : Syntax.file) : (string * string) list =
+  let seen = ref [] in
+  List.filter_map
+    (function
+      | IImport (p, alias, l) ->
+          let name = match alias with Some a -> a | None -> List.nth p (List.length p - 1) in
+          if List.mem_assoc name !seen then err "E0101" l "'%s' is already the name of an import in this module" name;
+          seen := (name, ()) :: !seen;
+          Some (name, String.concat "." p)
+      | _ -> None)
+    f.items
+
+(* Check a whole program: the prelude, the modules the program imports (each after the ones
+   it imports), and the module of the file given to the compiler. Effects of private
+   functions are inferred by iterating to a fixpoint (section 7.2). *)
+let check_program (prelude : Syntax.file) (imported : (string * Syntax.file) list) (user : Syntax.file) : tprog =
   let tb = new_tables () in
-  let mods = [ ("core", prelude); (module_name user.path, user) ] in
-  List.iter (fun (m, f) -> declare_types tb m f.items) mods;
+  default_modules := [];
+  const_in_progress := [];
+  let entry = module_name user.path in
+  (* a file's own module is keyed by the name of the file, which an import's path could be too *)
+  if List.mem_assoc entry imported || entry = "core" then
+    err "E0101" noloc "the module of %s is called '%s', which is also the path of another module; rename the file" user.path entry;
+  tb.entry <- entry;
+  let mods = (("core", prelude) :: imported) @ [ (entry, user) ] in
+  List.iter (fun (m, f) -> Hashtbl.replace tb.imports m (imports_of f)) mods;
+  List.iter (fun (m, f) -> declare_trait_names tb m f.items) mods;
+  List.iter (fun (m, f) -> declare_type_names tb m f.items) mods;
+  List.iter (fun (m, f) -> declare_type_bodies tb m f.items) mods;
   List.iter (fun (m, f) -> declare_items tb m f.items) mods;
   validate_any_uses tb;
   Hashtbl.iter (fun n _ -> check_const tb n) tb.consts;
@@ -2598,7 +3047,8 @@ let check_program (prelude : Syntax.file) (user : Syntax.file) : tprog =
       (function
         | ITest t when t.tsrejects = None ->
             let sg = { sname = "test"; sdisplay = t.tsname; stparams = []; sparams = []; sret = TUnit; seff = no_eff;
-                       sdeclared = false; sexport = false; sloc = t.tsloc; smodule = module_name user.path; slend = None } in
+                       sdeclared = false; sexport = false; sloc = t.tsloc; smodule = entry; slend = None } in
+            in_module tb entry @@ fun () ->
             let c = new_ctx tb sg None in
             let body = check_block c t.tsbody (Some TUnit) t.tsloc in
             finish_ctx c t.tsloc;
@@ -2608,7 +3058,7 @@ let check_program (prelude : Syntax.file) (user : Syntax.file) : tprog =
   in
   let main =
     match Hashtbl.find_opt tb.by_name "main" with
-    | Some us -> List.find_opt (fun u -> (Hashtbl.find tb.fns u).smodule <> "core") us
+    | Some us -> List.find_opt (fun u -> (Hashtbl.find tb.fns u).smodule = entry) us
     | None -> None
   in
   (match main with

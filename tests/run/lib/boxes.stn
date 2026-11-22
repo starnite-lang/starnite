@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A library module for modules_method_instantiation.stn: a generic type, and functions over one
+# instantiation of it.
+type Box*[T] = struct(item: T)
+
+fn read*(b: Box[Int]) -> Str:
+    f"lib reads an int box {b.item}"
+
+fn size*(b: Box[Int]) -> Int:
+    1
+
+fn peek*(b: Box[Int]) -> Str:
+    f"lib peeks at an int box {b.item}"
+
+trait Label*:
+    fn label(self: Self) -> Str
+
+impl Label for Int:
+    fn label(self: Int) -> Str:
+        "an int"
+
+fn show_label*[T: Label](b: Box[T]) -> Str:
+    b.item.label()
+
+impl Label for Box[Int]:
+    fn label(self: Box[Int]) -> Str:
+        "an int box"
+
+fn label_of*[T: Label](x: T) -> Str:
+    f"lib: {x.label()}"
+
+trait Tells*:
+    fn tell(self: Self) -> Str
+
+impl[T: Label] Tells for Box[T]:
+    fn tell(self: Box[T]) -> Str:
+        f"lib tells {self.item.label()}"
+
+trait Reads*[A]:
+    fn extract(self: Self) -> A
+
+impl[T: Label] Reads[Int] for Box[T]:
+    fn extract(self: Box[T]) -> Int:
+        7
+
+impl Reads[Str] for Box[Str]:
+    fn extract(self: Box[Str]) -> Str:
+        self.item
+
+fn width*(box: Box[Int]) -> Int:
+    1
+
+fn inspect*() -> Int:
+    5
+
+fn mark*(b: Box[Int], times: Int) -> Int:
+    times * 10
+
+fn tick*(b: Box[Int], times: Int) -> Int:
+    times * 100
+
+trait Bump*:
+    fn bump(mut self: Self)
+
+impl Bump for Box[Int]:
+    fn bump(mut self: Box[Int]):
+        self.item = self.item + 1

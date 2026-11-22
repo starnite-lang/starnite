@@ -392,6 +392,8 @@ type trait_info = {
   trname_ : string;
   trparams : string list;
   trmethods_ : (string * fsig) list;    (* method sigs mention TParam "Self" *)
+  trmodule : string;
+  trexport : bool;
 }
 
 type impl_info = {

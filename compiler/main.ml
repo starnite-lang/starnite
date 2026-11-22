@@ -77,7 +77,8 @@ let front_end file =
   let src = read_file file in
   let pre = load_prelude () in
   let user = Parser.parse_file file src in
-  (user, Typecheck.check_program pre user)
+  let imported = Loader.load ~entry:file user in
+  (user, imported, Typecheck.check_program pre imported user)
 
 let trap_exit kind (l : loc) msg =
   Interp.flush_out ();
@@ -103,7 +104,7 @@ let run_interp (prog : Types.tprog) =
       | Interp.Assert_failed (_, l) -> trap_exit "assertion failed" l "assert")
 
 (* starnite test: each test runs alone; a trap fails only that test (section 22.1). *)
-let run_tests_interp file (user : Syntax.file) (prog : Types.tprog) =
+let run_tests_interp file (user : Syntax.file) imported (prog : Types.tprog) =
   let pass = ref 0 and failn = ref 0 in
   List.iter
     (fun (name, body, (l : loc)) ->
@@ -127,7 +128,7 @@ let run_tests_interp file (user : Syntax.file) (prog : Types.tprog) =
       let code = Option.get t.tsrejects in
       let others = List.filter (function ITest _ -> false | _ -> true) user.items in
       let probe = { user with items = others @ [ ITest { t with tsrejects = None } ] } in
-      let result = try ignore (Typecheck.check_program (load_prelude ()) probe); None with Error (c, _, m) -> Some (c, m) in
+      let result = try ignore (Typecheck.check_program (load_prelude ()) imported probe); None with Error (c, _, m) -> Some (c, m) in
       match result with
       | Some (c, _) when c = code -> incr pass; Printf.printf "ok   %s (rejects %s)\n" t.tsname code
       | Some (c, m) -> incr failn; Printf.printf "FAIL %s: expected %s, got %s: %s\n" t.tsname code c m
@@ -156,11 +157,11 @@ let () =
     | _ -> print_string usage; exit (if pos = [] then 0 else 2)
   in
   try
-    let user, prog = front_end file in
+    let user, imported, prog = front_end file in
     match cmd with
     | "check" -> ()
     | "run" when !interp -> run_interp prog
-    | "test" -> run_tests_interp file user prog
+    | "test" -> run_tests_interp file user imported prog
     | "run" | "build" | "emit-c" ->
         let opts = { Backend.release = !release; cc = !cc; keep_c = !keep } in
         (match cmd with

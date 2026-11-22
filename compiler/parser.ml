@@ -77,7 +77,8 @@ let rec parse_type st : ty =
 and parse_base_type st =
   let l = loc st in
   match peek st with
-  | IDENT "any" when (match peek_at st 1 with IDENT s -> is_upper s | _ -> false) ->
+  (* any Trait, or any module.Trait for a trait of an imported module *)
+  | IDENT "any" when (match peek_at st 1 with IDENT s -> is_upper s || (peek_at st 2 = OP ".") | _ -> false) ->
       advance st;
       let p = parse_path st in
       let targs = parse_targs_opt st in
@@ -151,7 +152,9 @@ let rec parse_pattern st : pattern =
   let mk p = { p; ploc_ = l } in
   match peek st with
   | IDENT "_" -> advance st; mk PWild
-  | IDENT s when not (is_upper s) -> advance st; mk (PVar s)
+  (* a variable, unless a dot follows: shapes.Circle(r) names a variant of an imported module *)
+  | IDENT s when not (is_upper s) && not (peek_at st 1 = OP "." && (match peek_at st 2 with IDENT _ -> true | _ -> false)) ->
+      advance st; mk (PVar s)
   | IDENT _ ->
       let path = parse_path st in
       if is_op st "(" then begin

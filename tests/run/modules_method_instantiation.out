@@ -1,0 +1,23 @@
+lib reads an int box 1
+the program reads a string box x
+1 2
+lib peeks at an int box 1
+the program peeks at a string box x
+an int
+the program labels a string box y
+lib: an int box
+the program has no label
+lib tells an int
+the program tells x
+lib reads an int box 1
+the program reads a string box x
+1
+8
+lib reads an int box 1
+the program reads a string box x
+1 2
+5 6
+1 30
+2 300
+3
+exit 0

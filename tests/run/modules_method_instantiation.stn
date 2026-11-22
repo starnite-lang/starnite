@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Section 4.7: the functions of the module that defines the type of the receiver come first, among
+# those that take the receiver. A function of Box[Int] does not take a Box[Str], so the program's
+# own function for Box[Str] is the method of that one; for the same instantiation, the module's wins.
+# A function whose bound the receiver breaks does not take it either, a generic one included, and
+# neither does an impl whose bounds do not hold. When no function takes the receiver, a trait that is
+# in scope supplies the method before the call is a type error.
+import lib.boxes
+
+# a trait of this program, for the instantiation that the library's function peek does not take
+trait Peek:
+    fn peek(self: Self) -> Str
+
+impl Peek for boxes.Box[Str]:
+    fn peek(self: boxes.Box[Str]) -> Str:
+        f"the program peeks at a string box {self.item}"
+
+# a second function of the same name, whose first parameter is named differently
+fn width(b: boxes.Box[Str]) -> Int:
+    2
+
+# a function of the same name as the library's, which takes none: the call decides which is meant
+fn inspect(b: boxes.Box[Str]) -> Int:
+    6
+
+# the library's mark takes a count; the program's takes none, for the same instantiation
+fn mark(b: boxes.Box[Int]) -> Int:
+    1
+
+# the library's tick takes a count; a trait of the program has a tick that takes none
+trait Tick:
+    fn tick(self: Self) -> Int
+
+impl Tick for boxes.Box[Int]:
+    fn tick(self: boxes.Box[Int]) -> Int:
+        2
+
+# the library's show_label needs T: Label, which Str has no impl of
+fn show_label(b: boxes.Box[Str]) -> Str:
+    f"the program labels a string box {b.item}"
+
+# the library's label_of takes any T that is Label, and a Box[Str] is not; this one takes any T
+fn label_of[T](x: T) -> Str:
+    "the program has no label"
+
+# the library's trait Tells has an impl for Box[T] where T is Label, which Str is not
+trait Tell:
+    fn tell(self: Self) -> Str
+
+impl Tell for boxes.Box[Str]:
+    fn tell(self: boxes.Box[Str]) -> Str:
+        f"the program tells {self.item}"
+
+fn read(b: boxes.Box[Str]) -> Str:
+    f"the program reads a string box {b.item}"
+
+fn size(b: boxes.Box[Int]) -> Int:
+    2
+
+fn main() ! io:
+    print(boxes.Box(1).read())
+    print(boxes.Box("x").read())
+    print(f"{boxes.Box(5).size()} {size(boxes.Box(5))}")
+    print(boxes.Box(1).peek())
+    print(boxes.Box("x").peek())
+    print(boxes.Box(2).show_label())
+    print(boxes.Box("y").show_label())
+    print(boxes.Box(1).label_of())
+    print(boxes.Box("x").label_of())
+    print(boxes.Box(1).tell())
+    print(boxes.Box("x").tell())
+    # the form through the type name takes the instantiation of its first argument into account too
+    print(boxes.Box.read(boxes.Box(1)))
+    print(boxes.Box.read(boxes.Box("x")))
+    # the impls that apply decide the trait's type argument: Reads[Int] for Box[T: Label] does not
+    # apply to a Box[Str], so the result of extract is a Str, and len takes it with no annotation
+    let value = boxes.Box("x").extract()
+    print(f"{len(value)}")
+    let n = boxes.Box(1).extract()
+    print(f"{n + 1}")
+
+    # and with the first argument given by name, which is the first parameter's name for each function
+    print(boxes.Box.read(b = boxes.Box(1)))
+    print(boxes.Box.read(b = boxes.Box("x")))
+    print(f"{boxes.Box.width(box = boxes.Box(1))} {boxes.Box.width(b = boxes.Box("x"))}")
+    # the arguments the call gives decide which functions it can mean, before the types do
+    print(f"{boxes.Box.inspect()} {boxes.Box.inspect(b = boxes.Box("x"))}")
+    print(f"{boxes.Box(1).mark()} {boxes.Box(1).mark(3)}")
+    # a trait method is tried before a function that does not take the arguments is restored
+    print(f"{boxes.Box(1).tick()} {boxes.Box(1).tick(3)}")
+    # a trait method that takes its receiver by mut works on a variable
+    var bumped = boxes.Box(1)
+    bumped.bump()
+    bumped.bump()
+    print(f"{bumped.item}")

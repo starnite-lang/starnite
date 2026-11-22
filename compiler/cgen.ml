@@ -40,7 +40,8 @@ let pr buf fmt = Printf.bprintf buf fmt
 (* A name chosen in the program, as part of a C name. The C names join their parts with
    an underscore, so a name that has one, or that reads like a part of the scheme (Arr,
    Any, E, Tup2, anything starting with Fn or with a lower-case letter, ...), is spelled out instead: Zq, then the name with Z written ZZ and
-   an underscore Zu. A plain name never starts with Z, so the two kinds cannot meet,
+   an underscore Zu, and a dot, which a module's path puts in the name of its types and traits, Zd.
+   A plain name never starts with Z, so the two kinds cannot meet,
    and two different types or traits always get different C names. *)
 let mangle_name n =
   let reserved = [ "Int"; "I8"; "I16"; "I32"; "I64"; "U8"; "U16"; "U32"; "U64"; "Float"; "F32"; "Bool"; "Char"; "Unit";
@@ -61,7 +62,7 @@ let mangle_name n =
   in
   if plain then n
   else
-    "Zq" ^ String.concat "" (List.map (function 'Z' -> "ZZ" | '_' -> "Zu" | c -> String.make 1 c) (List.init (String.length n) (String.get n)))
+    "Zq" ^ String.concat "" (List.map (function 'Z' -> "ZZ" | '_' -> "Zu" | '.' -> "Zd" | c -> String.make 1 c) (List.init (String.length n) (String.get n)))
 
 (* The C name of a type. Every function type is one C type, so [mangle] gives them all the
    name Fn. [mangle_eff] keeps them apart: where two types must stay different by more
@@ -1666,13 +1667,16 @@ and hold_busy fc (e : texpr) =
 
 (* ---------- loops ---------- *)
 
-and loop_over fc (src : titer) (p : tpat) (body : unit -> unit) =
+and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) (body : unit -> unit) =
+  (* [before] runs once the source is evaluated and held, and the loop is about to start: it is
+     where the arrays the body uses are hoisted, which must see what the source did to them *)
   let st = fc.st in
   match src with
   | IRange (a, b) ->
       let it = ts fc a.ty in
       let lo = tmp fc it (expr fc a).c and hi = tmp fc it (expr fc b).c in
       let i = fresh st "_i" in
+      before ();
       line fc "for (%s %s = %s; %s < %s; %s++) {" (ct fc it) i lo i hi i;
       fc.ind <- fc.ind + 1;
       push fc FLoop;
@@ -1693,6 +1697,7 @@ and loop_over fc (src : titer) (p : tpat) (body : unit -> unit) =
           hold_busy fc a;
           let et = match repr (ts fc a.ty) with TArray et -> et | _ -> assert false in
           let i = fresh st "_i" in
+          before ();
           line fc "for (int64_t %s = 0; %s < stn_len(%s); %s++) {" i i lv i;
           fc.ind <- fc.ind + 1;
           push fc FLoop;
@@ -1714,6 +1719,7 @@ and loop_over fc (src : titer) (p : tpat) (body : unit -> unit) =
       let av = tmp fc a.ty (own fc (expr fc a) a.ty) in
       own_in fc av a.ty;
       let i = fresh st "_i" in
+      before ();
       line fc "for (int64_t %s = 0; %s < stn_len(%s); %s++) {" i i av i;
       fc.ind <- fc.ind + 1;
       push fc FLoop;
@@ -1736,27 +1742,34 @@ and loop_over fc (src : titer) (p : tpat) (body : unit -> unit) =
    into locals, so the bounds checks compare against a value the C compiler knows is
    fixed. Every check stays. *)
 and with_hoisted fc (body : texpr list) (k : unit -> unit) =
+  let plan = hoist_plan fc body in
+  let added = emit_hoists fc plan in
+  k ();
+  List.iter (Hashtbl.remove fc.cached) added
+
+(* The arrays of [body] that can be hoisted, and whether the body writes each. *)
+and hoist_plan fc (body : texpr list) : (var * bool) list =
   let cands = Hashtbl.create 4 in
   List.iter (iter_vars (fun (v : var) ->
       match (repr (ts fc v.vty), Hashtbl.find_opt fc.vars v.vid) with
       | TArray _, Some (VDirect _ | VPtr _) when not (Hashtbl.mem fc.cached v.vid) -> Hashtbl.replace cands v.vid v
       | _ -> ())) body;
-  let added = ref [] in
-  Hashtbl.iter
-    (fun _ (v : var) ->
-      match hoistable v body with
-      | Some writes ->
-          let lv = var_read fc v in
-          let et = match repr (ts fc v.vty) with TArray et -> et | _ -> assert false in
-          if writes then line fc "stn_array_make_unique(&%s);" lv;
-          let d = fresh fc.st "_d" and n = fresh fc.st "_n" in
-          line fc "%s* %s = (%s*)(%s)->data; int64_t %s = stn_len(%s);" (ct fc et) d (ct fc et) lv n lv;
-          Hashtbl.replace fc.cached v.vid (d, n);
-          added := v.vid :: !added
-      | None -> ())
-    cands;
-  k ();
-  List.iter (Hashtbl.remove fc.cached) !added
+  List.rev (Hashtbl.fold (fun _ (v : var) acc -> match hoistable v body with Some writes -> (v, writes) :: acc | None -> acc) cands [])
+
+(* Make those arrays unshared (if written) and read their data pointer and length. This is
+   done where the loop is about to start: a `for` over a value that shares an array (its own
+   array, or a struct that holds it) has made it shared by then, and the write must copy. *)
+and emit_hoists fc (plan : (var * bool) list) : int list =
+  List.map
+    (fun ((v : var), writes) ->
+      let lv = var_read fc v in
+      let et = match repr (ts fc v.vty) with TArray et -> et | _ -> assert false in
+      if writes then line fc "stn_array_make_unique(&%s);" lv;
+      let d = fresh fc.st "_d" and n = fresh fc.st "_n" in
+      line fc "%s* %s = (%s*)(%s)->data; int64_t %s = stn_len(%s);" (ct fc et) d (ct fc et) lv n lv;
+      Hashtbl.replace fc.cached v.vid (d, n);
+      v.vid)
+    plan
 
 and iter_vars (f : var -> unit) (e : texpr) = walk_texpr (fun (x : texpr) -> match x.e with XVar v -> f v | _ -> ()) (fun _ -> ()) e
 
@@ -1879,7 +1892,8 @@ and stmt fc (s : tstmt) =
        fc.frames <- List.tl fc.frames;
        let n = tmp fc e.ty init in
        emit_drops fc f;
-       own_in fc n e.ty;
+       (* a value with nothing counted in it has no drop function to call *)
+       if rc fc e.ty then own_in fc n e.ty;
        let _, binds = pat_test fc e.ty p n in
        bind_pattern fc binds;
        fc.frames <- { fk = FStmt; owned = [] } :: fc.frames
@@ -1919,7 +1933,11 @@ and stmt fc (s : tstmt) =
        pop fc;
        fc.ind <- fc.ind - 1;
        line fc "}"
-   | SFor (p, src, body) -> with_hoisted fc [ body ] (fun () -> loop_over fc src p (fun () -> discard fc body))
+   | SFor (p, src, body) ->
+       let plan = hoist_plan fc [ body ] in
+       let added = ref [] in
+       loop_over fc src p ~before:(fun () -> added := emit_hoists fc plan) (fun () -> discard fc body);
+       List.iter (Hashtbl.remove fc.cached) !added
    | SAssert (e, _) ->
        let cv = cond fc e in
        line fc "if (!%s) stn_trap(\"assertion failed\", %s, \"assert\");" cv (loc_args s.sl)

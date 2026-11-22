@@ -8,8 +8,9 @@
 # call, and `dep`, where the nested call is the argument the expected type changes. What it
 # remembers is the state the failure depended on: the variables the check looked at, and their
 # types. It is not used when a retry has changed the type of one of them, wherever the check found
-# it: in an argument, in the default of a parameter, or in a nested constructor. And a budget of
-# retries stands behind both.
+# it: in an argument, or in a call or a constructor inside one. (A default is written where the
+# parameter is declared and does not see the variables of the call, so it cannot be one of them.)
+# And a budget of retries stands behind both.
 #
 # `need_tag` is the other way round: the bound holds only for the type the expected type gives, so
 # the first try is the one that works. Chains of forty calls are checked beside calls that need the
@@ -42,14 +43,6 @@ fn inner_pair[A, B](xs: Array[A], b: B) -> (Array[A], B):
 
 fn outer_seed[T](seed: T, xs: Array[T], p: (Array[Int], F32?)) -> T:
     seed
-
-type Box[A] = struct(values: Array[A] = ws)
-
-fn inner_box[A, B](box: Box[A], b: B) -> (Array[A], B):
-    (box.values, b)
-
-fn inner_default[A, B](b: B, values: Array[A] = zs) -> (Array[A], B):
-    (values, b)
 
 fn contextual[T](inner: F32?, value: T) -> T:
     value
@@ -96,12 +89,3 @@ fn main() ! io:
     let ys = []
     let out: Int? = outer_seed(1, ys, inner_pair(ys, Some(1.0)))
     print(f"{out}")
-    # and when the array reaches the call through the default of a parameter that is left out,
-    # which is checked in the caller: the key has to see it too
-    let zs = []
-    let out2: Int? = outer_seed(1, zs, inner_default(Some(1.0)))
-    print(f"{out2}")
-    # and when it is a nested constructor that checks a default in the caller
-    let ws = []
-    let out3: Int? = outer_seed(1, ws, inner_box(Box(), Some(1.0)))
-    print(f"{out3}")

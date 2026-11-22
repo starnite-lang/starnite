@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Section 4.7: a method is looked up first among the functions of the module that defines the type
+# of the receiver; the program's own functions with the same name are found only when that module
+# has none that fits. So a function of this program does not make the module's method ambiguous.
+import lib.counter
+
+fn read(c: counter.Counter) -> Int:
+    -1
+
+fn make() -> counter.Counter:
+    counter.Counter(0)
+
+# the module has no function of this name: the program's own is found, as a method too
+fn describe(c: counter.Counter) -> Str:
+    f"counter {c.n}"
+
+fn main() ! io:
+    let c = counter.Counter(1)
+    print(f"{c.read()} {counter.read(c)} {read(c)}")
+    print(f"{counter.Counter.read(c)}")
+    print(f"{counter.Counter.make().n} {make().n}")
+    print(c.describe())

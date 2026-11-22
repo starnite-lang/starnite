@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A library module for modules_constants.stn: constants that use others, before and after
+# their own definition.
+let LATE* = EARLY + 1
+let EARLY = 5
+
+let BASE* = 10
+let DOUBLE* = BASE * 2

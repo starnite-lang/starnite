@@ -1,0 +1,8 @@
+9 2.5
+8
+too big 500
+error: negative
+ok 14
+error: math: 1000 is too big
+1
+exit 0

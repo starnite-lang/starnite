@@ -1,0 +1,11 @@
+# expect: E0101 6:1
+import lib.vault
+
+type Z = struct(a: Int)
+
+impl vault.Tr for Z:
+    fn t(self: Z) -> Int:
+        1
+
+fn main():
+    ()

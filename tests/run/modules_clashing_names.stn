@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Section 3.5: two modules and the program all have a type Item and a private helper, and
+# they stay apart. A default is checked in the module that writes it.
+import lib.util.math
+import lib.util.text as txt
+
+type Item = struct(label: Str)
+
+fn helper(x: Int) -> Int:
+    x + 1
+
+fn main() ! io:
+    print(f"{helper(1)}")
+    # math.scale's default is its own helper(1), which is 10, not this module's 2
+    print(f"{math.scale(2)} {math.scale(2, 3)}")
+    let i = math.make(4)
+    print(math.show_item(i))
+    print(f"{i.n}")
+    let j = Item("local")
+    print(j.label)
+    let a = txt.Pair("a", "b")
+    print(txt.describe(a))
+    print(txt.describe(txt.Single("z")))
+    match a:
+        txt.Single(s) -> print(f"single {s}")
+        txt.Pair(x, y) -> print(f"pair {x} {y}")

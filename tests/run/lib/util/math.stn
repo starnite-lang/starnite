@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A library module for the modules_* tests. Its private helper and its type Item have the
+# names of those in lib/util/text.stn and in the tests that import both.
+
+type Item* = struct(n: Int)
+
+type Problem* = TooBig(Int) | Negative
+
+impl Show for Problem:
+    fn show(e: Problem) -> Str:
+        match e:
+            TooBig(n) -> f"{n} is too big"
+            Negative -> "negative"
+
+fn helper(x: Int) -> Int:
+    x * 10
+
+# the default is written here, so `helper` means this one wherever scale is called
+fn scale*(x: Int, by: Int = helper(1)) -> Int:
+    x * by
+
+fn largest*[T: Ord](a: T, b: T) -> T:
+    if a > b:
+        a
+    else:
+        b
+
+fn checked*(x: Int) -> Int ! Problem:
+    if x < 0:
+        fail(Negative)
+    if x > 100:
+        fail(TooBig(x))
+    x
+
+fn make*(n: Int) -> Item:
+    Item(helper(n))
+
+fn show_item*(i: Item) -> Str:
+    f"item {i.n}"

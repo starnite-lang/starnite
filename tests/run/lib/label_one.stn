@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A library module for modules_traits.stn: a trait Label, implemented for a type of another module.
+import lib.geometry
+
+trait Label*:
+    fn label(self: Self) -> Str
+
+impl Label for geometry.Vec:
+    fn label(self: geometry.Vec) -> Str:
+        "one"

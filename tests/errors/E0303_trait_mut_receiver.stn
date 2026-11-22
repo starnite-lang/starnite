@@ -1,0 +1,6 @@
+# expect: E0303 6:5
+import lib.bumper
+
+fn main():
+    let c = bumper.Counter(1)
+    c.bump()

@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A library module for the modules_* tests (section 3.5): exported and private items of
+# every kind, and a trait implemented here for a type of this module.
+
+type Vec* = struct(x: Int, y: Int)
+
+type Shape* = Circle(Int) | Rect(Int, Int) | Dot
+
+# no star: not visible from another module, and neither are its fields
+type Cache = struct(hits: Int)
+
+fn dot(a: Vec, b: Vec) -> Int:
+    a.x * b.x + a.y * b.y
+
+fn add*(a: Vec, b: Vec) -> Vec:
+    Vec(a.x + b.x, a.y + b.y)
+
+fn norm2*(a: Vec) -> Int:
+    dot(a, a)
+
+fn origin*() -> Vec:
+    Vec(0, 0)
+
+fn counted*() -> Int:
+    let c = Cache(41)
+    c.hits + 1
+
+trait Area*:
+    fn area(self: Self) -> Int
+
+impl Area for Shape:
+    fn area(self: Shape) -> Int:
+        match self:
+            Circle(r) -> 3 * r * r
+            Rect(w, h) -> w * h
+            Dot -> 0
+
+let ORIGIN* = Vec(0, 0)
+let LIMIT = 100
+let TWICE_LIMIT* = LIMIT * 2

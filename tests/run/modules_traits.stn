@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Section 3.5: traits of the same name in two modules, chosen by the module (section 4.7),
+# and a private trait used inside its module.
+import lib.geometry
+import lib.label_one as one
+import lib.label_two as two
+
+fn main() ! io:
+    let p = geometry.Vec(1, 2)
+    print(one.Label.label(p))
+    print(two.Label.label(p))
+    print(f"{two.hidden_of(p)}")

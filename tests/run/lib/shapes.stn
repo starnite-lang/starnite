@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A library module that imports two others, for modules_transitive.stn.
+import lib.util.math
+import lib.util.text as t
+
+type Shape* = Circle(Int) | Square(Int)
+
+trait Named*:
+    fn name(self: Self) -> Str
+
+impl Named for Shape:
+    fn name(self: Shape) -> Str:
+        match self:
+            Circle(r) -> t.wrap(f"circle {r}")
+            Square(s) -> t.wrap(f"square {s}")
+
+fn area*(s: Shape) -> Int:
+    match s:
+        Circle(r) -> math.scale(3 * r * r, 1)
+        Square(w) -> w * w
+
+fn big*(a: Shape, b: Shape) -> Shape:
+    if area(a) > area(b):
+        a
+    else:
+        b
+
+# a value of a type of lib.util.math, which the program that calls this need not import
+fn item*(n: Int) -> math.Item:
+    math.make(n)

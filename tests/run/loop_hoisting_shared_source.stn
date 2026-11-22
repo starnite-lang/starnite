@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A loop that reads an array with len or an index, and writes it, hoists it: the array is made
+# unshared once, and its data pointer and length are read once. That has to happen after the source
+# of a `for` is evaluated, since the source can share the array: a loop over the array itself holds
+# a reference of its own, and a loop over a struct made from it holds another. The writes of the
+# body must copy then, and not go through the pointer taken before, into the buffer the source holds.
+type Hold = struct(items: Array[Int])
+
+fn two(h: Hold) -> Array[Hold]:
+    [h, h]
+
+fn main() ! io:
+    # the source is the array
+    var xs = [1, 2, 3]
+    for x in xs:
+        if len(xs) > 2:
+            xs[2] = 100
+        print(f"{x}")
+    print(f"{xs}")
+    # the source holds the array in a struct
+    var v = [1, 2, 3]
+    for h in two(Hold(v)):
+        print(f"{h.items}")
+        if len(v) > 0:
+            v[0] = 99
+    print(f"{v}")
+    # the source is a range over its length: nothing is shared, and the loop runs on the array
+    var ys = [1, 2, 3]
+    for i in 0..len(ys):
+        ys[i] = ys[i] * 2
+    print(f"{ys}")

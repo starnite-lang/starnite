@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A module for the test of an impl for a generic type of another module, instantiated with a local type.
+trait Tag*:
+    fn tag(self: Self) -> Int
+
+type Box*[T] = struct(item: T)

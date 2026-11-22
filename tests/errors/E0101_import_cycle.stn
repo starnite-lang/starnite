@@ -1,0 +1,5 @@
+# expect: E0101 3:1
+import lib.cycle_a
+
+fn main():
+    ()

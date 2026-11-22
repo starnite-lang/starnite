@@ -1,0 +1,11 @@
+# expect: E0101 6:1
+import lib.generic_owner
+
+type Local = struct(n: Int)
+
+impl generic_owner.Tag for generic_owner.Box[Local]:
+    fn tag(self: generic_owner.Box[Local]) -> Int:
+        1
+
+fn main():
+    ()

@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A second module called vault, for the test of two imports with one name.
+fn other*() -> Int:
+    1

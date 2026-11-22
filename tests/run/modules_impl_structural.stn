@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Section 3.4: an impl is in the module that defines the trait or the one that defines the type.
+# A type that Array, Option or a tuple makes is defined by the modules of what it is made from, so
+# this program, which defines Local, can implement the trait of another module for these.
+import lib.tags
+
+type Local = struct(n: Int)
+
+impl tags.Tag for Local:
+    fn tag(self: Local) -> Int:
+        self.n
+
+impl tags.Tag for Array[Local]:
+    fn tag(self: Array[Local]) -> Int:
+        len(self) * 10
+
+impl tags.Tag for (Local, Int):
+    fn tag(self: (Local, Int)) -> Int:
+        self.1
+
+fn main() ! io:
+    print(f"{Local(3).tag()} {[Local(1), Local(2)].tag()} {(Local(1), 8).tag()}")

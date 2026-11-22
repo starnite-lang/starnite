@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A library module for modules_defaults_scope.stn: defaults that name a private constant and a
+# private function of this module.
+let factor = 2
+
+fn bump(x: Int) -> Int:
+    x + 100
+
+fn scale*(x: Int, by: Int = factor) -> Int:
+    x * by
+
+fn shifted*(x: Int, by: Int = bump(1)) -> Int:
+    x + by
+
+type Cfg* = struct(rate: Int = factor, extra: Int = bump(0))

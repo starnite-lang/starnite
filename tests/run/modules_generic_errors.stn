@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Section 3.5: a generic function and an error type of another module, written with the
+# module in bounds, effect lists, patterns and impls.
+import lib.util.math
+import lib.geometry
+
+type AppError* = Math(math.Problem) | Other
+
+impl From[math.Problem] for AppError:
+    fn from(e: math.Problem) -> AppError:
+        Math(e)
+
+impl Show for AppError:
+    fn show(e: AppError) -> Str:
+        match e:
+            Math(p) -> f"math: {p}"
+            Other -> "other"
+
+fn biggest[T: Ord](xs: Array[T], first: T) -> T:
+    var best = first
+    for x in xs:
+        best = math.largest(best, x)
+    best
+
+fn compute(x: Int) -> Int ! AppError:
+    let v = math.checked(x)
+    v * 2
+
+fn main() ! io:
+    print(f"{math.largest(3, 9)} {math.largest(2.5, 1.5)}")
+    print(f"{biggest([4, 8, 2], 0)}")
+    let r: Result[Int, math.Problem] = try math.checked(500)
+    match r:
+        Ok(v) -> print(f"ok {v}")
+        Err(math.TooBig(n)) -> print(f"too big {n}")
+        Err(math.Negative) -> print("negative")
+    match try math.checked(-1):
+        Ok(v) -> print(f"ok {v}")
+        Err(e) -> print(f"error: {e}")
+    match try compute(7):
+        Ok(v) -> print(f"ok {v}")
+        Err(e) -> print(f"error: {e}")
+    match try compute(1000):
+        Ok(v) -> print(f"ok {v}")
+        Err(e) -> print(f"error: {e}")
+    print(f"{geometry.add(geometry.Vec(1, 1), geometry.origin()).x}")

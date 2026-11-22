@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A module for the module error tests: one private item of every kind, and one exported.
+type Hidden = struct(x: Int)
+
+type Shown* = struct(x: Int)
+
+fn secret(x: Int) -> Int:
+    x
+
+fn open*(x: Int) -> Int:
+    secret(x)
+
+# a value of a private type can leave the module, but its fields cannot
+fn leak*() -> Hidden:
+    Hidden(1)
+
+let LIMIT = 5
+let TOP* = 6
+
+trait Tr:
+    fn t(self: Self) -> Int
