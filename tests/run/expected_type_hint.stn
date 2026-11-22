@@ -35,6 +35,14 @@ fn marked[T: Tag](x: T) -> T ! io:
     print(x.tag())
     x
 
+type Problem[T] = Bad(value: T)
+
+fn read() -> Int ! Problem[Int?]:
+    fail(Bad(Some(1)))
+
+fn carry[T](f: fn() -> Int ! Problem[T], x: T) -> T:
+    x
+
 fn boxed() -> any Show:
     5
 
@@ -84,3 +92,7 @@ fn main() ! io:
     # not the one for Int that the argument alone would pick
     let tagged: Int? = marked(1)
     print(f"{tagged}")
+    # the failure a function argument can have is part of its type, so the hint is applied before it
+    # is checked: read can fail with Problem[Int?], which is what carry asks for once T is Int?
+    let carried: Int? = carry(read, Some(1))
+    print(f"{carried}")

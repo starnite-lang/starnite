@@ -1,13 +1,15 @@
-# Nested calls are checked in bounded time. In the chains of `choose_nested`, the expected type
-# asks for an Array[Int?] where the variable `xs` is an Array[Int], so a check with the
-# parameters bound to it fails at `xs` and the call is checked on its own. The nested call is
-# the first argument, which the expected type cannot change, so it is checked once and kept by
-# both tries, and the work does not double at every level. So it is in `late`, where only a
-# literal comes before it. `need_tag` is the other way round: the bound holds only for the type
-# the expected type gives, so the first try is the one that works, and no level is checked
-# twice. Chains of forty calls are checked beside calls that need the expected type for their
-# literals, in the same call and in the same function, and beside a bound that only the bound
-# version satisfies.
+# Nested calls are checked in bounded time. In each chain here the expected type asks for an
+# Array[Int?] where the variable `xs` is an Array[Int], so a check with the parameters bound to the
+# expected type fails at `xs` and the call is checked on its own; each retry would check the nested
+# call again, and the work would double at every level. It does not, in three ways. A nested call
+# that is the first argument, which the expected type cannot change (`choose_nested`), is checked
+# once and kept by both tries. A call that already failed with the expected type is not tried with
+# it again, which is what bounds `late`, where a literal or a variable comes before the nested
+# call, and `dep`, where the nested call is the argument the expected type changes. And a budget
+# of retries stands behind both. `need_tag` is the other way round: the bound holds only for the
+# type the expected type gives, so the first try is the one that works. Chains of forty calls are
+# checked beside calls that need the expected type for their literals, in the same call and in the
+# same function, and beside a bound that only the bound version satisfies.
 trait Tag:
     fn tag(x: Self) -> Str
 
@@ -27,6 +29,9 @@ fn choose_nested[T](inner: Int?, xs: Array[T], fallback: T) -> T:
 fn late[T](x: T, inner: Int?, xs: Array[T]) -> T:
     x
 
+fn dep[T](x: T, xs: Array[T]) -> T:
+    x
+
 fn contextual[T](inner: F32?, value: T) -> T:
     value
 
@@ -40,6 +45,7 @@ fn two(a: Int?, b: Int?) -> (Int?, Int?):
     (a, b)
 
 fn main() ! io:
+    let one = 1
     let xs = [1]
     let x: Int? = choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(Some(0), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1)
     print(f"{x}")
@@ -59,5 +65,9 @@ fn main() ! io:
     print(f"{w}")
     let z: Int? = late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, Some(0), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs)
     print(f"{z}")
+    let d: Int? = late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, late(one, Some(0), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs)
+    print(f"{d}")
+    let e: Int? = dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(dep(1, xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs)
+    print(f"{e}")
     let g: F32? = pick(Some(4.0), None)
     print(f"{g}")

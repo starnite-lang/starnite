@@ -336,6 +336,7 @@ type fctx = {
   self_ty : ty option;
   lend_kind : bool option;          (* Some m inside a function declared -> lend [mut] T *)
   retries : int ref;                (* retries left for the outermost call being checked; shared with closures *)
+  hint_failed : (string, unit) Hashtbl.t;   (* calls that did not check with the expected type, by place, callee and type *)
 }
 
 (* The arguments of one call, slot by slot in parameter order, the receiver being slot 0 when
@@ -1176,67 +1177,50 @@ and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
         match hint_binding s ret t with
         | None -> finish (args_check c l st all_slots)   (* the hint binds nothing *)
         | Some (bound, only_fresh) ->
-            (* The arguments whose parameters the hint cannot change are checked once, before it
-               is applied, and kept by both tries. That holds when the hint binds only type
-               variables of this call, since then nothing such an argument is checked against, and
-               nothing it can bind, is touched by it. It also needs the arguments before it to
-               leave the state it is checked in alone, which a literal does: a literal is checked
-               against the call's own type variables and nothing else. So an argument counts as
-               long as every argument before it that the hint does change is a literal. *)
-            let independent (_, _, pt, _) = not (List.exists (fun r -> occurs r pt) bound) in
-            let is_literal i =
-              match (st.a_receiver, i) with
-              | Some _, 0 -> false
-              | _ -> (
-                  let k = match st.a_receiver with Some _ -> i - 1 | None -> i in
-                  match List.nth (args_matched c l st) k with
-                  | _, _, _, Some { aexpr = { d = Lit _ | Unop ("-", { d = Lit _; _ }); _ }; amode = None; _ }, _ -> true
-                  | _ -> false)
+            (* A call that did not check with the hint, at this place and with this expected type, did not
+               check in a try that was undone, and will not now: the retry of a call that
+               contains it comes here again, and checking it twice at every level is the
+               doubling. It is checked on its own at once. *)
+            let key =
+              if has_tvar t then None
+              else Some (Printf.sprintf "%s:%d:%d:%s:%d:%s" l.file l.line l.col u n (show_ty t))
             in
-            let shared =
-              if not only_fresh then []
-              else begin
-                let ok = ref true in
-                List.filter_map
-                  (fun i ->
-                    if independent (List.nth ps i) then (if !ok then Some i else None)
-                    else begin
-                      if not (is_literal i) then ok := false;
-                      None
-                    end)
-                  all_slots
-              end
-            in
-            let others = List.filter (fun i -> not (List.mem i shared)) all_slots in
-            let table = Array.make n None in
-            let fill slots targs = List.iter2 (fun i ta -> table.(i) <- Some ta) slots targs in
-            fill shared (args_check c l st shared);
-            let rest () =
-              fill others (args_check c l st others);
-              List.init n (fun i -> Option.get table.(i))
-            in
-            let plain () = finish (rest ()) in
-            if hint_bounds_fail c l sg s ret t then plain ()   (* a bound fails on the type it gives *)
-            else if !(c.retries) <= 0 then begin
-              (* the budget is spent: the call is checked with the hint alone, as it was before
-                 there was a second try *)
-              (try unify t ret with Mismatch -> ());
-              plain ()
-            end
-            else (
-              let hinted_try () =
+            if (match key with Some k -> Hashtbl.mem c.hint_failed k | None -> false) then finish (args_check c l st all_slots)
+            else begin
+              (* The leading arguments whose parameters the hint cannot change are checked once,
+                 before it is applied, and kept by both tries. This holds when the hint binds
+                 only type variables of this call, since then nothing such an argument is
+                 checked against, and nothing it can bind, is touched by it. *)
+              let independent (_, _, pt, _) = not (List.exists (fun r -> mentions r pt) bound) in
+              let rec leading k = function p :: rest when independent p -> leading (k + 1) rest | _ -> k in
+              let j = if only_fresh then leading 0 ps else 0 in
+              let prefix = args_check c l st (List.init j Fun.id) in
+              let others = List.init (n - j) (fun k -> j + k) in
+              let plain () = finish (prefix @ args_check c l st others) in
+              if hint_bounds_fail c l sg s ret t then plain ()   (* a bound fails on the type it gives *)
+              else if !(c.retries) <= 0 then begin
+                (* the budget is spent: the call is checked with the hint alone, as it was before
+                   there was a second try *)
                 (try unify t ret with Mismatch -> ());
-                let r = finish (rest ()) in
-                check_known_bounds c l sg s;
-                r
-              in
-              match speculate c hinted_try with
-              | Ok r -> r
-              | Error e -> (
-                  decr c.retries;
-                  match speculate c plain with
-                  | Ok r -> r
-                  | Error _ -> raise e)))
+                plain ()
+              end
+              else (
+                let hinted_try () =
+                  (try unify t ret with Mismatch -> ());
+                  let r = finish (prefix @ args_check c l st others) in
+                  check_known_bounds c l sg s;
+                  r
+                in
+                match speculate c hinted_try with
+                | Ok r -> r
+                | Error e -> (
+                    decr c.retries;
+                    match speculate c plain with
+                    | Ok r ->
+                        Option.iter (fun k -> Hashtbl.replace c.hint_failed k ()) key;
+                        r
+                    | Error _ -> raise e))
+            end)
     | _ -> finish (args_check c l st all_slots)
   in
   let convs = add_eff c l eff @ List.concat_map (add_eff c l) poly in
@@ -2416,7 +2400,7 @@ let new_ctx tb (sg : fsig) self : fctx =
   { tb; frames = [ { vars = []; lam = None } ]; tparams = sg.stparams; ret = sg.sret; errs = []; io = false;
     in_try = 0; loops = 0;
     declared = (if sg.sdeclared && (sg.seff.errs <> [] || sg.sexport) then Some sg.seff.errs else None);
-    obligations = []; unsolved = []; moved = []; lent = []; closure_caps = Hashtbl.create 8; fname = sg.sdisplay; self_ty = self; lend_kind = sg.slend; retries = ref retry_budget }
+    obligations = []; unsolved = []; moved = []; lent = []; closure_caps = Hashtbl.create 8; fname = sg.sdisplay; self_ty = self; lend_kind = sg.slend; retries = ref retry_budget; hint_failed = Hashtbl.create 16 }
 
 let finish_ctx c l =
   List.iter

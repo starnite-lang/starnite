@@ -149,6 +149,16 @@ let rec occurs r t =
   | TFn f -> List.exists (fun (_, t) -> occurs r t) f.fps || occurs r f.fret
   | _ -> false
 
+(* Like occurs, but also in the error types of a function's effects: an argument is checked against
+   them, though unification leaves them out. *)
+let rec mentions r t =
+  match repr t with
+  | TVar r' -> r == r'
+  | TArray t -> mentions r t
+  | TTuple ts | TNamed (_, ts) | TErr ts | TAny (_, ts) -> List.exists (mentions r) ts
+  | TFn f -> List.exists (fun (_, t) -> mentions r t) f.fps || mentions r f.fret || List.exists (mentions r) f.feff.errs
+  | _ -> false
+
 exception Mismatch
 
 (* Structural equality after zonking; used to compare error types. *)
