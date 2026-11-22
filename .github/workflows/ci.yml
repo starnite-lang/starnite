@@ -37,7 +37,8 @@ jobs:
         run: dune build
       - name: Conformance corpus
         # each program on the reference interpreter and the debug and release C
-        # builds, golden error codes, and test blocks with rejection tests
+        # builds, golden error codes, test blocks with rejection tests, and the
+        # fuzzer's own checks (tests/fuzz/selftest.sh)
         run: tests/run.sh
 
   fuzz:
@@ -52,14 +53,18 @@ jobs:
           sudo apt-get install -y -q ocaml-nox ocaml-dune gcc
       - name: Build
         run: dune build
-      - name: Differential fuzzing
-        # the fuzzer picks a random seed on every run, reruns included, and prints it
+      - name: Differential and negative fuzzing
+        # each program runs on the interpreter and the C build, and then one mutation of it
+        # with a known violation must be rejected with the code of the rule it breaks.
+        # The fuzzer picks a random seed on every run, reruns included, and prints it
         # first; a failing case is reported by number and can be replayed with:
         #   dune exec tests/fuzz/fuzz.exe -- --seed <case> --count 1
+        # The first three failures are shrunk: caseN.min.stn (or caseN.neg.min.stn for a
+        # mutation) next to the program that failed.
         # the step's limit is below the job's, so failing programs are still uploaded
         # when repeated hangs (120 s each) use up the time
         timeout-minutes: 20
-        run: ./_build/default/tests/fuzz/fuzz.exe --count 500 --keep fuzz-failures
+        run: ./_build/default/tests/fuzz/fuzz.exe --count 500 --shrink --keep fuzz-failures
       - name: Keep failing programs
         if: failure()
         uses: actions/upload-artifact@v4

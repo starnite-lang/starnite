@@ -50,5 +50,18 @@ for f in "$here"/unit/*.stn; do
     else note "FAIL unit/$(basename "$f")"; cat "$tmp/unit"; fail=$((fail + 1)); fi
 done
 
+# the fuzzer's own checks (tests/fuzz/selftest.sh): negative fuzzing against this compiler, and the
+# fuzzer against compilers with a fault put in, to see that it finds it and shrinks the program
+fuzz=${FUZZ:-"$root/_build/default/tests/fuzz/fuzz.exe"}
+if [ -x "$fuzz" ]; then
+    if STARNITE="$starnite" FUZZ="$fuzz" "$here/fuzz/selftest.sh" > "$tmp/selftest" 2>&1; then ok=1; else ok=0; fi
+    pass=$((pass + $(grep -c '^pass ' "$tmp/selftest")))
+    if [ $ok = 0 ]; then
+        cat "$tmp/selftest"
+        n=$(grep -c '^FAIL ' "$tmp/selftest"); [ "$n" = 0 ] && n=1
+        fail=$((fail + n))
+    fi
+else note "skipped: the fuzzer's own checks (no $fuzz; dune build makes it)"; fi
+
 note "$pass passed, $fail failed"
 [ $fail = 0 ]
