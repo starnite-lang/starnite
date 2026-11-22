@@ -125,11 +125,15 @@ fn main():
     print(f"{helpers.twice(xs[0])}")
     print("unused")
 STN
+echo precious > "$proj/.fuzz-reduce-1-0000beef-shrink.stn"
 (cd "$tmp" && with_fault c-output --reduce "$proj/main.stn" > "$tmp/proj.out" 2> "$tmp/proj.err"); status=$?
 left=$(ls -A "$proj" | tr '\n' ' ')
+kept=$(cat "$proj/.fuzz-reduce-1-0000beef-shrink.stn" 2>/dev/null)
+rm -f "$proj/.fuzz-reduce-1-0000beef-shrink.stn"
 if [ $status != 0 ] || ! grep -q 'sort(mut' "$tmp/proj.out" || [ "$(lines "$tmp/proj.out")" -ge "$(lines "$proj/main.stn")" ]; then
     bad "--reduce next to a module: exit $status, $(lines "$tmp/proj.out") lines of $(lines "$proj/main.stn")"; cat "$tmp/proj.err"
-elif [ "$left" != "helpers.stn main.stn " ]; then bad "--reduce next to a module left files in its directory: $left"
+elif [ "$left" != ".fuzz-reduce-1-0000beef-shrink.stn helpers.stn main.stn " ]; then bad "--reduce next to a module left files in its directory, or took one away: $left"
+elif [ "$kept" != precious ]; then bad "--reduce next to a module changed a file of the directory that was there already"
 else ok "--reduce next to a module: $(lines "$proj/main.stn") lines reduced to $(lines "$tmp/proj.out")"; fi
 
 # and by the code a program is rejected with, which a missing module would change
@@ -147,5 +151,31 @@ cp "$tmp/proj2.out" "$proj/reduced.stn"
 if [ $status != 0 ] || [ "$(lines "$tmp/proj2.out")" -ge "$(lines "$proj/main2.stn")" ] || [ "$(code_of "$proj/reduced.stn")" != E0201 ]; then
     bad "--reduce --rejected next to a module: exit $status, $(lines "$tmp/proj2.out") lines of $(lines "$proj/main2.stn"), rejected with '$(code_of "$proj/reduced.stn")'"; cat "$tmp/proj2.err"
 else ok "--reduce --rejected next to a module: $(lines "$proj/main2.stn") lines reduced to $(lines "$tmp/proj2.out")"; fi
+
+# 7. a match that a checker accepts although it has an arm too few, reduced while another match has the
+# same header and the same arms, and one more: the reduction keeps the match that is the violation
+proj="$tmp/proj3"; mkdir "$proj"
+cat > "$proj/main.stn" <<'STN'
+type Shape = Dot | Box(w: Int) | Named(n: Str)
+
+fn one(s: Shape):
+    match s:
+        Dot -> print("a")
+        Box(w) -> print("b")
+
+fn two(s: Shape):
+    match s:
+        Dot -> print("a")
+        Box(w) -> print("b")
+        Named(n) -> print("c")
+
+fn main():
+    two(Dot)
+STN
+(cd "$tmp" && with_fault accept:E0202 --reduce "$proj/main.stn" --keeping-match 'match s:' --arm 'Dot -> print("a")' --arm 'Box(w) -> print("b")' > "$tmp/m.out" 2> "$tmp/m.err"); status=$?
+cp "$tmp/m.out" "$proj/reduced.stn"
+if [ $status != 0 ] || ! grep -q 'fn one' "$tmp/m.out" || [ "$(code_of "$proj/reduced.stn")" != E0202 ]; then
+    bad "--keeping-match: exit $status, the match that is the violation is not kept: rejected with '$(code_of "$proj/reduced.stn")'"; cat "$tmp/m.err" "$tmp/m.out"
+else ok "--keeping-match: the match with an arm too few is kept, and rejected with E0202 by the real compiler ($(lines "$proj/main.stn") lines reduced to $(lines "$tmp/m.out"))"; fi
 
 [ $fail = 0 ]

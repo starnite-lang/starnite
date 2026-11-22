@@ -669,6 +669,12 @@ let place rng lines = function
       | Some (i, ind) -> insert_after lines i (List.map (at ind) news)
       | None -> before_end lines (List.map (at 4) news))
 
+(* What a reduction of a mutation that was accepted keeps, for it to be a violation still: a line of the
+   program, or a match with exactly the arms that are left of it. The match is told by its header and by the
+   heads of its arms, in order, and the arm that was taken away is not among them: another match in the program
+   with the same header and the same arms, and one more, is not it. *)
+type witness = Line of string | Match of string * string list
+
 (* One violation of a rule of the language. [in_context] puts it next to a line or a variable of the
    program, and is [None] when the program has none that fits; with the program it gives the lines it
    needs that were there already, which a reduction of the program has to keep for the violation to
@@ -677,7 +683,7 @@ let place rng lines = function
 type mutation = {
   kind : string;
   expect : expect;
-  in_context : Random.State.t -> string array -> (string array * string list) option;
+  in_context : Random.State.t -> string array -> (string array * witness list) option;
   own : placement list;
 }
 
@@ -714,7 +720,7 @@ let mutations : mutation list =
           match pick rng !found with
           | Some j ->
               let take = at (indent_of lines.(j + 1)) "let neg_t = eat(take neg_s)" in
-              Some (insert_after (insert_after lines j [ take ]) (j - 1) [ at (indent_of lines.(j)) "let neg_s: Str = \"x\"" ], [ String.trim lines.(j) ])
+              Some (insert_after (insert_after lines j [ take ]) (j - 1) [ at (indent_of lines.(j)) "let neg_s: Str = \"x\"" ], [ Line (String.trim lines.(j)) ])
           | None -> None);
       own = [ Statements [ "let neg_s: Str = \"x\""; "for neg_i in [1, 2]:"; "    let neg_t = eat(take neg_s)" ] ] };
     { kind = "mut marker left out";
@@ -797,7 +803,7 @@ let mutations : mutation list =
                 if !k <> i && (not (blank lines.(!k))) && indent_of lines.(!k) = indent_of lines.(i) then arms := String.trim lines.(!k) :: !arms;
                 incr k
               done;
-              Some (delete_lines lines i (group_at lines i), String.trim lines.(!h) :: List.rev !arms)
+              Some (delete_lines lines i (group_at lines i), [ Match (String.trim lines.(!h), List.rev !arms) ])
           | None -> None);
       own = [ Statements [ "match Some(1):"; "    Some(neg_n) ->"; "        print(\"a\")" ] ] };
     { kind = "unknown name";
@@ -894,14 +900,30 @@ let json_code out =
 let time_limit = ref 120.0
 
 (* where the programs of a shrink are written: the scratch directory, or for --reduce the directory of the
-   input, which is where a compiler looks for what the input imports. In that directory they have names of
-   their own, and are removed at the end. *)
+   input, which is where a compiler looks for what the input imports. In that directory a file is made, with
+   a name that nothing had, when it is first wanted; its path is kept, and the files made are the only ones
+   that are removed at the end. *)
 let candidate_dir : string option ref = ref None
+let candidate_files : (string, string) Hashtbl.t = Hashtbl.create 4
+let candidates_made : string list ref = ref []
 
 let candidate_path tmp name =
   match !candidate_dir with
-  | Some dir -> Filename.concat dir (sprintf ".fuzz-reduce-%d-%s.stn" (Unix.getpid ()) name)
   | None -> Filename.concat tmp (name ^ ".stn")
+  | Some dir -> (
+      match Hashtbl.find_opt candidate_files name with
+      | Some p -> p
+      | None ->
+          let rec make k =
+            let p = Filename.concat dir (sprintf ".fuzz-reduce-%d-%08x-%s.stn" (Unix.getpid ()) (Random.bits ()) name) in
+            match Unix.openfile p [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL ] 0o600 with
+            | fd -> Unix.close fd; p
+            | exception Unix.Unix_error (Unix.EEXIST, _, _) when k < 100 -> make (k + 1)
+          in
+          let p = make 0 in
+          Hashtbl.replace candidate_files name p;
+          candidates_made := p :: !candidates_made;
+          p)
 
 (* simpler versions of a line: a declaration with the simplest expression of its type, a print of
    nothing, and its integers made 0 *)
@@ -1129,12 +1151,38 @@ let still_differs starnite tmp (ri0, rc0) text =
   | `Agreed | `Rejected _ -> false
   | exception Hang _ -> false
 
-(* what makes a mutated program that was accepted fail the same way: it is accepted, and still has the
-   lines of the violation *)
-let still_has starnite tmp markers text =
+(* the matches of a text: the header of each, and the heads of its arms, in order *)
+let matches_of lines =
+  let n = Array.length lines in
+  let r = ref [] in
+  Array.iteri
+    (fun h l ->
+      let t = String.trim l in
+      if is_prefix "match " t && ends_with ":" t then begin
+        let ind = indent_of l in
+        let k = ref (h + 1) and arm_ind = ref (-1) and arms = ref [] in
+        while !k < n && (blank lines.(!k) || indent_of lines.(!k) > ind) do
+          if not (blank lines.(!k)) then begin
+            if !arm_ind < 0 then arm_ind := indent_of lines.(!k);
+            if indent_of lines.(!k) = !arm_ind then arms := String.trim lines.(!k) :: !arms
+          end;
+          incr k
+        done;
+        r := (t, List.rev !arms) :: !r
+      end)
+    lines;
+  !r
+
+let holds text witnesses =
+  let ms = lazy (matches_of (lines_of text)) in
+  List.for_all (function Line s -> contains text s | Match (h, arms) -> List.mem (h, arms) (Lazy.force ms)) witnesses
+
+(* what makes a mutated program that was accepted fail the same way: it is accepted, and still has what makes
+   the violation *)
+let still_has starnite tmp witnesses text =
   let p = candidate_path tmp "shrink" in
   Out_channel.with_open_bin p (fun oc -> output_string oc text);
-  List.for_all (contains text) markers
+  holds text witnesses
   && (match run starnite tmp [ "check" ] p with 0, _ -> true | _ -> false | exception Hang _ -> false)
 
 (* The mutation of the program of a seed: its kind, the program with the violation in it, whether the
@@ -1167,7 +1215,7 @@ let still_rejected starnite tmp code text =
 
 let () =
   let count = ref 50 and seed = ref None and keep = ref None and print_only = ref false in
-  let shrink_failures = ref false and reduce = ref None and keeping = ref [] and rejected = ref None and budget = ref 400 in
+  let shrink_failures = ref false and reduce = ref None and keeping = ref [] and keeping_match = ref None and match_arms = ref [] and rejected = ref None and budget = ref 400 in
   let negative = ref true and differential_runs = ref true and print_mutated = ref false in
   Arg.parse
     [ ("--count", Arg.Set_int count, "N  number of programs (default 50)");
@@ -1179,6 +1227,8 @@ let () =
       ("--shrink-budget", Arg.Set_int budget, "N  how many checks a shrink may make (default 400)");
       ("--reduce", Arg.String (fun f -> reduce := Some f), "FILE  shrink the failing program in FILE, print the result, and stop");
       ("--keeping", Arg.String (fun t -> keeping := !keeping @ [ t ]), "TEXT  with --reduce: keep what compiles and contains TEXT (more than once: all of them), instead of what fails (for a mutation that was accepted)");
+      ("--keeping-match", Arg.String (fun h -> keeping_match := Some h), "HEADER  with --reduce: keep a match with this header and exactly the arms given by --arm, in order (for an arm of a match that was taken away)");
+      ("--arm", Arg.String (fun a -> match_arms := !match_arms @ [ a ]), "HEAD  with --keeping-match: the head of an arm of that match");
       ("--rejected", Arg.String (fun c -> rejected := Some c), "CODE  with --reduce: keep what the checker rejects with CODE (for a mutation rejected with the wrong code)");
       ("--no-negative", Arg.Clear negative, "  do not mutate programs to be rejected");
       ("--negative-only", Arg.Clear differential_runs, "  only the mutated programs: no run of the interpreter or the C build") ]
@@ -1209,7 +1259,10 @@ let () =
   Unix.mkdir tmp 0o700;
   let cleanup () =
     List.iter (fun f -> try Sys.remove (Filename.concat tmp f) with Sys_error _ -> ()) [ "out.txt" ];
-    List.iter (fun n -> try Sys.remove (candidate_path tmp n) with Sys_error _ -> ()) [ "shrink"; "orig" ];
+    (* the files this run made, and nothing else: next to the input only the ones it made *)
+    (match !candidate_dir with
+     | None -> List.iter (fun n -> try Sys.remove (Filename.concat tmp (n ^ ".stn")) with Sys_error _ -> ()) [ "shrink"; "orig" ]
+     | Some _ -> List.iter (fun p -> try Sys.remove p with Sys_error _ -> ()) !candidates_made);
     try Unix.rmdir tmp with Unix.Unix_error _ -> ()
   in
   (match !reduce with
@@ -1217,14 +1270,16 @@ let () =
        let text = read_file file in
        (* the program may import what is next to it *)
        candidate_dir := Some (Filename.dirname file);
-       (try Out_channel.with_open_bin (candidate_path tmp "orig") (fun _ -> ())
-        with Sys_error e ->
-          Printf.eprintf "fuzz: cannot write next to %s, where what it imports is: %s\n" file e;
+       (try ignore (candidate_path tmp "orig")
+        with Unix.Unix_error (e, _, _) ->
+          Printf.eprintf "fuzz: cannot write next to %s, where what it imports is: %s\n" file (Unix.error_message e);
           cleanup ();
           exit 2);
        let still_fails =
          match (!keeping, !rejected) with
-         | _ :: _, _ -> still_has starnite tmp !keeping
+         | _, _ when !keeping_match <> None ->
+             still_has starnite tmp (Match (Option.get !keeping_match, !match_arms) :: List.map (fun t -> Line t) !keeping)
+         | _ :: _, _ -> still_has starnite tmp (List.map (fun t -> Line t) !keeping)
          | [], Some code -> still_rejected starnite tmp code
          | [], None -> (
              let p = candidate_path tmp "orig" in
@@ -1323,7 +1378,7 @@ let () =
       | 0, _ ->
           Printf.printf "case %d: the mutation '%s' was accepted; it should be rejected with %s\n%!" case name (show_expect expect);
           (* kept by the lines it added and the lines of the program that it needs: the match, for an arm that was taken away *)
-          let keep = List.map String.trim added @ essential in
+          let keep = List.map (fun l -> Line (String.trim l)) added @ essential in
           fail ~can_shrink:(keep <> []) ~still_fails:(still_has starnite tmp keep) ()
       | _, out -> (
           match json_code out with
