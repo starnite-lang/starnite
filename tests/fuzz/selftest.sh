@@ -236,8 +236,31 @@ reduce_without_compiler() {
     else ok "--reduce without a compiler: it stops, and leaves nothing next to the input"; fi
 }
 
+# a checker that dies with an exception, and an interpreter that does: the corruption of a program that
+# makes them do it is found, and shrunk to the few lines that have it
+crashes() {
+    fault=$1; where=$2
+    d="$tmp/crash-$fault"
+    out=$(with_fault "$fault" --crash --count 40 --seed 1 --shrink --keep "$d" 2>&1); status=$?
+    n=$(ls "$d"/*.crash.min.stn 2>/dev/null | wc -l | tr -d ' ')
+    if [ $status != 1 ] || ! printf '%s\n' "$out" | grep -q "the compiler crashed $where"; then
+        bad "fault $fault: the fuzzer did not report a crash $where"; printf '%s\n' "$out" | tail -10
+    elif [ "$n" = 0 ]; then bad "fault $fault: nothing was shrunk"
+    else
+        all=1
+        for m in "$d"/*.crash.min.stn; do
+            if [ "$(lines "$m")" -gt 40 ] || ! grep -q '^fn main' "$m"; then
+                bad "fault $fault: $(basename "$m") has $(lines "$m") lines"; all=0
+            fi
+        done
+        [ $all = 1 ] && ok "fault $fault: a crash $where, $n programs shrunk"
+    fi
+}
+fault_crash() { crashes crash "in the check"; }
+fault_crash_run() { crashes crash-run "in run --interp"; }
+
 n=0
-for check in negative_fuzzing fault_accept_take fault_accept_match fault_wrong_code fault_c_output fault_split reduce_keeping reduce_next_to_a_module reduce_rejected_next_to_a_module reduce_keeping_a_match reduce_name_taken reduce_without_compiler; do
+for check in negative_fuzzing fault_accept_take fault_accept_match fault_wrong_code fault_c_output fault_split reduce_keeping reduce_next_to_a_module reduce_rejected_next_to_a_module reduce_keeping_a_match reduce_name_taken reduce_without_compiler fault_crash fault_crash_run; do
     n=$((n + 1))
     "$check" > "$tmp/result.$n" 2>&1 &
 done

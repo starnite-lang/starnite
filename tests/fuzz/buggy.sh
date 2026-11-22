@@ -9,6 +9,8 @@
 #   wrong-code   the checker says E0303 where it says E0304 (a mut marker left out)
 #   split        both backends print one line more for a program that imports fuzzlib, which
 #                the same program in one file does not
+#   crash        the checker dies with an exception that nothing caught, for a program that has a main
+#   crash-run    the interpreter does, for a program that has a main and checks
 real=${REAL_STARNITE:?REAL_STARNITE names the compiler to run}
 case "${BUGGY:-}" in
 c-output)
@@ -35,6 +37,16 @@ split)
         "$real" "$@"; status=$?
         if grep -q '^import fuzzlib' "$last"; then echo BUG; fi
         exit $status
+    fi ;;
+crash)
+    if [ "$1" = check ]; then
+        for last; do :; done
+        if grep -q '^fn main' "$last"; then echo 'Fatal error: exception Not_found'; exit 2; fi
+    fi ;;
+crash-run)
+    if [ "$1" = run ] && [ "$2" = --interp ]; then
+        for last; do :; done
+        if grep -q '^fn main' "$last"; then echo 'Fatal error: exception Not_found'; exit 2; fi
     fi ;;
 esac
 exec "$real" "$@"

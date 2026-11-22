@@ -65,6 +65,10 @@ jobs:
         # when repeated hangs (120 s each) use up the time
         timeout-minutes: 20
         run: ./_build/default/tests/fuzz/fuzz.exe --count 500 --shrink --keep fuzz-failures
+      - name: Crash fuzzing
+        # the bytes of each program are changed, and the compiler must not crash on what is left
+        timeout-minutes: 10
+        run: ./_build/default/tests/fuzz/fuzz.exe --crash --count 300 --shrink --keep fuzz-failures
       - name: Keep failing programs
         if: failure()
         uses: actions/upload-artifact@v4

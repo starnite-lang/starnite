@@ -11,10 +11,17 @@
    Negative fuzzing: a program that agrees gets one mutation with a known violation of a
    rule of the language, and the checker must reject it with the code of that rule.
 
+   Half of the programs are split across a module (see [render]), and then also run as the
+   one file that their text is.
+
+   The compiler does not crash: with --crash, the bytes of each program are changed with
+   no regard for what it says, and whatever the compiler says of the result, it must say.
+
    A failing program is shrunk, by taking out statements and items and simplifying what
    is left, while it still fails the same way.
 
      dune exec tests/fuzz/fuzz.exe -- [--count N] [--seed S] [--keep DIR] [--shrink]
+     dune exec tests/fuzz/fuzz.exe -- --crash [--count N] [--seed S] [--keep DIR] [--shrink]
      dune exec tests/fuzz/fuzz.exe -- --reduce FILE [--keeping TEXT | --rejected CODE]
 
    tests/fuzz/selftest.sh checks the fuzzer itself, with the compilers of buggy.sh.
@@ -1419,10 +1426,72 @@ let still_rejected starnite tmp code text =
   | _, out -> json_code out = Some code
   | exception Hang _ -> false
 
+(* ---------- the compiler must not crash (section 21.2, the first oracle) ---------- *)
+
+(* A change to the bytes of a text, with no regard for what it says: a character taken out, the text cut
+   short, a character replaced by a punctuation mark or a letter, a piece of it repeated or taken out, two
+   characters swapped. The program is then in most cases wrong in some way that no rule of the language
+   was written for, and whatever the compiler says of it, it must say. *)
+let corrupt rng text =
+  let b = Bytes.of_string text in
+  let n = Bytes.length b in
+  if n = 0 then text
+  else
+    let cut p m = Bytes.cat (Bytes.sub b 0 p) (Bytes.sub b (p + m) (n - p - m)) in
+    match Random.State.int rng 6 with
+    | 0 -> Bytes.to_string (cut (Random.State.int rng n) 1)
+    | 1 -> Bytes.to_string (Bytes.sub b 0 (Random.State.int rng n))
+    | 2 ->
+        let marks = "()[]{}:,.=+-*/%<>!?&|\"'#\\\n _0aZ" in
+        Bytes.set b (Random.State.int rng n) marks.[Random.State.int rng (String.length marks)];
+        Bytes.to_string b
+    | 3 ->
+        let p = Random.State.int rng n in
+        let m = min (n - p) (1 + Random.State.int rng 20) in
+        Bytes.to_string (Bytes.cat (Bytes.sub b 0 (p + m)) (Bytes.sub b p (n - p)))
+    | 4 ->
+        let p = Random.State.int rng n in
+        Bytes.to_string (cut p (min (n - p) (1 + Random.State.int rng 30)))
+    | _ ->
+        let p = Random.State.int rng n and q = Random.State.int rng n in
+        let c = Bytes.get b p in
+        Bytes.set b p (Bytes.get b q);
+        Bytes.set b q c;
+        Bytes.to_string b
+
+(* where a compiler crashed: in the check, or in what builds and runs a program that checks *)
+type crash = At_check | At_run of string list
+
+(* what a crash says: an exception that nothing caught, or a C compiler that could not build what the compiler
+   wrote. The place and the status of a trap, which a program may reach, are not it. *)
+let crash_text out =
+  contains out "Fatal error" || contains out "undefined reference" || contains out "In function"
+  || (contains out ".c:" && contains out "error")
+
+(* what the compiler does with a program that may be wrong: a crash, or nothing to say *)
+let crash_of starnite tmp path text =
+  write_program path text;
+  match run starnite tmp [ "check"; "--json" ] path with
+  | exception Hang _ -> Some (At_check, "the check did not end")
+  | code, out when code >= 2 || contains out "Fatal error" -> Some (At_check, out)
+  | 0, _ -> (
+      (* it checks: it must build and run, on both backends, though it may run for ever or trap *)
+      let stage args =
+        match run starnite tmp args path with
+        | exception Hang _ -> None
+        | _, out -> if crash_text out then Some (At_run args, out) else None
+      in
+      match stage [ "run"; "--interp" ] with Some c -> Some c | None -> stage [ "run" ])
+  | _ -> None
+
+let still_crashes starnite tmp kind text =
+  let p = candidate_path tmp "shrink" in
+  match crash_of starnite tmp p text with Some (k, _) -> k = kind | None -> false
+
 let () =
   let count = ref 50 and seed = ref None and keep = ref None and print_only = ref false in
   let shrink_failures = ref false and reduce = ref None and keeping = ref [] and keeping_match = ref None and match_arms = ref [] and rejected = ref None and budget = ref 400 in
-  let negative = ref true and differential_runs = ref true and print_mutated = ref false and write_dir = ref None in
+  let negative = ref true and differential_runs = ref true and print_mutated = ref false and write_dir = ref None and crash_mode = ref false and corruptions = ref 4 in
   Arg.parse
     [ ("--count", Arg.Set_int count, "N  number of programs (default 50)");
       ("--print", Arg.Set print_only, "  print the program of the seed given by --seed and stop");
@@ -1438,6 +1507,8 @@ let () =
       ("--arm", Arg.String (fun a -> match_arms := !match_arms @ [ a ]), "HEAD  with --keeping-match: the head of an arm of that match");
       ("--rejected", Arg.String (fun c -> rejected := Some c), "CODE  with --reduce: keep what the checker rejects with CODE (for a mutation rejected with the wrong code)");
       ("--no-negative", Arg.Clear negative, "  do not mutate programs to be rejected");
+      ("--crash", Arg.Set crash_mode, "  instead of the other oracles, corrupt the bytes of each program and require the compiler not to crash");
+      ("--corruptions", Arg.Set_int corruptions, "N  with --crash: how many corruptions of each program (default 4)");
       ("--negative-only", Arg.Clear differential_runs, "  only the mutated programs: no run of the interpreter or the C build") ]
     (fun a -> raise (Arg.Bad ("unexpected argument " ^ a)))
     "usage: fuzz.exe [--count N] [--seed S] [--keep DIR] [--shrink] [--reduce FILE [--keeping TEXT | --rejected CODE]]";
@@ -1472,7 +1543,7 @@ let () =
   let tmp = Filename.concat (Filename.get_temp_dir_name ()) (sprintf "starnite-fuzz-%d-%08x" (Unix.getpid ()) (Random.bits ())) in
   Unix.mkdir tmp 0o700;
   let cleanup () =
-    List.iter (fun f -> try Sys.remove (Filename.concat tmp f) with Sys_error _ -> ()) [ "out.txt"; "twin.stn"; module_name ^ ".stn" ];
+    List.iter (fun f -> try Sys.remove (Filename.concat tmp f) with Sys_error _ -> ()) [ "out.txt"; "twin.stn"; "corrupt.stn"; module_name ^ ".stn" ];
     (* the files this run made, and nothing else: next to the input only the ones it made *)
     (match !candidate_dir with
      | None -> List.iter (fun n -> try Sys.remove (Filename.concat tmp (n ^ ".stn")) with Sys_error _ -> ()) [ "shrink"; "orig" ]
@@ -1536,6 +1607,41 @@ let () =
         end
     | None -> ()
   in
+  if !crash_mode then begin
+    (* the compiler has the time of a check to end, and a program that loops is not its fault *)
+    time_limit := 30.0;
+    let crashes = ref 0 and tried = ref 0 and shrunk = ref 0 in
+    for i = 0 to !count - 1 do
+      let case = seed + i in
+      let prog = program case in
+      let path = Filename.concat tmp "corrupt.stn" in
+      for k = 0 to !corruptions - 1 do
+        let rng = Random.State.make [| case; k; 0x6372 |] in
+        let text = corrupt rng prog in
+        (* now and then a second change: the first may leave nothing wrong *)
+        let text = if Random.State.int rng 3 = 0 then corrupt rng text else text in
+        incr tried;
+        match crash_of starnite tmp path text with
+        | None -> ()
+        | Some (kind, out) ->
+            incr crashes;
+            Printf.printf "case %d, corruption %d: the compiler crashed %s:\n  %s\n%!" case k
+              (match kind with At_check -> "in the check" | At_run args -> "in " ^ String.concat " " args)
+              (String.concat "\n  " (String.split_on_char '\n' (tail out 300)));
+            let suffix = sprintf ".k%d.crash" k in
+            save case suffix text;
+            if !shrink_failures && !shrunk < 3 then begin
+              incr shrunk;
+              let small, evals = shrink ~budget:!budget ~still_fails:(still_crashes starnite tmp kind) text in
+              Printf.printf "  shrunk from %d lines to %d, in %d checks\n%!" (Array.length (lines_of text)) (Array.length (lines_of small)) evals;
+              save case (suffix ^ ".min") small
+            end
+      done
+    done;
+    cleanup ();
+    Printf.printf "%d corruptions of %d programs: %d crashes\n" !tried !count !crashes;
+    exit (if !crashes > 0 then 1 else 0)
+  end;
   for i = 0 to !count - 1 do
     let case = seed + i in
     let prog = program case in
