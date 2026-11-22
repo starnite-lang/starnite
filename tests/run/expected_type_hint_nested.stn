@@ -1,16 +1,34 @@
-# Nested calls that all fall back are checked in bounded time. Every call here is first tried with
-# the expected type, which fails at `xs`, and then on its own; each retry would check the nested
-# call again, so without a bound the work doubles at every level. A variable that cannot take the
-# hint is seen before anything else is checked, and a failing argument that is not a variable
-# (`copy(xs)`) spends the budget of retries. Neither takes the expected type from a call that
-# comes later, in another statement or as another argument of the same call.
+# Nested calls that all fall back are checked in bounded time. In each call here, the expected type
+# the call gets for its result does not match what its arguments say (the variable `xs` is an
+# Array[Int], where the expected type asks for an Array[Int?]), so a check that bound the
+# parameters to it would fail at `xs` after checking the nested call, and be repeated without it:
+# the work would double at every level. The expected type is an expectation first, and parameters
+# are bound to it only if that does not check, or the result does not fit. Chains of forty calls
+# are checked beside calls that need the expected type for their literals, in the same call and
+# in the same function, and beside a bound that only the bound version satisfies.
+trait Tag:
+    fn tag(x: Self) -> Str
+
+impl Tag for Option[Int]:
+    fn tag(x: Option[Int]) -> Str:
+        "opt"
+
+fn keep_tag[T: Tag](x: T) -> T:
+    x
+
 fn choose_nested[T](inner: Int?, xs: Array[T], fallback: T) -> T:
     fallback
+
+fn contextual[T](inner: F32?, value: T) -> T:
+    value
 
 fn pick[T](a: T, b: T) -> T:
     a
 
 fn pair(a: Int?, b: F32?) -> (Int?, F32?):
+    (a, b)
+
+fn two(a: Int?, b: Int?) -> (Int?, Int?):
     (a, b)
 
 fn main() ! io:
@@ -25,5 +43,9 @@ fn main() ! io:
     print(f"{y}")
     let q: (Int?, F32?) = pair(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(Some(0), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), pick(Some(3.0), None))
     print(f"{q.0} {q.1}")
+    let r: (Int?, F32?) = pair(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(Some(0), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(contextual(Some(0.0), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)), Some(1.0)))
+    print(f"{r.0} {r.1}")
+    let t: (Int?, Int?) = two(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(Some(0), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), keep_tag(1))
+    print(f"{t.0} {t.1}")
     let g: F32? = pick(Some(4.0), None)
     print(f"{g}")

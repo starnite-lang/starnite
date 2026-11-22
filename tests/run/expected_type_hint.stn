@@ -16,6 +16,12 @@ fn both[T](a: Array[T], o: T?, d: T) -> T:
 fn id_eq[T: Eq](x: T) -> T:
     x
 
+fn keep[A, B](a: A, b: A, c: A, tail: B) -> B:
+    tail
+
+fn boxed() -> any Show:
+    5
+
 fn main() ! io:
     let a: any Show = (Some(5)).or(4)
     let b: Int? = (Some(5)).or(4)
@@ -52,3 +58,9 @@ fn main() ! io:
     # a bound the hint would break (any Show has no Eq) fails the attempt too
     let w: any Show = id_eq(5)
     print(f"{w}")
+    # an earlier argument fixes a parameter that the variables after it are then boxed into, so
+    # the expected type must not be used to judge those variables on their own
+    let nn = 1
+    let ss = "x"
+    let k: F32? = keep(boxed(), nn, ss, Some(1.0))
+    print(f"{k}")

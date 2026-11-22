@@ -3,5 +3,7 @@ Some(1.0)
 Some(1) Some(2.0)
 Some(1)
 Some(1) Some(3.0)
+Some(1) Some(1.0)
+Some(1) Some(1)
 Some(4.0)
 exit 0
