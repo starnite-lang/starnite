@@ -37,7 +37,8 @@ jobs:
         run: dune build
       - name: Conformance corpus
         # each program on the reference interpreter and the debug and release C
-        # builds, golden error codes, and test blocks with rejection tests
+        # builds, golden error codes, test blocks with rejection tests, and the
+        # fuzzer's own checks (tests/fuzz/selftest.sh)
         run: tests/run.sh
 
   fuzz:
