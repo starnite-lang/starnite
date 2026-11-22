@@ -1680,6 +1680,17 @@ and construct_variant c l tn idx vn (args : Syntax.arg list) exp : texpr =
       te
   | _ -> err "E0201" l "%s is not a data type" tn
 
+(* The type an expression has when checked on its own, with nothing that the check did kept: for
+   choosing among functions by their first argument. None if it does not check by itself. *)
+and probe_type c (e : Syntax.expr) : ty option =
+  let snap = snapshot c in
+  let mark = open_speculation () in
+  let r = (try Some (zonk (infer c e).ty) with Syntax.Error _ -> None) in
+  undo_speculation mark;
+  close_speculation ();
+  restore c snap;
+  r
+
 and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
   let b = norm_qual c b in
   match b.d with
@@ -1696,9 +1707,21 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
   | Name tn when lookup c tn = None && (found_opt (find_decl c.tb tn) <> None || List.mem_assoc tn prim_names) ->
       let self_ty = match found_opt (find_decl c.tb tn) with Some (tk, _) -> TNamed (tk, []) | None -> List.assoc tn prim_names in
       let cands = method_fns c.tb self_ty m in
-      let ok = prefer_owner c.tb self_ty (List.filter (fun u ->
+      let by_head = List.filter (fun u ->
           let sg = Hashtbl.find c.tb.fns u in
-          sg.smodule <> "" && (match sg.sparams with (_, _, t, _) :: _ -> head t = head self_ty | [] -> true)) cands) in
+          sg.smodule <> "" && (match sg.sparams with (_, _, t, _) :: _ -> head t = head self_ty | [] -> true)) cands in
+      (* With several functions for this kind of type, those that take the first argument, as a
+         receiver would be taken (its instantiation of the type, and the bounds it fixes), come
+         first; if there are none, the call is a type error against all of them. *)
+      let fitting =
+        match (by_head, args) with
+        | _ :: _ :: _, ({ aname = None; _ } as a) :: _ -> (
+            match probe_type c a.aexpr with
+            | Some t -> List.filter (fun u -> match (Hashtbl.find c.tb.fns u).sparams with [] -> true | _ -> fits_receiver c t u) by_head
+            | None -> by_head)
+        | _ -> by_head
+      in
+      let ok = prefer_owner c.tb self_ty (if fitting = [] then by_head else fitting) in
       (match ok with
        | [] -> err "E0101" l "no function %s for type %s" m tn
        | u :: _ -> call_sig c l u ~receiver:None args exp)

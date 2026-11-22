@@ -49,3 +49,6 @@ fn main() ! io:
     print(boxes.Box("x").label_of())
     print(boxes.Box(1).tell())
     print(boxes.Box("x").tell())
+    # the form through the type name takes the instantiation of its first argument into account too
+    print(boxes.Box.read(boxes.Box(1)))
+    print(boxes.Box.read(boxes.Box("x")))

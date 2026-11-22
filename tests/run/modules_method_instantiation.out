@@ -9,4 +9,6 @@ lib: an int box
 the program has no label
 lib tells an int
 the program tells x
+lib reads an int box 1
+the program reads a string box x
 exit 0
