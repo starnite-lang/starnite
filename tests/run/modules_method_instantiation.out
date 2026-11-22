@@ -5,4 +5,8 @@ lib peeks at an int box 1
 the program peeks at a string box x
 an int
 the program labels a string box y
+lib: an int box
+the program has no label
+lib tells an int
+the program tells x
 exit 0

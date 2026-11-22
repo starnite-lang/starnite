@@ -21,3 +21,17 @@ impl Label for Int:
 
 fn show_label*[T: Label](b: Box[T]) -> Str:
     b.item.label()
+
+impl Label for Box[Int]:
+    fn label(self: Box[Int]) -> Str:
+        "an int box"
+
+fn label_of*[T: Label](x: T) -> Str:
+    f"lib: {x.label()}"
+
+trait Tells*:
+    fn tell(self: Self) -> Str
+
+impl[T: Label] Tells for Box[T]:
+    fn tell(self: Box[T]) -> Str:
+        f"lib tells {self.item.label()}"

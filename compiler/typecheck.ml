@@ -466,7 +466,8 @@ type frame = { mutable vars : (string * var) list; lam : lamrec option }
 type fctx = {
   tb : tables;
   mutable frames : frame list;
-  mutable tparams : (string * (string * ty list) list) list;
+  tparams : (string * (string * ty list) list) list;   (* the type parameters in scope and their bounds: the evidence for a bound *)
+  mutable tnames : string list;      (* the names a written type may use for them: none in a default, which writes its own *)
   mutable ret : ty;
   mutable errs : ty list;           (* collected errors of the current function or try *)
   mutable io : bool;
@@ -638,6 +639,22 @@ let fits_receiver c self u =
       close_speculation ();
       ok
   | [] -> false
+
+(* The bounds of an impl hold for what it was matched to, as trait dispatch asks of it: a bound on
+   a type that is not known yet is not decided here. *)
+let impl_bounds_hold c (im : impl_info) (s : (string * ty) list) : bool =
+  List.for_all
+    (fun (p, bs) ->
+      match List.assoc_opt p s with
+      | None -> true
+      | Some t ->
+          let t = zonk t in
+          List.for_all
+            (fun (tr, ta) ->
+              let ta = List.map (fun x -> zonk (subst s x)) ta in
+              has_tvar t || List.exists has_tvar ta || find_impl (rtab_of c.tb) ~bounds:c.tparams tr ta t <> None)
+            bs)
+    im.itparams
 
 (* The type variables of a call that its expected type would bind to the result: those it
    binds, and whether they are all variables of the call itself, which s lists. None if it
@@ -1335,17 +1352,18 @@ and args_check c l (st : args_state) (slots : int list) : targ list =
                    caller's `let RATE = 99` does not change a default `by: Int = RATE`. It is
                    still evaluated here, at the call, and its effects are the call's. *)
                 let dm = try List.assq d !default_modules with Not_found -> c.tb.cur in
-                (* nor are its type parameters, or its Self: a type written in the default is the
-                   module's own, not one that the caller happens to have a parameter of that name for *)
-                let caller_frames = c.frames and caller_tparams = c.tparams and caller_self = c.self_ty and caller_tenv = c.tb.tenv in
+                (* nor are the names of its type parameters, or its Self: a type written in the default is
+                   the module's own, not one that the caller happens to have a parameter of that name for.
+                   The bounds of the caller's parameters stay, as evidence for the types that reach the default *)
+                let caller_frames = c.frames and caller_tnames = c.tnames and caller_self = c.self_ty and caller_tenv = c.tb.tenv in
                 c.frames <- [ { vars = []; lam = None } ];
-                c.tparams <- [];
+                c.tnames <- [];
                 c.self_ty <- None;
                 (* a type parameter of the function the default belongs to means what this call made of it *)
                 c.tb.tenv <- st.a_tenv;
                 let te =
                   Fun.protect
-                    ~finally:(fun () -> c.frames <- caller_frames; c.tparams <- caller_tparams; c.self_ty <- caller_self; c.tb.tenv <- caller_tenv)
+                    ~finally:(fun () -> c.frames <- caller_frames; c.tnames <- caller_tnames; c.self_ty <- caller_self; c.tb.tenv <- caller_tenv)
                     (fun () -> in_module c.tb dm (fun () -> check c d t))
                 in
                 { amode = m; a = te }
@@ -1719,9 +1737,10 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
           (List.filter
              (fun u ->
                let sg = Hashtbl.find c.tb.fns u in
-               match sg.sparams with
-               | (_, _, t, _) :: _ -> (match repr t with TParam _ -> true | _ -> false)
-               | [] -> false)
+               (match sg.sparams with
+                | (_, _, t, _) :: _ -> (match repr t with TParam _ -> true | _ -> false)
+                | [] -> false)
+               && fits_receiver c self u)
              (method_fns c.tb self m))
       in
       let trait_cands =
@@ -1739,7 +1758,7 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
                   | _ ->
                       (* the methods of a trait are found where the trait is in scope (section 4.7) *)
                       trait_visible c.tb tr
-                      && (List.exists (fun im -> im.itrait_ = tn && (let s = ref [] in match_ty (List.map fst im.itparams) s im.ifor_ self)) c.tb.impls
+                      && (List.exists (fun im -> im.itrait_ = tn && (let s = ref [] in match_ty (List.map fst im.itparams) s im.ifor_ self && impl_bounds_hold c im !s)) c.tb.impls
                           || (List.mem tn (prim_traits self)))
                 in
                 if has then (tn, sg) :: acc else acc
@@ -1860,7 +1879,7 @@ and infer_lambda c l ps body exp : texpr =
       (fun i (p : Syntax.param) ->
         let t =
           match p.pty with
-          | Some t -> conv_ty c.tb (List.map fst c.tparams) c.self_ty t
+          | Some t -> conv_ty c.tb c.tnames c.self_ty t
           | None -> (
               match expected_fn with
               | Some f -> snd (List.nth f.fps i)
@@ -2254,7 +2273,7 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
   | Let (p, t, e) ->
       let te =
         match t with
-        | Some t -> check c e (conv_ty c.tb (List.map fst c.tparams) c.self_ty t)
+        | Some t -> check c e (conv_ty c.tb c.tnames c.self_ty t)
         | None -> infer c e
       in
       let tp = check_pat c p te.ty false in
@@ -2269,7 +2288,7 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
   | Var (_, n, t, e) ->
       let te =
         match t with
-        | Some t -> check c e (conv_ty c.tb (List.map fst c.tparams) c.self_ty t)
+        | Some t -> check c e (conv_ty c.tb c.tnames c.self_ty t)
         | None -> infer c e
       in
       let v = new_var n te.ty true VLocal in
@@ -2286,7 +2305,7 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
   | Check e -> mks (SCheck (check c e TBool))
   | Assert e -> mks (SAssert (check c e TBool, ""))
   | AssertFails (t, e) ->
-      let et = conv_ty c.tb (List.map fst c.tparams) c.self_ty t in
+      let et = conv_ty c.tb c.tnames c.self_ty t in
       let saved = c.errs in
       c.errs <- [];
       c.in_try <- c.in_try + 1;
@@ -2332,11 +2351,11 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
   | LocalFn fd ->
       (* a local fn is a closure bound to an immutable name (section 2.2) *)
       let ps = fd.fparams in
-      let ret = match fd.fret with Some t -> conv_ty c.tb (List.map fst c.tparams) c.self_ty t | None -> TUnit in
+      let ret = match fd.fret with Some t -> conv_ty c.tb c.tnames c.self_ty t | None -> TUnit in
       let lr = { caps = [] } in
       push_frame c ~lam:lr ();
       let params = List.map (fun (p : Syntax.param) ->
-          let t = conv_ty c.tb (List.map fst c.tparams) c.self_ty (Option.get p.pty) in
+          let t = conv_ty c.tb c.tnames c.self_ty (Option.get p.pty) in
           let v = new_var p.pname t (p.pmode = MMut) (VParam p.pmode) in
           bind c v p.ploc; v) ps in
       let c' = { c with declared = None; errs = []; io = false; in_try = 0; loops = 0; ret; lend_kind = None } in
@@ -2784,7 +2803,7 @@ let declare_items tb modname (items : item list) =
 (* ---------- checking bodies ---------- *)
 
 let new_ctx tb (sg : fsig) self : fctx =
-  { tb; frames = [ { vars = []; lam = None } ]; tparams = sg.stparams; ret = sg.sret; errs = []; io = false;
+  { tb; frames = [ { vars = []; lam = None } ]; tparams = sg.stparams; tnames = List.map fst sg.stparams; ret = sg.sret; errs = []; io = false;
     in_try = 0; loops = 0;
     declared = (if sg.sdeclared && (sg.seff.errs <> [] || sg.sexport) then Some sg.seff.errs else None);
     obligations = []; unsolved = []; moved = []; lent = []; closure_caps = Hashtbl.create 8; fname = sg.sdisplay; self_ty = self; lend_kind = sg.slend; retries = ref retry_budget; hint_failed = Hashtbl.create 16;
