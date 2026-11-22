@@ -1109,16 +1109,44 @@ and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
     (s, ret, eff, targs, poly)
   in
   let s, ret, eff, targs, poly =
-    if (not hinted) || !(c.retries) <= 0 then attempt first false
-    else
-      match speculate c (fun () -> attempt first true) with
-      | Ok r -> r
-      | Error e when not !hint_bound -> raise e   (* the hint changed nothing: another try would fail the same way *)
-      | Error e -> (
-          decr c.retries;
-          match speculate c (fun () -> attempt (instantiate sg) false) with
+    match exp with
+    | Some t when hinted ->
+        let _, ps0, ret0, _ = first in
+        if not (hint_fits c l ~receiver ps0 args t ret0) then attempt first false   (* cannot succeed: skip it *)
+        else if !(c.retries) <= 0 then begin
+          (* The budget is spent, so no call is checked twice any more unless it must be: the call
+             on its own first, which is the cheap way when it succeeds, and the hint only if the
+             result then does not fit the expected type or the call does not check. Where the hint
+             fails too, its error is reported, as before the retry existed. *)
+          let snap = snapshot c in
+          let mark = open_speculation () in
+          let on_its_own =
+            match attempt first false with
+            | (_, nret, _, _, _) as r ->
+                let m2 = !trail in
+                let fits = (try ignore (coerce c { e = XNone; ty = nret; l } t); true with Syntax.Error _ | Mismatch -> false) in
+                undo_speculation m2;
+                if fits then Some r else None
+            | exception Syntax.Error _ -> None
+          in
+          match on_its_own with
+          | Some r -> close_speculation (); r
+          | None ->
+              undo_speculation mark;
+              close_speculation ();
+              restore c snap;
+              attempt (instantiate sg) true
+        end
+        else (
+          match speculate c (fun () -> attempt first true) with
           | Ok r -> r
-          | Error _ -> raise e)
+          | Error e when not !hint_bound -> raise e   (* the hint changed nothing: another try would fail the same way *)
+          | Error e -> (
+              decr c.retries;
+              match speculate c (fun () -> attempt (instantiate sg) false) with
+              | Ok r -> r
+              | Error _ -> raise e))
+    | _ -> attempt first false
   in
   let convs = add_eff c l eff @ List.concat_map (add_eff c l) poly in
   (* bounds become obligations *)
@@ -1129,6 +1157,41 @@ and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
     sg.stparams;
   let callee = if is_builtin u then CBuiltin (String.sub u 8 (String.length u - 8), List.map snd s) else CFn (u, List.map snd s) in
   mk (XCall (callee, targs, convs)) ret l
+
+(* Can the arguments whose types are already known take the types the expected type gives
+   their parameters? The receiver and the arguments that are plain variables are checked
+   here, in a trial that is always undone, with the coercion the real check would apply. If one
+   cannot, a hinted attempt cannot succeed either, and no work is spent on it: `s.or(4)`
+   into an `any Show` fails at `s` before any other argument has been looked at. Arguments
+   that are anything else, and everything the trial leaves open, are left to the real check,
+   so a trial that finds no fault is no promise. *)
+and hint_fits c l ~receiver ps args (t : ty) (ret : ty) : bool =
+  let mark = open_speculation () in
+  let ok =
+    try
+      (try unify t ret with Mismatch -> ());
+      let rest =
+        match (receiver, ps) with
+        | Some r, (m, _, pt, _) :: rest ->
+            if m = MMut then unify r.ty pt else ignore (coerce c r pt);
+            rest
+        | _ -> ps
+      in
+      List.iter
+        (fun (m, _, pt, (a : Syntax.arg option), _) ->
+          match a with
+          | Some { aexpr = { d = Name x; loc; _ }; amode = None; _ } when m <> MMut -> (
+              match lookup c x with
+              | Some v -> ignore (coerce c (mk (XVar v) v.vty loc) pt)
+              | None -> ())
+          | _ -> ())
+        (match_args c l rest args);
+      true
+    with Syntax.Error _ | Mismatch -> false
+  in
+  undo_speculation mark;
+  close_speculation ();
+  ok
 
 (* Pick an overload by the head of the first argument's type. *)
 and pick_overload c l name (cands : string list) (first : texpr option) : string =
