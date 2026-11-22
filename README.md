@@ -53,7 +53,7 @@ CI (`.github/workflows/ci.yml`) runs on every push to `main` and every pull requ
 
 - It builds with dune.
 - It runs the conformance corpus with both GCC and Clang.
-- It runs 500 fuzz cases from a fresh seed. The seed is printed first, so a failure can be replayed, and failing programs are kept as an artifact.
+- It runs 500 fuzz cases from a fresh seed: each program on the interpreter and the C build, and then one mutation of it that must be rejected. The seed is printed first, so a failure can be replayed, and failing programs are kept as an artifact, the first three shrunk.
 
 
 ```bash
@@ -63,6 +63,8 @@ tests/run.sh
 ```bash
 dune exec tests/fuzz/fuzz.exe -- --count 200
 ```
+
+The fuzzer takes `--count N` and `--seed S` (programs of the seeds S to S+N-1; a failing case is replayed with `--seed CASE --count 1`), `--keep DIR` (failing programs are saved there, a mutated one as `caseN.neg.stn`), `--shrink` with `--shrink-budget N`, `--reduce FILE` for a program in a file (with `--keeping TEXT`, which keeps what the compiler accepts and has TEXT in it, for a mutation that was accepted, or `--rejected CODE`, for one that was rejected with the wrong code), `--print` (with `--mutated`, the program of the seed after its mutation, and what it must be rejected with), `--no-negative`, and `--negative-only`. `STARNITE` names the compiler to test. `tests/fuzz/selftest.sh` runs as part of `tests/run.sh`: it checks the fuzzer itself, against this compiler and against compilers with a fault put in on purpose (`tests/fuzz/buggy.sh`).
 
 Each program in `tests/run` is run three ways (reference interpreter, debug C build, release C build), and all three must match each other and a reviewed golden output. That is oracle 3 of section 21.2, applied to a fixed corpus. The debug runtime also checks that counts balance at exit (oracle 2). `tests/errors` holds one golden test per implemented error code, with its location. `tests/unit` holds `test` blocks, and `rejects` tests that check the compiler refuses a misuse.
 
@@ -83,11 +85,13 @@ Working now:
 - **Arithmetic (section 17.1).** Overflow traps, wrapping operators, checked conversions, and division traps.
 - **C output (section 11).** The object header, size-class allocator, inline and boxed data layouts with field-less variants encoded in the pointer (section 3.3), copy-on-write arrays, per-type release functions, and status-byte error returns. The debug build poisons freed memory and checks counts at exit.
 - **The reference interpreter (section 21.1)**, the test runner with `assert`, `assert_fails` and `rejects` (section 20.2), and diagnostics in the format of section 19.1, plus JSON.
-- **A first differential fuzzer (section 21.2)**, `tests/fuzz/fuzz.ml`. It builds well-typed programs by construction and requires the interpreter and the debug C build to agree, with balanced counts. Its programs include trait values: boxing in arguments, arrays, fields and `Option`, calls through method tables, nested values, closures that capture them, `mut` parameters, failures that cross a trait method, and `any Show` of primitives, tuples and user types.
+- **The program fuzzer (section 21.2)**, `tests/fuzz/fuzz.ml`. It builds well-typed programs by construction and requires the interpreter and the debug C build to agree, with balanced counts. Its programs include trait values: boxing in arguments, arrays, fields and `Option`, calls through method tables, nested values, closures that capture them, `mut` parameters, failures that cross a trait method, and `any Show` of primitives, tuples and user types.
+- **Negative fuzzing (section 21.2).** A program that agrees gets one mutation with a known violation, and the checker must reject it with the code of the rule that was broken, or with a code of the E02 family for a type mismatch. There are fourteen kinds: a use after `take`, a `take` in a loop, a `mut` marker left out, `mut` of an immutable, an assignment to an immutable, two overlapping `mut` arguments, a closure over a `mut` argument, an arm of a match left out, an unknown name, too few arguments, an argument, an annotation or a result of another type, and an error that an exported function does not list. Each kind is as likely as any other. A mutation is made of the program's own lines and variables when it has some that fit (half of the time), and otherwise it is written with a variable of its own and put after one of the statements of the program, whatever its depth, so that the rules are tried inside loops and branches.
+- **Shrinking (section 21.2).** A failing program (the interpreter and the C build disagree, a mutation was accepted, or one was rejected with the wrong code) is cut down while it still fails: statements and items are deleted, a loop, an `if` or a `match` is replaced by what is in its body, and declarations and numbers are made simple. A mutation that was accepted is kept by the lines that make the violation, so that the reduced program is still one. In the fuzzer's own tests, programs of 250 lines come down to between 2 and 45.
 
 Not done yet:
 
-- the rest of the fuzzer of section 21.2: shrinking failing programs, negative fuzzing, and comparing each optional pass on and off
+- the last oracle of the fuzzer of section 21.2, comparing each optional pass on and off, which waits for the optional passes, and productions of the generator for modules and projections (`lend`)
 - property, snapshot and doc tests, which belong to milestone 2
 
 Strings are always heap buffers. The 15-byte inline form arrives with the layout work of milestone 2.
