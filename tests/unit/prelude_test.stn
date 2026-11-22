@@ -45,3 +45,16 @@ test "a return ends the test normally":
     if true:
         return
     assert false
+
+test "swap exchanges two elements":
+    var xs = [10, 20, 30]
+    swap(mut xs, 0, 2)
+    assert xs == [30, 20, 10]
+    swap(mut xs, 1, 1)
+    assert xs == [30, 20, 10]
+
+test "words splits at white space":
+    assert words("  the quick\tbrown\n fox ") == ["the", "quick", "brown", "fox"]
+    assert len(words("")) == 0
+    assert len(words(" \t\n")) == 0
+    assert words("one") == ["one"]

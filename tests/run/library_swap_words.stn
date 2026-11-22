@@ -1,0 +1,15 @@
+# Section 20.1: `swap` exchanges two elements of one array, the case that two mut arguments cannot
+# express (section 4.3), and `words` splits a string at runs of white space.
+fn main():
+    var xs = [1, 2, 3, 4]
+    swap(mut xs, 0, 3)
+    print(f"{xs}")
+    var ss = ["a", "b"]
+    swap(mut ss, 1, 0)
+    print(f"{ss}")
+    var nested = [[1], [2, 3]]
+    swap(mut nested, 0, 1)
+    print(f"{nested}")
+    print(f"{words("  the quick\tbrown\n fox  ")}")
+    print(f"{len(words(""))} {len(words("   "))} {words("one")}")
+    print(f"{words("héllo wörld")}")
