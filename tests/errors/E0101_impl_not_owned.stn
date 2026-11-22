@@ -1,0 +1,9 @@
+# expect: E0101 4:1
+import lib.owned
+
+impl owned.Read for owned.Counter:
+    fn read(self: owned.Counter) -> Int:
+        1
+
+fn main():
+    ()

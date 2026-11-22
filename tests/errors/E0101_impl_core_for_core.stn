@@ -1,0 +1,7 @@
+# expect: E0101 2:1
+impl Show for Int:
+    fn show(x: Int) -> Str:
+        "an int"
+
+fn main():
+    ()

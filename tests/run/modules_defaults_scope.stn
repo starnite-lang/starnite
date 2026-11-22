@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Sections 2.2 and 3.5: a default is written where its parameter or field is declared, and its
+# names mean what they mean there. The variables of the call are not in scope in it, whether the
+# default is in this module or another, so a caller's `let factor = 99` changes nothing.
+import lib.rates
+
+let factor = 5
+
+fn local_scale(x: Int, by: Int = factor) -> Int:
+    x * by
+
+type Local = struct(rate: Int = factor)
+
+fn main() ! io:
+    # variables of this call, named like the constant and the private function the defaults use
+    let factor = 99
+    let bump = 1000
+    print(f"{rates.scale(3)} {rates.scale(3, 10)}")
+    print(f"{rates.shifted(1)}")
+    let c = rates.Cfg()
+    print(f"{c.rate} {c.extra}")
+    print(f"{local_scale(3)} {local_scale(3, 4)}")
+    print(f"{Local().rate}")
+    print(f"{factor + bump}")

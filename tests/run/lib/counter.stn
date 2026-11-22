@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A library module for modules_method_owner.stn: a type, and functions over it.
+type Counter* = struct(n: Int)
+
+fn read*(c: Counter) -> Int:
+    c.n
+
+fn make*() -> Counter:
+    Counter(7)

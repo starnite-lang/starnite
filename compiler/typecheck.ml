@@ -136,6 +136,27 @@ let method_fns tb self m =
     (fun u -> (sg u).smodule = tb.cur || (sg u).smodule = "core" || ((sg u).smodule = home && (sg u).sexport))
     (try Hashtbl.find tb.by_name m with Not_found -> [])
 
+(* Of the functions a method call can mean, those of the module that defines the type of the
+   receiver come first (section 4.7); only when none of them fits does the call find those of the
+   calling module and of the prelude. *)
+let prefer_owner tb self us =
+  let home = module_of_type tb self in
+  match List.filter (fun u -> (Hashtbl.find tb.fns u).smodule = home) us with [] -> us | owners -> owners
+
+(* The modules that define the types a type is made of (section 3.4): the module of a type
+   declared in a program, and what the built-in constructors (Array, Option, tuples, functions) are
+   applied to. *)
+let rec type_modules tb t : string list =
+  match repr t with
+  | TNamed (n, args) ->
+      (match Hashtbl.find_opt tb.decls n with Some d -> [ d.dmodule ] | None -> []) @ List.concat_map (type_modules tb) args
+  | TAny (n, args) ->
+      (match Hashtbl.find_opt tb.traits n with Some tr -> [ tr.trmodule ] | None -> []) @ List.concat_map (type_modules tb) args
+  | TArray t -> type_modules tb t
+  | TTuple ts | TErr ts -> List.concat_map (type_modules tb) ts
+  | TFn f -> List.concat_map (type_modules tb) (List.map snd f.fps @ [ f.fret ])
+  | _ -> []
+
 (* The default of a parameter or a field is written in the module that declares it, and its
    names mean what they mean there. *)
 let default_modules : (Syntax.expr * string) list ref = ref []
@@ -1283,9 +1304,15 @@ and args_check c l (st : args_state) (slots : int list) : targ list =
         | None -> (
             match d with
             | Some d ->
-                (* the default is written in the module that declares the parameter *)
+                (* A default is written in the module that declares the parameter, and its names
+                   are that module's: the variables of the caller are not in scope in it, so a
+                   caller's `let RATE = 99` does not change a default `by: Int = RATE`. It is
+                   still evaluated here, at the call, and its effects are the call's. *)
                 let dm = try List.assq d !default_modules with Not_found -> c.tb.cur in
-                { amode = m; a = in_module c.tb dm (fun () -> check c d t) }
+                let caller = c.frames in
+                c.frames <- [ { vars = []; lam = None } ];
+                let te = Fun.protect ~finally:(fun () -> c.frames <- caller) (fun () -> in_module c.tb dm (fun () -> check c d t)) in
+                { amode = m; a = te }
             | None -> assert false))
   in
   let rec go = function [] -> [] | i :: rest -> (let ta = slot i in ta :: go rest) in
@@ -1615,9 +1642,9 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
   | Name tn when lookup c tn = None && (found_opt (find_decl c.tb tn) <> None || List.mem_assoc tn prim_names) ->
       let self_ty = match found_opt (find_decl c.tb tn) with Some (tk, _) -> TNamed (tk, []) | None -> List.assoc tn prim_names in
       let cands = method_fns c.tb self_ty m in
-      let ok = List.filter (fun u ->
+      let ok = prefer_owner c.tb self_ty (List.filter (fun u ->
           let sg = Hashtbl.find c.tb.fns u in
-          sg.smodule <> "" && (match sg.sparams with (_, _, t, _) :: _ -> head t = head self_ty | [] -> true)) cands in
+          sg.smodule <> "" && (match sg.sparams with (_, _, t, _) :: _ -> head t = head self_ty | [] -> true)) cands) in
       (match ok with
        | [] -> err "E0101" l "no function %s for type %s" m tn
        | u :: _ -> call_sig c l u ~receiver:None args exp)
@@ -1627,22 +1654,24 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
       let self = repr tb.ty in
       let h = head self in
       let fn_cands =
-        List.filter
-          (fun u ->
-            let sg = Hashtbl.find c.tb.fns u in
-            match sg.sparams with
-            | (_, _, t, _) :: _ -> head t = h && h <> "_param"
-            | [] -> false)
-          (method_fns c.tb self m)
+        prefer_owner c.tb self
+          (List.filter
+             (fun u ->
+               let sg = Hashtbl.find c.tb.fns u in
+               match sg.sparams with
+               | (_, _, t, _) :: _ -> head t = h && h <> "_param"
+               | [] -> false)
+             (method_fns c.tb self m))
       in
       let generic_cands =
-        List.filter
-          (fun u ->
-            let sg = Hashtbl.find c.tb.fns u in
-            match sg.sparams with
-            | (_, _, t, _) :: _ -> (match repr t with TParam _ -> true | _ -> false)
-            | [] -> false)
-          (method_fns c.tb self m)
+        prefer_owner c.tb self
+          (List.filter
+             (fun u ->
+               let sg = Hashtbl.find c.tb.fns u in
+               match sg.sparams with
+               | (_, _, t, _) :: _ -> (match repr t with TParam _ -> true | _ -> false)
+               | [] -> false)
+             (method_fns c.tb self m))
       in
       let trait_cands =
         Hashtbl.fold
@@ -2584,6 +2613,12 @@ let declare_items tb modname (items : item list) =
                  "%s cannot be implemented for %s: a call on a trait value uses only the methods of its own trait; add the method to that trait, or write a function that takes %s"
                  trn (show_ty fty) (show_ty fty)
            | _ -> ());
+          (* an impl is in the module that defines the trait or the module that defines the type
+             (section 3.4), so that two modules cannot give one type and trait two meanings *)
+          if info.trmodule <> modname && not (List.mem modname (type_modules tb fty)) then
+            err "E0101" im.iloc
+              "this impl of %s for %s is in module %s, which defines neither: an impl must be in the module that defines the trait (%s) or the one that defines the type"
+              trn (show_ty fty) modname info.trmodule;
           let tps = tparams_of tb im.igenerics (Some fty) in
           let targs = List.map (conv_ty tb tps0 (Some fty)) im.itargs in
           let targs = if targs = [] then List.map (fun _ -> fty) info.trparams else targs in
