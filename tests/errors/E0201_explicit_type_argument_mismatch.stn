@@ -1,0 +1,8 @@
+# expect: E0201 8:26
+fn first[T](xs: Array[T]) -> T?:
+    if len(xs) == 0:
+        None
+    else:
+        Some(xs[0])
+fn main():
+    print(f"{first[Str]([1, 2])}")

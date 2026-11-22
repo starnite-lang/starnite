@@ -1444,16 +1444,23 @@ and check_args c l ~tenv ~(receiver : texpr option) params (args : Syntax.arg li
   let st = { a_tenv = tenv; a_receiver = receiver; a_params = params; a_args = args; a_matched = None } in
   args_finish c l st (args_check c l st (List.init (List.length params) Fun.id))
 
-and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
+and call_sig c l (u : string) ~receiver ?(explicit = []) (args : Syntax.arg list) exp : texpr =
   let sg = Hashtbl.find c.tb.fns u in
   (* the budget of retries belongs to one outermost call and the calls nested in it *)
   if !speculating = 0 then c.retries := retry_budget;
   let s, ps, ret, eff = instantiate sg in
+  (* explicit type arguments, `first[Int](xs)` (section 5.1), are the first of the function's own *)
+  if explicit <> [] then begin
+    if sg.stparams = [] then err "E0102" l "type arguments after '%s', which is not generic" sg.sdisplay;
+    if List.length explicit > List.length s then
+      err "E0203" l "%s takes %d type argument(s), found %d" sg.sdisplay (List.length s) (List.length explicit);
+    List.iteri (fun i t -> unify_at l (snd (List.nth s i)) t) explicit
+  end;
   (* what the call makes of a type parameter is found from its arguments, or from the context of the call
      (section 5.2); a parameter that nothing settles is for the caller to write *)
   List.iter
     (fun (p, v) ->
-      c.unsolved <- (v, l, Printf.sprintf "the type parameter %s of %s is never settled by this call; give the value it returns a type with an annotation" p sg.sdisplay) :: c.unsolved)
+      c.unsolved <- (v, l, Printf.sprintf "the type parameter %s of %s is never settled by this call; write the type arguments, as in %s[Int](...), or give the value it returns a type" p sg.sdisplay sg.sdisplay) :: c.unsolved)
     s;
   let st = { a_tenv = s; a_receiver = receiver; a_params = ps; a_args = args; a_matched = None } in
   let n = List.length ps in
@@ -1638,6 +1645,46 @@ and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
       in
       let u = pick_overload c l n cands first in
       call_sig c l u ~receiver:None args exp
+  | Bracket (b, bargs) when (match (norm_qual c b).d with Name n -> lookup c n = None && lookup_fns c n <> [] | _ -> false) ->
+      (* a generic function with its type arguments written: first[Int](xs) *)
+      let n = match (norm_qual c b).d with Name n -> n | _ -> assert false in
+      let tys = List.map (explicit_type_arg c) bargs in
+      let cands = lookup_fns c n in
+      let cands =
+        match List.filter (fun u -> List.length (Hashtbl.find c.tb.fns u).stparams >= List.length tys) cands with [] -> cands | fit -> fit
+      in
+      let first =
+        if List.length cands > 1 then (match args with a :: _ -> Some (infer c a.aexpr) | [] -> None) else None
+      in
+      let u = pick_overload c l n cands first in
+      call_sig c l u ~receiver:None ~explicit:tys args exp
+  | Bracket (b, bargs)
+    when (match (norm_qual c b).d with
+          | Name n -> lookup c n = None && found_opt (find_decl c.tb n) <> None
+          | _ -> false) ->
+      (* a generic type with its type arguments written: Box[Int](5), Cons[Int](1, Nil) *)
+      let n = match (norm_qual c b).d with Name n -> n | _ -> assert false in
+      let tys = List.map (explicit_type_arg c) bargs in
+      let k, _ = Option.get (found_opt (find_decl c.tb n)) in
+      let d = Hashtbl.find c.tb.decls k in
+      if d.dparams = [] then err "E0102" l "type arguments after '%s', which is not generic" n;
+      if List.length tys > List.length d.dparams then
+        err "E0203" l "%s takes %d type argument(s), found %d" n (List.length d.dparams) (List.length tys);
+      (* the type the value will have, as the expected type that the construction starts from *)
+      let padded = tys @ List.init (List.length d.dparams - List.length tys) (fun _ -> fresh ()) in
+      construct_struct c l k args (Some (TNamed (k, padded)))
+  | Bracket (b, bargs)
+    when (match (norm_qual c b).d with
+          | Name n -> lookup c n = None && found_opt (find_variant c.tb n) <> None
+          | _ -> false) ->
+      let n = match (norm_qual c b).d with Name n -> n | _ -> assert false in
+      let tys = List.map (explicit_type_arg c) bargs in
+      let _, (tn, idx) = Option.get (found_opt (find_variant c.tb n)) in
+      let d = Hashtbl.find c.tb.decls tn in
+      if List.length tys > List.length d.dparams then
+        err "E0203" l "%s takes %d type argument(s), found %d" n (List.length d.dparams) (List.length tys);
+      let padded = tys @ List.init (List.length d.dparams - List.length tys) (fun _ -> fresh ()) in
+      construct_variant c l tn idx n args (Some (TNamed (tn, padded)))
   | Field (b, m) -> infer_method c l b m args exp
   | _ ->
       (* call of a function value *)
@@ -1650,6 +1697,13 @@ and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
            mk (XCall (CClosure tf, targs, convs)) ft.fret l
        | TVar _ -> err "E0201" l "the type of this function value must be known; add an annotation"
        | t -> err "E0201" l "%s is not a function" (show_ty t))
+
+(* a type argument written in brackets: a type, or a name that the parser could not tell from an expression *)
+and explicit_type_arg c (a : Syntax.barg) : ty =
+  match a with
+  | BType t -> conv_ty c.tb c.tnames c.self_ty t
+  | BExpr { d = Name n; loc } -> conv_ty c.tb c.tnames c.self_ty (TyPath ([ n ], [], loc))
+  | BExpr e -> err "E0201" e.loc "a type argument is a type"
 
 and construct_struct c l n args exp : texpr =
   let d = Hashtbl.find c.tb.decls n in
@@ -1920,7 +1974,8 @@ and infer_bracket c l (b : Syntax.expr) (args : Syntax.barg list) exp : texpr =
        | t -> err "E0201" l "%s cannot be sliced" (show_ty t))
   | [ BExpr i ] -> (
       match (norm_qual c b).d with
-      | Name n when lookup c n = None && lookup_fns c n <> [] -> err "E0102" l "explicit type arguments arrive later; '%s' infers them" n
+      | Name n when lookup c n = None && lookup_fns c n <> [] ->
+          err "E0102" l "the type arguments of '%s' belong to a call, as in %s[Int](...)" n n
       | _ ->
           let tb = infer c b in
           match repr tb.ty with

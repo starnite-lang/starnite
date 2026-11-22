@@ -1,0 +1,6 @@
+# expect: E0204 6:11
+fn label[T: Show](x: T) -> Str:
+    f"[{x}]"
+type Plain = struct(k: Int)
+fn main():
+    print(label[Plain](Plain(1)))
