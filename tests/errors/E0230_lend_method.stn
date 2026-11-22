@@ -1,0 +1,6 @@
+# expect: E0230 2:9
+fn f(x: any Index[Int, Int]) -> Int:
+    0
+
+fn main():
+    print("x")

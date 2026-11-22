@@ -1,0 +1,17 @@
+# expect: E0204 17:14
+type Oops = Bad(n: Int)
+
+trait Make[F]:
+    fn make(m: Self) -> F
+
+type Maker = struct(n: Int)
+
+impl Make[fn(Int) -> Int ! Oops] for Maker:
+    fn make(m: Maker) -> fn(Int) -> Int ! Oops:
+        fn(x: Int): fail(Bad(x))
+
+fn pure_use[T: Make[fn(Int) -> Int ! pure]](x: T) -> Int:
+    x.make()(1)
+
+fn main():
+    print(f"{pure_use(Maker(1))}")

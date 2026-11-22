@@ -1,0 +1,28 @@
+# A trait method whose result type holds the trait value again, and a trait value passed
+# to a generic function bounded by the same trait.
+trait Tree:
+    fn wrap(t: Self) -> Wrapped
+    fn depth(t: Self) -> Int
+
+type Wrapped = struct(inner: any Tree, n: Int)
+type Leaf = struct(v: Int)
+
+impl Tree for Leaf:
+    fn wrap(t: Leaf) -> Wrapped:
+        Wrapped(Leaf(t.v + 1), t.v)
+    fn depth(t: Leaf) -> Int:
+        t.v
+
+fn again[T: Tree](x: T) -> any Tree:
+    x
+
+fn main():
+    let t: any Tree = Leaf(1)
+    let w = t.wrap()
+    print(f"{w.n} {w.inner.depth()}")
+    let w2 = w.inner.wrap()
+    print(f"{w2.n} {w2.inner.depth()}")
+    # the argument is a trait value already: it is not boxed a second time
+    let same = again(t)
+    print(f"{same.depth()} {again(Leaf(7)).depth()}")
+    print(f"{again(same).wrap().n}")

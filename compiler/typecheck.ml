@@ -21,6 +21,9 @@ type tables = {
   mutable lambdas : lambda list;
   mutable final_pass : bool;
   mutable decl_errors : (string * loc * string) list;
+  mutable any_uses : (string * int * loc) list;         (* every `any Trait` written before the traits were known *)
+  mutable traits_ready : bool;                          (* traits are complete: validate `any` uses on the spot *)
+  mutable impl_contracts : (string * ty list * bool * loc * string * string) list;   (* impl fn, errors and io its trait method allows, where, name, trait *)
 }
 
 let builtin_prefix = "builtin:"
@@ -46,6 +49,45 @@ let rec head t =
   | TVar _ -> "_"
   | TNever -> "_"
   | TErr _ -> "_err"
+  | TAny (n, _) -> "any " ^ n   (* a function for one trait value is not one for another *)
+
+(* A trait can be used with any only if every method takes Self as its first parameter,
+   has no type parameters of its own, and does not return Self (section 3.4). Methods
+   that take Self by mut or take are refused too: the box is shared, and a method table
+   cannot hand out a lent place. Checked where `any Trait` is written, once the traits
+   are known: [tb.traits_ready] says whether that is now. *)
+let validate_any_use tb ((tn, argc, l) : string * int * loc) =
+  let rec mentions_self t =
+    match repr t with
+    | TParam "Self" -> true
+    | TArray t -> mentions_self t
+    | TTuple ts | TNamed (_, ts) | TErr ts | TAny (_, ts) -> List.exists mentions_self ts
+    | TFn f -> List.exists (fun (_, t) -> mentions_self t) f.fps || mentions_self f.fret || List.exists mentions_self f.feff.errs
+    | _ -> false
+  in
+  match Hashtbl.find_opt tb.traits tn with
+  | None -> err "E0101" l "unknown trait '%s'" tn
+  | Some tr ->
+      if argc <> List.length tr.trparams then
+        err "E0201" l "trait %s takes %d type argument(s), found %d" tn (List.length tr.trparams) argc;
+      let bad fmt = Printf.ksprintf (fun m -> err "E0230" l "%s cannot be used with any: %s" tn m) fmt in
+      List.iter
+        (fun (m, (sg : fsig)) ->
+          (match sg.sparams with
+           | (md, _, t, _) :: rest ->
+               if (match repr t with TParam "Self" -> false | _ -> true) then bad "method %s must take Self as its first parameter" m;
+               if md <> MBorrow then bad "method %s takes Self by %s" m (if md = MMut then "mut" else "take");
+               if List.exists (fun (_, _, t, _) -> mentions_self t) rest then bad "method %s mentions Self in another parameter" m
+           | [] -> bad "method %s takes no Self parameter" m);
+          if mentions_self sg.sret then bad "method %s returns Self" m;
+          if List.exists mentions_self sg.seff.errs then bad "method %s fails with Self, which would expose the hidden type" m;
+          if sg.slend <> None then bad "method %s lends a place, which a method table cannot hand out" m;
+          if List.length sg.stparams > List.length tr.trparams then bad "method %s has type parameters of its own" m)
+        tr.trmethods_
+
+let validate_any_uses tb =
+  List.iter (validate_any_use tb) (List.rev tb.any_uses);
+  tb.traits_ready <- true
 
 (* ---------- syntax types to types ---------- *)
 
@@ -71,7 +113,10 @@ let rec conv_ty tb (tps : string list) (self : ty option) (t : Syntax.ty) : ty =
                  | _ -> TNamed (n, args))
             | None -> err "E0101" l "unknown type '%s'" n)
   | TyPath (p, _, l) -> err "E0101" l "unknown type '%s' (modules arrive with imports)" (String.concat "." p)
-  | TyAny (n, _, l) -> err "E0230" l "trait values (any %s) are not implemented yet" n
+  | TyAny (n, args, l) ->
+      let use_ = (n, List.length args, l) in
+      if tb.traits_ready then validate_any_use tb use_ else tb.any_uses <- use_ :: tb.any_uses;
+      TAny (n, List.map (conv_ty tb tps self) args)
   | TyFn (ps, ret, effs, _) ->
       let fps = List.map (fun (m, t) -> (m, conv_ty tb tps self t)) ps in
       let fret = match ret with Some r -> conv_ty tb tps self r | None -> TUnit in
@@ -104,14 +149,14 @@ let rec match_ty (ps : string list) (s : (string * ty) list ref) pat t =
   match (repr pat, repr t) with
   | TParam n, t when List.mem n ps -> (
       match List.assoc_opt n !s with
-      | Some b -> ty_equal b t || (match repr b, t with _ -> false)
+      | Some b -> ty_equal_eff b t
       | None -> s := (n, t) :: !s; true)
   | TArray a, TArray b -> match_ty ps s a b
-  | TTuple xs, TTuple ys | TNamed (_, xs), TNamed (_, ys) ->
+  | TTuple xs, TTuple ys | TNamed (_, xs), TNamed (_, ys) | TAny (_, xs), TAny (_, ys) ->
       (match (repr pat, repr t) with
-       | TNamed (n, _), TNamed (m, _) when n <> m -> false
+       | TNamed (n, _), TNamed (m, _) | TAny (n, _), TAny (m, _) when n <> m -> false
        | _ -> List.length xs = List.length ys && List.for_all2 (match_ty ps s) xs ys)
-  | a, b -> ty_equal a b
+  | a, b -> ty_equal_eff a b
 
 type resolution =
   | RImpl of string * ty list        (* global fn, its type arguments *)
@@ -127,13 +172,31 @@ let prim_traits t =
   | TDur | TBytes -> [ "Eq"; "Ord"; "Show"; "Add"; "Sub"; "Copy" ]
   | _ -> []
 
-let rec find_impl tb ?(bounds = []) trait (targs : ty list) self : resolution option =
+(* trait arguments agree, an unresolved variable agreeing with anything *)
+let args_compat (xs : ty list) (ys : ty list) =
+  List.length xs = List.length ys
+  && List.for_all2
+       (fun a b -> match (repr a, repr b) with TVar _, _ | _, TVar _ -> true | _ -> ty_equal_eff a b)
+       xs ys
+
+(* what trait resolution reads: the impls and the type declarations. The backends have the
+   same two in the typed program, so they select an impl exactly as the checker did. *)
+type rtab = { rimpls : impl_info list; rdecls : (string, tdecl) Hashtbl.t }
+
+let rtab_of (tb : tables) = { rimpls = tb.impls; rdecls = tb.decls }
+
+let rtab_of_prog (p : tprog) = { rimpls = p.impls; rdecls = p.decls }
+
+let rec find_impl (tb : rtab) ?(bounds = []) trait (targs : ty list) self : resolution option =
   let self = repr self in
   match self with
+  | TAny (n, anyargs) ->
+      (* any T implements T, through its table, with the same trait arguments *)
+      if n = trait && args_compat targs anyargs then Some RPrim else None
   | TParam p -> (
       (* a bound of the enclosing generic function *)
       match List.assoc_opt p bounds with
-      | Some bs when List.exists (fun (tr, _) -> tr = trait) bs -> Some RPrim
+      | Some bs when List.exists (fun (tr, bta) -> tr = trait && args_compat targs bta) bs -> Some RPrim
       | _ -> None)
   | _ ->
       if List.mem trait (prim_traits self) then begin
@@ -165,7 +228,7 @@ let rec find_impl tb ?(bounds = []) trait (targs : ty list) self : resolution op
                   in
                   if ok then Some (im, !s) else None
                 else None)
-            tb.impls
+            tb.rimpls
         in
         match cands with
         | (im, s) :: _ ->
@@ -181,7 +244,7 @@ and derive tb ~bounds trait self =
     | TArray t -> f t
     | TTuple ts -> List.for_all f ts
     | TNamed (n, args) -> (
-        match Hashtbl.find_opt tb.decls n with
+        match Hashtbl.find_opt tb.rdecls n with
         | Some d -> (
             let s = List.combine d.dparams args in
             match d.dbody with
@@ -215,9 +278,13 @@ and derive tb ~bounds trait self =
   | _ -> None
 
 (* The global function implementing [meth] of [trait] for [self]. *)
-let rec impl_method tb trait targs meth self = impl_method_in tb.impls trait targs meth self
+let rec impl_method (tb : tables) ?(bounds = []) trait targs meth self = impl_method_in (rtab_of tb) ~bounds trait targs meth self
 
-and impl_method_in impls trait (targs : ty list) meth self : (string * ty list) option =
+(* The function that implements [meth] of [trait] for [self]: the first impl whose type fits
+   and whose bounds hold, as [find_impl] chooses it. Checking the bounds here too matters
+   when impls overlap: an earlier one whose bound fails must not be taken over a later one
+   that fits. *)
+and impl_method_in (rt : rtab) ?(bounds = []) trait (targs : ty list) meth self : (string * ty list) option =
   let self = repr self in
   let cands =
     List.filter_map
@@ -229,12 +296,18 @@ and impl_method_in impls trait (targs : ty list) meth self : (string * ty list) 
           if match_ty ps s im.ifor_ self
              && List.length targs = List.length im.itargs_
              && List.for_all2 (fun p a -> match_ty ps s p a) im.itargs_ targs
+             && List.for_all
+                  (fun (p, bs) ->
+                    match List.assoc_opt p !s with
+                    | None -> true
+                    | Some t -> List.for_all (fun (tr, ta) -> find_impl rt ~bounds tr (List.map (subst !s) ta) t <> None) bs)
+                  im.itparams
           then
             match List.assoc_opt meth im.imethods_ with
             | Some f -> Some (f, List.map (fun (p, _) -> try List.assoc p !s with Not_found -> TUnit) im.itparams)
             | None -> None
           else None)
-      impls
+      rt.rimpls
   in
   match cands with c :: _ -> Some c | [] -> None
 
@@ -355,7 +428,7 @@ let propagate c l (es : ty list) : conv list =
             else begin
               let fits =
                 List.filter_map
-                  (fun d -> match impl_method c.tb "From" [ e ] "from" d with Some (f, _) -> Some (d, f) | None -> None)
+                  (fun d -> match impl_method c.tb ~bounds:c.tparams "From" [ e ] "from" d with Some (f, _) -> Some (d, f) | None -> None)
                   decl
               in
               match fits with
@@ -450,7 +523,7 @@ let sub_exprs (e : texpr) : texpr list =
   | XLit _ | XNone | XVar _ | XFnRef _ | XLambda _ -> []
   | XFStr es | XTuple es | XArray es | XStruct (_, _, es) | XVariant (_, _, _, es) -> es
   | XCall (cl, args, _) -> (match cl with CClosure f -> [ f ] | _ -> []) @ List.map (fun a -> a.a) args
-  | XField (b, _, _) | XTupleGet (b, _) | XNeg b | XNot b | XTry b | XConv b | XFail b -> [ b ]
+  | XField (b, _, _) | XTupleGet (b, _) | XNeg b | XNot b | XTry b | XConv b | XFail b | XPack b -> [ b ]
   | XIndex (a, b) | XBin (_, a, b) -> [ a; b ]
   | XSlice (a, b, c) | XIf (a, b, c) -> [ a; b; c ]
   | XBlock (_, v) -> [ v ]
@@ -570,15 +643,30 @@ and check c (e : Syntax.expr) (expected : ty) : texpr =
   let te = check_or_infer c e (Some expected) in
   coerce c te expected
 
-(* Unify, applying the T -> T? coercion of section 5.3. *)
+(* Unify, applying the T -> T? coercion of section 5.3, and boxing into any Trait
+   where the expected type is a trait value (section 3.4). *)
 and coerce c (te : texpr) expected : texpr =
   match (repr expected, repr te.ty) with
   | _, TNever -> { te with ty = expected }
+  | TAny (tr, ta), found when (match found with TAny _ | TVar _ -> false | _ -> true) ->
+      (* a type parameter is checked through its bounds; any other type needs an impl
+         written in the program, since built-in implementations have no method table *)
+      let ok =
+        match repr found with
+        | TParam _ -> find_impl (rtab_of c.tb) ~bounds:c.tparams tr ta found <> None
+        | _ -> (
+            match find_impl (rtab_of c.tb) ~bounds:c.tparams tr ta found with
+            | Some (RImpl _) -> true
+            | Some _ -> tr = "Show"   (* the table of a built-in Show is made from the runtime's own formatting *)
+            | None -> false)
+      in
+      if not ok then err "E0204" te.l "%s has no impl of %s written in the program, so it cannot be used as %s" (show_ty found) tr (show_ty expected);
+      mk (XPack te) expected te.l
   | TNamed ("Option", [ inner ]), found
     when (match found with TNamed ("Option", _) | TVar _ -> false | _ -> true) ->
       (try unify expected found; te
        with Mismatch ->
-         unify_at te.l inner te.ty;
+         let te = coerce c te inner in
          mk (XVariant ("Option", [ inner ], 1, [ te ])) expected te.l)
   | _ ->
       unify_at te.l expected te.ty;
@@ -614,6 +702,10 @@ and eff_check ?(invariant = false) l (expected : ty) (found : ty) =
   | TArray a, TArray b -> eff_check ~invariant l a b
   | TTuple xs, TTuple ys | TNamed (_, xs), TNamed (_, ys) | TErr xs, TErr ys ->
       if List.length xs = List.length ys then List.iter2 (eff_check ~invariant l) xs ys
+  | TAny (_, xs), TAny (_, ys) ->
+      (* a trait argument can stand in any position of the trait's methods, so the
+         effects of a function in it must be exactly the expected ones *)
+      if List.length xs = List.length ys then List.iter2 (eff_check ~invariant:true l) xs ys
   | _ -> ()
 
 and check_or_infer c (e : Syntax.expr) (expected : ty option) : texpr =
@@ -702,7 +794,7 @@ and show_expr c (te : texpr) : texpr =
   match repr te.ty with
   | TStr -> te
   | t ->
-      if find_impl c.tb ~bounds:c.tparams "Show" [] t = None && (match t with TVar _ -> false | _ -> true) then
+      if find_impl (rtab_of c.tb) ~bounds:c.tparams "Show" [] t = None && (match t with TVar _ -> false | _ -> true) then
         err "E0204" te.l "%s does not implement Show" (show_ty t);
       if (match t with TVar _ -> true | _ -> false) then c.obligations <- (t, "Show", [], te.l) :: c.obligations;
       mk (XCall (CTrait ("Show", [], "show", te.ty), [ { amode = MBorrow; a = te } ], [])) TStr te.l
@@ -837,7 +929,8 @@ and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : 
   let params_rest, recv_targ =
     match (receiver, params) with
     | Some r, (m, _, t, _) :: rest ->
-        let r = coerce c r t in
+        (* a mut argument is the place itself: boxing it would write to a copy *)
+        let r = if m = MMut then (unify_at r.l t r.ty; r) else coerce c r t in
         (rest, [ { amode = m; a = r } ])
     | Some _, [] -> err "E0203" l "this function takes no arguments"
     | None, _ -> (params, [])
@@ -855,7 +948,10 @@ and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : 
              | MMut, _ -> err "E0304" a.aloc "parameter '%s' is mut; write 'mut' at the call site" n
              | _, Some MMut -> err "E0304" a.aloc "parameter '%s' is not mut" n
              | _ -> ());
-            let te = check c a.aexpr t in
+            let te =
+              if m = MMut then (let te = check_or_infer c a.aexpr (Some t) in unify_at te.l t te.ty; te)
+              else check c a.aexpr t
+            in
             if m = MTake && lend_of c.tb te <> None then
               err "E0320" a.aloc "a lent place cannot be stored; copy it with let first";
             if m = MMut then eff_check ~invariant:true a.aloc t te.ty;
@@ -978,7 +1074,7 @@ and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
           let te =
             match c.declared with
             | Some decl when c.in_try = 0 && not (mem_ty te.ty decl) -> (
-                match List.filter_map (fun d -> match impl_method c.tb "From" [ te.ty ] "from" d with Some (fn, ta) -> Some (d, fn, ta) | None -> None) decl with
+                match List.filter_map (fun d -> match impl_method c.tb ~bounds:c.tparams "From" [ te.ty ] "from" d with Some (fn, ta) -> Some (d, fn, ta) | None -> None) decl with
                 | [ (d, fn, ta) ] -> mk (XCall (CFn (fn, ta), [ { amode = MBorrow; a = te } ], [])) d te.l
                 | _ -> te)
             | _ -> te
@@ -1120,6 +1216,7 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
                       match List.assoc_opt p c.tparams with
                       | Some bs -> List.exists (fun (t, _) -> t = tn) bs
                       | None -> false)
+                  | TAny (n, _) -> n = tn
                   | _ ->
                       List.exists (fun im -> im.itrait_ = tn && (let s = ref [] in match_ty (List.map fst im.itparams) s im.ifor_ self)) c.tb.impls
                       || (List.mem tn (prim_traits self))
@@ -1164,6 +1261,7 @@ and trait_call c l tn trargs m (sg : fsig) self (receiver : texpr option) args e
        | Some bs -> (match List.assoc_opt tn bs with Some bta -> List.iter2 (fun a b -> unify_at l a b) ta bta | None -> ())
        | None -> ())
    | TVar _ -> ()
+   | TAny (_, anyargs) -> List.iter2 (fun a b -> unify_at l a b) ta anyargs
    | t -> (
        let fits =
          List.filter_map
@@ -1179,9 +1277,10 @@ and trait_call c l tn trargs m (sg : fsig) self (receiver : texpr option) args e
            let sb = List.map (fun (p, _) -> (p, try List.assoc p sb with Not_found -> fresh ())) im.itparams in
            List.iter2 (fun a b -> try unify a (subst sb b) with Mismatch -> ()) ta im.itargs_
        | _ -> ()));
-  let targs, _ = check_args c l ~receiver ps args in
+  let targs, poly = check_args c l ~receiver ps args in
   c.obligations <- (self, tn, ta, l) :: c.obligations;
-  let convs = add_eff c l { sg.seff with errs = List.map (subst s) sg.seff.errs } in
+  (* the method's own effects, and those of any function argument whose effects are open *)
+  let convs = add_eff c l { sg.seff with errs = List.map (subst s) sg.seff.errs } @ List.concat_map (add_eff c l) poly in
   mk (XCall (CTrait (tn, ta, m, self), targs, convs)) ret l
 
 and infer_bracket c l (b : Syntax.expr) (args : Syntax.barg list) exp : texpr =
@@ -1768,6 +1867,7 @@ let rec zonk_e (te : texpr) : texpr =
     | XNot a -> XNot (z a)
     | XTry a -> XTry (z a)
     | XConv a -> XConv (z a)
+    | XPack a -> XPack (z a)
     | XFail a -> XFail (z a)
     | XComp (b, cs) -> XComp (z b, List.map (fun cp -> { cvar = zonk_p cp.cvar; csrc = zonk_it cp.csrc; ccond = Option.map z cp.ccond }) cs)
   in
@@ -1817,7 +1917,7 @@ let rec has_tvar t =
   match repr t with
   | TVar _ -> true
   | TArray t -> has_tvar t
-  | TTuple ts | TNamed (_, ts) | TErr ts -> List.exists has_tvar ts
+  | TTuple ts | TNamed (_, ts) | TErr ts | TAny (_, ts) -> List.exists has_tvar ts
   | TFn f -> List.exists (fun (_, t) -> has_tvar t) f.fps || has_tvar f.fret
   | _ -> false
 
@@ -1930,6 +2030,10 @@ let declare_items tb modname (items : item list) =
   List.iter
     (function
       | ITrait tr ->
+          (* a trait is named by its name alone until modules exist, so two with one name
+             would silently replace each other, a prelude trait included *)
+          if Hashtbl.mem tb.traits tr.trname then
+            err "E0101" tr.trloc "trait '%s' is already defined" tr.trname;
           let ps = List.map (fun g -> g.gname) tr.trgenerics in
           let info = { trname_ = tr.trname; trparams = ps; trmethods_ = [] } in
           Hashtbl.replace tb.traits tr.trname info
@@ -1939,6 +2043,13 @@ let declare_items tb modname (items : item list) =
     (function
       | ITrait tr ->
           let info = Hashtbl.find tb.traits tr.trname in
+          (* a method table has one entry per name, and an impl one function *)
+          let seen = Hashtbl.create 8 in
+          List.iter
+            (fun (fd : Syntax.fn_def) ->
+              if Hashtbl.mem seen fd.fname then err "E0101" fd.floc "method '%s' is declared twice in trait %s" fd.fname tr.trname;
+              Hashtbl.replace seen fd.fname ())
+            tr.trmethods;
           let ms =
             List.map
               (fun (fd : Syntax.fn_def) ->
@@ -1980,20 +2091,106 @@ let declare_items tb modname (items : item list) =
           in
           let tps0 = List.map (fun g -> g.gname) im.igenerics in
           let fty = conv_ty tb tps0 None im.ifor in
+          (* a call on a trait value runs the methods of its own trait, through the method
+             table, and never looks at other impls: an impl for it could not be used *)
+          (match repr fty with
+           | TAny _ ->
+               err "E0230" im.iloc
+                 "%s cannot be implemented for %s: a call on a trait value uses only the methods of its own trait; add the method to that trait, or write a function that takes %s"
+                 trn (show_ty fty) (show_ty fty)
+           | _ -> ());
           let tps = tparams_of tb im.igenerics (Some fty) in
           let targs = List.map (conv_ty tb tps0 (Some fty)) im.itargs in
           let targs = if targs = [] then List.map (fun _ -> fty) info.trparams else targs in
           if List.length targs <> List.length info.trparams then
             err "E0201" im.iloc "trait %s takes %d type argument(s)" trn (List.length info.trparams);
+          (* a second impl of the same trait for the same type would never be used *)
+          if List.exists
+               (fun (o : impl_info) ->
+                 o.itrait_ = trn && ty_equal_eff o.ifor_ fty && List.length o.itargs_ = List.length targs && List.for_all2 ty_equal_eff o.itargs_ targs)
+               tb.impls
+          then err "E0101" im.iloc "trait %s is already implemented for %s" trn (show_ty fty);
+          let seen_m = Hashtbl.create 8 in
           let methods =
             List.map
               (fun (fd : Syntax.fn_def) ->
                 if not (List.mem_assoc fd.fname info.trmethods_) then
                   err "E0101" fd.floc "trait %s has no method '%s'" trn fd.fname;
+                if Hashtbl.mem seen_m fd.fname then
+                  err "E0101" fd.floc "method '%s' is defined twice in this impl of %s" fd.fname trn;
+                Hashtbl.replace seen_m fd.fname ();
                 let uname = unique_name tb modname (trn ^ "_" ^ head fty ^ "_" ^ fd.fname) in
                 let sg = make_sig tb ~modname ~uname fd tps (Some fty) in
                 (* the impl's effects may be fewer than the trait's, never more *)
                 let tsig = List.assoc fd.fname info.trmethods_ in
+                (* The impl's method must have the trait method's signature, with Self and the
+                   trait arguments filled in. A method's own type parameters are renamed to
+                   common names first, so that two spellings of one signature compare equal. *)
+                let own (s : fsig) outer = List.filteri (fun i _ -> i >= outer) (List.map fst s.stparams) in
+                let own_t = own tsig (List.length info.trparams) and own_i = own sg (List.length tps) in
+                if List.length own_t <> List.length own_i then
+                  err "E0201" fd.floc "method '%s' has %d type parameter(s) of its own in trait %s, but the impl has %d" fd.fname
+                    (List.length own_t) trn (List.length own_i);
+                let canon names = List.mapi (fun k n -> (n, TParam (Printf.sprintf "#m%d" k))) names in
+                let ts = ("Self", fty) :: List.combine info.trparams targs @ canon own_t in
+                let impl_t t = subst (canon own_i) t in
+                (* for messages: the trait's own names for its method's type parameters *)
+                let shown t = show_ty (subst (List.mapi (fun k n -> (Printf.sprintf "#m%d" k, TParam n)) own_t) t) in
+                if List.length sg.sparams <> List.length tsig.sparams then
+                  err "E0203" fd.floc "method '%s' takes %d parameter(s) in trait %s, but the impl has %d" fd.fname
+                    (List.length tsig.sparams) trn (List.length sg.sparams);
+                List.iter2
+                  (fun (m1, n1, t1, _) (m2, _, t2, _) ->
+                    let t1 = impl_t t1 and t2 = subst ts t2 in
+                    if m1 <> m2 then
+                      err "E0201" fd.floc "parameter '%s' of '%s' is passed differently in trait %s" n1 fd.fname trn;
+                    if not (ty_equal t1 t2) then
+                      err "E0201" fd.floc "parameter '%s' of '%s' has type %s, but trait %s requires %s" n1 fd.fname (shown t1) trn (shown t2))
+                  sg.sparams tsig.sparams;
+                let want = subst ts tsig.sret and have = impl_t sg.sret in
+                if not (ty_equal have want) then
+                  err "E0201" fd.floc "'%s' returns %s, but trait %s requires %s" fd.fname (shown have) trn (shown want);
+                (* function-typed parameters and results carry effects, which ty_equal does
+                   not see: the impl must accept whatever the trait lets a caller pass,
+                   and return nothing that does more than the trait promises *)
+                (* An open function type (one whose effects are the caller's, section 7.2)
+                   must stay open exactly where the trait's is: it decides how the method
+                   is called, and the method table calls the impl as the trait describes. *)
+                let rec poly_differs (impl_t : ty) (trait_t : ty) =
+                  match (repr impl_t, repr trait_t) with
+                  | TFn fi, TFn ft ->
+                      fi.feff.poly <> ft.feff.poly
+                      || List.exists2 (fun (_, a) (_, b) -> poly_differs a b) fi.fps ft.fps
+                      || poly_differs fi.fret ft.fret
+                  | TArray a, TArray b -> poly_differs a b
+                  | TTuple xs, TTuple ys when List.length xs = List.length ys -> List.exists2 poly_differs xs ys
+                  | _ -> false
+                in
+                List.iter2
+                  (fun (m1, n1, t1, _) (_, _, t2, _) ->
+                    let t1 = impl_t t1 and t2 = subst ts t2 in
+                    if poly_differs t1 t2 then
+                      err "E0503" fd.floc "parameter '%s' of '%s' must leave the effects of its function type open exactly where trait %s does" n1 fd.fname trn;
+                    eff_check ~invariant:(m1 = MMut) fd.floc t1 t2)
+                  sg.sparams tsig.sparams;
+                if poly_differs have want then
+                  err "E0503" fd.floc "the function '%s' returns must leave its effects open exactly where trait %s does" fd.fname trn;
+                eff_check fd.floc want have;
+                if sg.slend <> tsig.slend then
+                  err "E0201" fd.floc "'%s' must %s lend, as in trait %s" fd.fname (if tsig.slend = None then "not" else "also") trn;
+                (* the impl's effects may be fewer than the trait's, never more *)
+                let allowed = List.map (subst (("Self", fty) :: List.combine info.trparams targs)) tsig.seff.errs in
+                (* checked again after inference, for an impl that writes no effects *)
+                tb.impl_contracts <- (uname, allowed, tsig.seff.io, fd.floc, fd.fname, trn) :: tb.impl_contracts;
+                if fd.feffects <> None then begin
+                  List.iter
+                    (fun e ->
+                      if not (mem_ty e allowed) then
+                        err "E0501" fd.floc "'%s' can fail with %s, which trait %s does not allow" fd.fname (show_ty e) trn)
+                    sg.seff.errs;
+                  if sg.seff.io && not tsig.seff.io then
+                    err "E0503" fd.floc "'%s' performs io, which trait %s does not allow" fd.fname trn
+                end;
                 let sg = { sg with seff = (if fd.feffects = None then tsig.seff else sg.seff); sdeclared = true; sdisplay = "" } in
                 Hashtbl.replace tb.fns uname sg;
                 Hashtbl.replace tb.bodies uname (fd, [ ("Self", fty) ]);
@@ -2022,7 +2219,7 @@ let finish_ctx c l =
     (fun (t, tr, ta, l) ->
       let t = zonk t in
       if has_tvar t then ()
-      else if find_impl c.tb ~bounds:c.tparams tr (List.map zonk ta) t = None then
+      else if find_impl (rtab_of c.tb) ~bounds:c.tparams tr (List.map zonk ta) t = None then
         err "E0204" l "%s does not implement %s" (show_ty t) tr)
     c.obligations;
   List.iter (fun (t, l) -> if has_tvar t then err "E0210" l "the element type of this empty literal is never settled; add an annotation") c.unsolved
@@ -2113,7 +2310,7 @@ let check_const tb n =
 let new_tables () =
   { decls = Hashtbl.create 64; variants = Hashtbl.create 64; fns = Hashtbl.create 64; by_name = Hashtbl.create 64;
     bodies = Hashtbl.create 64; traits = Hashtbl.create 16; impls = []; consts = Hashtbl.create 8;
-    typed_consts = Hashtbl.create 8; lambdas = []; final_pass = false; decl_errors = [] }
+    typed_consts = Hashtbl.create 8; lambdas = []; final_pass = false; decl_errors = []; any_uses = []; traits_ready = false; impl_contracts = [] }
 
 (* Check a whole program (the prelude plus one module). Effects of private functions are
    inferred by iterating to a fixpoint (section 7.2). *)
@@ -2122,6 +2319,7 @@ let check_program (prelude : Syntax.file) (user : Syntax.file) : tprog =
   let mods = [ ("core", prelude); (module_name user.path, user) ] in
   List.iter (fun (m, f) -> declare_types tb m f.items) mods;
   List.iter (fun (m, f) -> declare_items tb m f.items) mods;
+  validate_any_uses tb;
   Hashtbl.iter (fun n _ -> check_const tb n) tb.consts;
   let order = List.concat_map (fun (m, f) -> List.concat_map (function
       | IFn fd when fd.fbody <> None -> List.filter (fun u -> (Hashtbl.find tb.fns u).sloc == fd.floc) (Hashtbl.find tb.by_name fd.fname)
@@ -2135,6 +2333,17 @@ let check_program (prelude : Syntax.file) (user : Syntax.file) : tprog =
     if snapshot () <> before && n < 50 then iterate (n + 1)
   in
   iterate 0;
+  (* an impl method, written with or without effects, does no more than its trait method
+     allows: the method table of an any value calls it through the trait's signature *)
+  List.iter
+    (fun (u, allowed, allow_io, l, mn, trn) ->
+      let sg = Hashtbl.find tb.fns u in
+      List.iter
+        (fun e ->
+          if not (mem_ty e allowed) then err "E0501" l "'%s' can fail with %s, which trait %s does not allow" mn (show_ty e) trn)
+        sg.seff.errs;
+      if sg.seff.io && not allow_io then err "E0503" l "'%s' performs io, which trait %s does not allow" mn trn)
+    (List.rev tb.impl_contracts);
   tb.final_pass <- true;
   let fns = Hashtbl.create 64 in
   List.iter (fun u -> Hashtbl.replace fns u (check_fn tb u)) order;

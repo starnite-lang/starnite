@@ -1,0 +1,23 @@
+# Method names that are macros in the C headers the generated code includes. The method
+# table stores them under their own member names, so a call is not macro-expanded.
+trait Probe:
+    fn isnan(x: Self) -> Bool
+    fn signbit(x: Self) -> Int
+    fn isinf(x: Self) -> Bool
+
+type Num = struct(v: Float)
+
+impl Probe for Num:
+    fn isnan(x: Num) -> Bool:
+        x.v != x.v
+    fn signbit(x: Num) -> Int:
+        if x.v < 0.0:
+            1
+        else:
+            0
+    fn isinf(x: Num) -> Bool:
+        false
+
+fn main() ! io:
+    let p: any Probe = Num(-2.0)
+    print(f"{p.isnan()} {p.signbit()} {p.isinf()}")

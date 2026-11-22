@@ -1,0 +1,52 @@
+# Names that used to give two trait values, or two types, the same C name. Foo[Bar, Baz]
+# and Foo_Bar[Baz] shared one method table, so the second dispatched to the first's impl.
+trait Foo[X, Y]:
+    fn f(s: Self) -> Str
+
+trait Foo_Bar[Z]:
+    fn f(s: Self) -> Str
+
+trait Qux[X, Y]:
+    fn g(s: Self, x: X, y: Y) -> Str
+
+trait Qux_Bar[Z]:
+    fn g(s: Self, z: Z) -> Str
+
+type Bar = struct(n: Int)
+type Baz = struct(n: Int)
+type K = struct(n: Int)
+
+impl Foo[Bar, Baz] for K:
+    fn f(s: K) -> Str:
+        "Foo[Bar, Baz]"
+
+impl Foo_Bar[Baz] for K:
+    fn f(s: K) -> Str:
+        "Foo_Bar[Baz]"
+
+impl Qux[Bar, Baz] for K:
+    fn g(s: K, x: Bar, y: Baz) -> Str:
+        f"Qux {x.n} {y.n}"
+
+impl Qux_Bar[Baz] for K:
+    fn g(s: K, z: Baz) -> Str:
+        f"Qux_Bar {z.n}"
+
+type Q = struct(n: Int)
+type R = struct(n: Int)
+type P[X, Y] = struct(a: X, b: Y, c: Int)
+type P_Q[Z] = struct(a: Z)
+
+fn main() ! io:
+    let a: any Foo[Bar, Baz] = K(1)
+    let b: any Foo_Bar[Baz] = K(1)
+    print(a.f())
+    print(b.f())
+    let c: any Qux[Bar, Baz] = K(1)
+    let d: any Qux_Bar[Baz] = K(1)
+    print(c.g(Bar(1), Baz(2)))
+    print(d.g(Baz(3)))
+    # P[Q, R] and P_Q[R] have different layouts
+    let x = P(Q(1), R(2), 3)
+    let y = P_Q(R(7))
+    print(f"{x.c} {y.a.n}")

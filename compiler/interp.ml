@@ -20,6 +20,7 @@ type value =
   | VClosure of lambda * (int * value ref) list * (string * ty) list
   | VFn of string * ty list
   | VErr of ty * value           (* a member of an error union *)
+  | VAny of ty * value           (* a trait value: the hidden type and the value (section 3.4) *)
 
 exception Failed of ty * value
 exception Partial of value list * exn
@@ -130,7 +131,7 @@ let is_boundary s i = i = String.length s || i = 0 || (Char.code s.[i] land 0xC0
 
 (* ---------- traits ---------- *)
 
-let resolve env trait targs meth self = Typecheck.impl_method_in env.prog.impls trait targs meth self
+let resolve env trait targs meth self = Typecheck.impl_method_in (Typecheck.rtab_of_prog env.prog) trait targs meth self
 
 let rec show_value env (t : ty) (v : value) : string =
   let t = tsub env t in
@@ -146,6 +147,7 @@ let rec show_value env (t : ty) (v : value) : string =
   | TBytes, VInt n -> Int64.to_string n ^ "b"
   | TTuple ts, VTuple vs -> "(" ^ String.concat ", " (List.mapi (fun i t -> show_value env t vs.(i)) ts) ^ ")"
   | TErr _, VErr (et, x) -> show_value env et x
+  | TAny _, VAny (hidden, inner) -> show_value env hidden inner
   | _ -> (
       match resolve env "Show" [] "show" t with
       | Some (f, targs) -> as_str (call_fn env f targs [ v ] Syntax.noloc)
@@ -260,6 +262,12 @@ and eval_call env (cl : callee) (targs : targ list) convs loc : value =
       | CTrait (tr, ta, m, self) ->
           let self = tsub env self in
           let ta = List.map (tsub env) ta in
+          (* a call through a trait value runs the method of the hidden type *)
+          let self, vals =
+            match (repr self, vals) with
+            | TAny _, VAny (hidden, inner) :: rest -> (hidden, inner :: rest)
+            | _ -> (self, vals)
+          in
           (match resolve env tr ta m self with
            | Some (f, ftys) ->
                let tf = Hashtbl.find env.prog.fns f in
@@ -485,6 +493,22 @@ and eval env (te : texpr) : value =
           let v = match repr ety with TErr _ -> VErr (t, v) | _ -> v in
           VVariant (1, [| v |]))
   | XConv a -> convert env (tsub env a.ty) (tsub env te.ty) (eval env a) te.l
+  | XPack a -> (
+      (* a generic function instantiated with a trait value gets one already *)
+      match repr (tsub env a.ty) with
+      | TAny _ -> eval env a
+      | at ->
+          (* as in C, only Show has a built-in method table *)
+          (match repr (tsub env te.ty) with
+           | TAny (tr, ta) when tr <> "Show" ->
+               let info = Hashtbl.find env.prog.traits tr in
+               List.iter
+                 (fun (m, _) ->
+                   if resolve env tr (List.map (tsub env) ta) m at = None then
+                     raise (Syntax.Unsupported (Printf.sprintf "%s cannot be used as %s: its implementation of %s is built in and has no method table" (show_ty at) (show_ty (tsub env te.ty)) tr, te.l)))
+                 info.trmethods_
+           | _ -> ());
+          VAny (at, eval env a))
   | XFail a -> (
       let v = eval env a in
       match v with

@@ -1,0 +1,30 @@
+# An impl for a type that contains trait values is an ordinary impl; only an impl for a trait value itself is E0230.
+
+trait Figure:
+    fn area(f: Self) -> Float
+
+trait Describe:
+    fn describe(x: Self) -> Str
+
+type Sq = struct(side: Float)
+
+impl Figure for Sq:
+    fn area(f: Sq) -> Float:
+        f.side * f.side
+
+impl Describe for Array[any Figure]:
+    fn describe(x: Array[any Figure]) -> Str:
+        var t = 0.0
+        for f in x:
+            t += f.area()
+        f"{len(x)} figures, area {t}"
+
+impl Describe for (any Figure, Int):
+    fn describe(x: (any Figure, Int)) -> Str:
+        f"one figure, k={x.1}"
+
+fn main() ! io:
+    let xs: Array[any Figure] = [Sq(1.0), Sq(2.0)]
+    print(xs.describe())
+    let p: (any Figure, Int) = (Sq(3.0), 7)
+    print(p.describe())

@@ -1,0 +1,73 @@
+# an impl with fewer effects than its trait method: one declares ! pure, one fails; a Unit method that fails.
+# `run` is also a function of `any Check`, which must not be taken for the method `run` of `any Job`.
+
+type LimitError = TooBig(n: Int)
+
+impl Show for LimitError:
+    fn show(e: LimitError) -> Str:
+        match e:
+            TooBig(n) -> f"too big {n}"
+
+trait Check:
+    fn check(c: Self, limit: Int) -> Int ! LimitError
+
+type Lax = struct(text: Str)
+type Strict = struct(v: Int)
+
+impl Check for Lax:
+    fn check(c: Lax, limit: Int) -> Int ! pure:
+        len(c.text)
+
+impl Check for Strict:
+    fn check(c: Strict, limit: Int) -> Int ! LimitError:
+        if c.v > limit:
+            fail(TooBig(c.v))
+        c.v
+
+fn run(c: any Check, n: Int) -> Int ! LimitError:
+    c.check(n)
+
+fn part1() ! io:
+    let items: Array[any Check] = [Lax("hello"), Strict(9)]
+    for c in items:
+        match try run(c, 3):
+            Ok(n) -> print(f"ok {n}")
+            Err(e) -> print(f"err {e}")
+
+type Oops = Bad(n: Int)
+
+impl Show for Oops:
+    fn show(e: Oops) -> Str:
+        match e:
+            Bad(n) -> f"bad {n}"
+
+trait Job:
+    fn run(j: Self, n: Int) ! Oops
+    fn name(j: Self) -> Str
+
+type Task = struct(limit: Int)
+type Free = struct(tag: Str)
+
+impl Job for Task:
+    fn run(j: Task, n: Int) ! Oops:
+        if n > j.limit:
+            fail(Bad(n))
+    fn name(j: Task) -> Str:
+        "task"
+
+impl Job for Free:
+    fn run(j: Free, n: Int) ! pure:
+        let ignore = n
+    fn name(j: Free) -> Str:
+        j.tag
+
+fn part2() ! io:
+    let jobs: Array[any Job] = [Task(3), Free("free")]
+    for j in jobs:
+        match try j.run(5):
+            Ok(_) -> print(f"{j.name()} ok")
+            Err(e) -> print(f"{j.name()} {e}")
+
+fn main() ! io:
+    part1()
+    part2()

@@ -1,0 +1,4 @@
+# expect: E0101 3:19
+fn main():
+    let f = fn(x: any Missing): 0
+    print("x")

@@ -1,0 +1,10 @@
+# expect: E0230 6:9
+trait Probe:
+    fn probe(x: Self) -> Int ! Self
+    fn name(x: Self) -> Str
+
+fn f(x: any Probe) -> Str:
+    x.name()
+
+fn main():
+    print("x")

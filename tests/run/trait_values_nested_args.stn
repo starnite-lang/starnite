@@ -1,0 +1,80 @@
+# Trait arguments that are trait values, arrays, tuples and aggregates holding functions with different effects: five impls of one trait for one type, each its own trait value.
+
+type Oops = Bad(n: Int)
+
+impl Show for Oops:
+    fn show(e: Oops) -> Str:
+        match e:
+            Bad(n) -> f"bad {n}"
+
+trait Tag:
+    fn tag(x: Self) -> Str
+
+trait Make[F]:
+    fn make(m: Self) -> F
+    fn id(m: Self) -> Int
+
+type Maker = struct(n: Int)
+type Leaf = struct(v: Int)
+type Holder[F] = struct(f: F, k: Int)
+
+impl Tag for Leaf:
+    fn tag(x: Leaf) -> Str:
+        f"leaf{x.v}"
+
+impl Make[any Tag] for Maker:
+    fn make(m: Maker) -> any Tag:
+        Leaf(m.n)
+    fn id(m: Maker) -> Int:
+        1
+
+impl Make[Array[any Tag]] for Maker:
+    fn make(m: Maker) -> Array[any Tag]:
+        [Leaf(m.n), Leaf(m.n + 1)]
+    fn id(m: Maker) -> Int:
+        2
+
+impl Make[(Int, fn(Int) -> Int ! pure)] for Maker:
+    fn make(m: Maker) -> (Int, fn(Int) -> Int ! pure):
+        let n = m.n
+        (n, fn(x: Int): x + n)
+    fn id(m: Maker) -> Int:
+        3
+
+impl Make[Holder[fn(Int) -> Int ! pure]] for Maker:
+    fn make(m: Maker) -> Holder[fn(Int) -> Int ! pure]:
+        let n = m.n
+        Holder(fn(x: Int): x * n, 7)
+    fn id(m: Maker) -> Int:
+        4
+
+impl Make[Holder[fn(Int) -> Int ! Oops]] for Maker:
+    fn make(m: Maker) -> Holder[fn(Int) -> Int ! Oops]:
+        let n = m.n
+        Holder(fn(x: Int): if x > n: fail(Bad(x)) else: x, 8)
+    fn id(m: Maker) -> Int:
+        5
+
+fn use_failing(m: any Make[Holder[fn(Int) -> Int ! Oops]], x: Int) -> Int ! Oops:
+    let h = m.make()
+    let f = h.f
+    f(x)
+
+fn use_pure(m: any Make[Holder[fn(Int) -> Int ! pure]], x: Int) -> Int:
+    let h = m.make()
+    let f = h.f
+    f(x)
+
+fn main() ! io:
+    let a: any Make[any Tag] = Maker(3)
+    let b: any Make[Array[any Tag]] = Maker(3)
+    let c: any Make[(Int, fn(Int) -> Int ! pure)] = Maker(3)
+    let d: any Make[Holder[fn(Int) -> Int ! pure]] = Maker(3)
+    let e: any Make[Holder[fn(Int) -> Int ! Oops]] = Maker(3)
+    print(f"{a.id()} {b.id()} {c.id()} {d.id()} {e.id()}")
+    print(a.make().tag())
+    let tags = b.make()
+    print(f"{len(tags)} {tags[1].tag()}")
+    let (n, f) = c.make()
+    print(f"{n} {f(10)}")
+    print(f"{use_pure(d, 5)} {(try use_failing(e, 2)).or(-1)} {(try use_failing(e, 9)).or(-1)}")

@@ -1,0 +1,62 @@
+# default and named arguments, Trait.method(x), results of calls, if-expressions, tuples and arrays of trait values
+
+trait Sc:
+    fn scale(s: Self, by: Float = 2.0, off: Float = 0.5) -> Float
+
+type Unit1 = struct(v: Float)
+
+impl Sc for Unit1:
+    fn scale(s: Unit1, by: Float = 2.0, off: Float = 0.5) -> Float:
+        s.v * by + off
+
+fn part1() ! io:
+    let s: any Sc = Unit1(10.0)
+    print(f"{s.scale()} {s.scale(3.0)} {s.scale(by = 1.0, off = 0.0)} {s.scale(off = 1.0)}")
+
+trait Tag:
+    fn tag(x: Self) -> Str
+
+type A1 = struct(n: Int)
+type B1 = struct(n: Int)
+
+impl Tag for A1:
+    fn tag(x: A1) -> Str:
+        f"a{x.n}"
+
+impl Tag for B1:
+    fn tag(x: B1) -> Str:
+        f"b{x.n}"
+
+fn make(n: Int) -> any Tag:
+    if n % 2 == 0:
+        A1(n)
+    else:
+        B1(n)
+
+fn pick(c: Bool, x: any Tag, y: any Tag) -> any Tag:
+    if c:
+        x
+    else:
+        y
+
+fn part2() ! io:
+    let x = make(3)
+    print(Tag.tag(x))
+    print(make(4).tag())
+    print(pick(true, make(1), make(2)).tag())
+    print(pick(false, make(1), make(2)).tag())
+    let m = pick(true, make(7), make(8))
+    print(m.tag())
+    let t = (make(1), make(2))
+    print(f"{t.0.tag()} {t.1.tag()}")
+    var arr: Array[any Tag] = []
+    for i in 0..5:
+        arr.push(make(i))
+    let copy = arr
+    arr.push(make(9))
+    print(f"{len(arr)} {len(copy)}")
+    print(arr[5].tag())
+
+fn main() ! io:
+    part1()
+    part2()

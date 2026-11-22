@@ -1,0 +1,16 @@
+<1,2> 20
+<a,b> 20
+<true,false> 20
+<1.5,2.5> 20
+int 7
+float 2.5
+bool true
+str hi
+array 3
+tuple (4, x)
+one 5
+two
+A 6.0
+B
+10
+exit 0

@@ -1,0 +1,7 @@
+strict too big: 7
+lax hello ok 5
+pair ok 5
+1003
+10.0
+lax xyz
+exit 0

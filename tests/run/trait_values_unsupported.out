@@ -1,0 +1,6 @@
+error: not supported yet: Int cannot be used as any Hash: its implementation of Hash is built in and has no method table
+  --> tests/run/trait_values_unsupported.stn:4:5
+  |
+4 |     x
+  |     ^
+exit 1

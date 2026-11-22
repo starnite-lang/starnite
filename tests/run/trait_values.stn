@@ -1,0 +1,61 @@
+# Trait values (section 3.4): an open set of types behind one trait, chosen at run time.
+trait Figure:
+    fn area(f: Self) -> Float
+    fn name(f: Self) -> Str
+
+type Square = struct(side: Float)
+
+type Tri = struct(base: Float, height: Float)
+
+impl Figure for Square:
+    fn area(f: Square) -> Float:
+        f.side * f.side
+    fn name(f: Square) -> Str:
+        "square"
+
+impl Figure for Tri:
+    fn area(f: Tri) -> Float:
+        0.5 * f.base * f.height
+    fn name(f: Tri) -> Str:
+        "tri"
+
+type Scene = struct(figures: Array[any Figure], label: Str)
+
+fn describe(f: any Figure) -> Str:
+    f"{f.name()} {f.area()}"
+
+fn boxed[T: Figure](x: T) -> any Figure:
+    x
+
+fn total(fs: Array[any Figure]) -> Float:
+    var t = 0.0
+    for f in fs:
+        t += f.area()
+    t
+
+fn main():
+    let figures: Array[any Figure] = [Square(2.0), Tri(4.0, 4.0)]
+    print(f"total {total(figures)}")
+    for f in figures:
+        print(describe(f))
+    # a value is boxed where any Figure is expected
+    print(describe(Square(3.0)))
+    let scene = Scene(figures, "two")
+    var more = scene.figures
+    more.push(Tri(1.0, 2.0))
+    print(f"{scene.label} {len(scene.figures)} {len(more)} {total(more)}")
+    # copies share the box; the original stays usable
+    let copy = figures
+    print(f"{len(copy)} {total(figures)}")
+    let names = [f.name() for f in more]
+    print(f"{names}")
+    # a trait value captured by a closure, and one held in a shared cell
+    var current: any Figure = Square(1.0)
+    let show_current = fn(): current.name()
+    print(show_current())
+    current = Tri(2.0, 3.0)
+    print(show_current())
+    let area_of = fn(f: any Figure): f.area()
+    print(f"{area_of(current)} {area_of(Square(5.0))}")
+    # a generic function boxes its argument through the trait bound
+    print(describe(boxed(Tri(2.0, 2.0))))

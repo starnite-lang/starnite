@@ -1,0 +1,6 @@
+Foo[Bar, Baz]
+Foo_Bar[Baz]
+Qux 1 2
+Qux_Bar 3
+3 7
+exit 0

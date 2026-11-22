@@ -1,0 +1,51 @@
+# mut and take parameters of a trait method, called through a trait value
+
+trait Acc:
+    fn add(a: Self, mut total: Int, by: Int)
+    fn twice(a: Self, mut xs: Array[Int])
+
+type Counter = struct(step: Int)
+
+impl Acc for Counter:
+    fn add(a: Counter, mut total: Int, by: Int):
+        total += a.step * by
+    fn twice(a: Counter, mut xs: Array[Int]):
+        for i in 0..len(xs):
+            xs[i] = xs[i] * 2 + a.step
+
+fn part1() ! io:
+    let a: any Acc = Counter(3)
+    var t = 10
+    a.add(mut t, 2)
+    a.add(mut t, 1)
+    print(f"{t}")
+    var xs = [1, 2, 3]
+    let keep = xs
+    a.twice(mut xs)
+    print(f"{xs} {keep}")
+
+trait Sink:
+    fn put(s: Self, take xs: Array[Int]) -> Int
+    fn label(s: Self, take name: Str) -> Str
+
+type Total = struct(base: Int)
+
+impl Sink for Total:
+    fn put(s: Total, take xs: Array[Int]) -> Int:
+        var t = s.base
+        for x in xs:
+            t += x
+        t
+    fn label(s: Total, take name: Str) -> Str:
+        f"{name}:{s.base}"
+
+fn part2() ! io:
+    let s: any Sink = Total(100)
+    let xs = [1, 2, 3]
+    print(f"{s.put(take xs)}")
+    let n = "tot"
+    print(s.label(take n))
+
+fn main() ! io:
+    part1()
+    part2()

@@ -1,0 +1,10 @@
+# expect: E0230 6:9
+trait Mapper:
+    fn map[T](x: Self, f: fn(Int) -> T) -> Int
+    fn name(x: Self) -> Str
+
+fn f(x: any Mapper) -> Str:
+    x.name()
+
+fn main():
+    print("x")

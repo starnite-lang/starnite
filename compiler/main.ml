@@ -49,11 +49,13 @@ let json_escape s =
 (* Error format of section 19.1. *)
 let report code (l : loc) msg =
   let severity = if code <> "" && code.[0] = 'W' then "warning" else "error" in
+  (* a message without a code: valid code that a backend does not support yet *)
+  let header = if code = "" then severity else Printf.sprintf "%s[%s]" severity code in
   if !json then
     Printf.eprintf "{\"severity\":\"%s\",\"code\":\"%s\",\"message\":\"%s\",\"file\":\"%s\",\"line\":%d,\"col\":%d}\n"
       severity code (json_escape msg) (json_escape l.file) l.line l.col
   else begin
-    Printf.eprintf "%s[%s]: %s\n" severity code msg;
+    Printf.eprintf "%s: %s\n" header msg;
     if l.line > 0 && l.line < max_int then begin
       Printf.eprintf "  --> %s:%d:%d\n" l.file l.line l.col;
       match source_line l.file l.line with
@@ -193,4 +195,5 @@ let () =
     | c -> Printf.eprintf "unknown command '%s'\n%s" c usage; exit 2
   with
   | Error (code, l, msg) -> report code l msg; exit 1
+  | Unsupported (msg, l) -> report "" l ("not supported yet: " ^ msg); exit 1
   | Sys_error m -> Printf.eprintf "error: %s\n" m; exit 1

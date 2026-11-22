@@ -1,0 +1,117 @@
+# counts balance: many boxes in a loop, nested trait values, an owned receiver on the failure path
+
+trait Tag:
+    fn tag(x: Self, n: Int) -> Str
+    fn weight(x: Self) -> Array[Int]
+
+type A1 = struct(s: Str)
+type B1 = struct(xs: Array[Int])
+
+impl Tag for A1:
+    fn tag(x: A1, n: Int) -> Str:
+        f"{x.s}{n}"
+    fn weight(x: A1) -> Array[Int]:
+        [len(x.s)]
+
+impl Tag for B1:
+    fn tag(x: B1, n: Int) -> Str:
+        f"b{len(x.xs)}-{n}"
+    fn weight(x: B1) -> Array[Int]:
+        x.xs
+
+fn make_tag(i: Int) -> any Tag:
+    if i % 2 == 0:
+        A1(f"s{i}")
+    else:
+        B1([i, i + 1, i + 2])
+
+fn part1() ! io:
+    var total = 0
+    var keep: Array[any Tag] = []
+    for i in 0..2000:
+        let t = make_tag(i)
+        total += len(t.tag(i)) + len(t.weight())
+        if i % 100 == 0:
+            keep.push(t)
+    print(f"{total} {len(keep)}")
+    for k in keep:
+        print(k.tag(0))
+
+trait Tree:
+    fn depth(t: Self) -> Int
+    fn label(t: Self) -> Str
+
+type Leaf = struct(v: Int)
+type Node = struct(kids: Array[any Tree], name: Str)
+
+impl Tree for Leaf:
+    fn depth(t: Leaf) -> Int:
+        1
+    fn label(t: Leaf) -> Str:
+        f"{t.v}"
+
+impl Tree for Node:
+    fn depth(t: Node) -> Int:
+        var d = 0
+        for k in t.kids:
+            let kd = k.depth()
+            if kd > d:
+                d = kd
+        d + 1
+    fn label(t: Node) -> Str:
+        var parts: Array[Str] = []
+        for k in t.kids:
+            parts.push(k.label())
+        f"{t.name}({join(parts, ",")})"
+
+fn build(d: Int) -> any Tree:
+    if d == 0:
+        Leaf(d)
+    else:
+        Node([build(d - 1), build(d - 1), Leaf(d)], f"n{d}")
+
+fn part2() ! io:
+    let t = build(4)
+    print(f"{t.depth()}")
+    print(t.label())
+    let u = t
+    let v = build(2)
+    print(f"{u.depth()} {v.depth()} {v.label()}")
+
+type Oops = Bad(n: Int)
+
+impl Show for Oops:
+    fn show(e: Oops) -> Str:
+        match e:
+            Bad(n) -> f"bad {n}"
+
+trait Job:
+    fn run(j: Self, n: Int) -> Str ! Oops
+
+type Task = struct(limit: Int, name: Str)
+
+impl Job for Task:
+    fn run(j: Task, n: Int) -> Str ! Oops:
+        if n > j.limit:
+            fail(Bad(n))
+        f"{j.name}:{n}"
+
+fn make_job(limit: Int) -> any Job:
+    Task(limit, f"task{limit}")
+
+fn go(limit: Int, n: Int) -> Str ! Oops:
+    make_job(limit).run(n)
+
+fn part3() ! io:
+    for i in 0..4:
+        match try go(2, i):
+            Ok(s) -> print(s)
+            Err(e) -> print(f"{e}")
+    match try make_job(1).run(7):
+        Ok(s) -> print(s)
+        Err(e) -> print(f"{e}")
+
+fn main() ! io:
+    part1()
+    part2()
+    part3()

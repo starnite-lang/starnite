@@ -1,0 +1,10 @@
+# expect: E0230 6:9
+trait Dup:
+    fn twin(x: Self) -> Self
+    fn name(x: Self) -> Str
+
+fn f(x: any Dup) -> Str:
+    x.name()
+
+fn main():
+    print("x")

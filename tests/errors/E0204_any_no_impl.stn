@@ -1,0 +1,10 @@
+# expect: E0204 9:25
+trait Figure:
+    fn area(f: Self) -> Float
+
+type Square = struct(side: Float)
+
+fn main():
+    let sq = Square(1.0)
+    let f: any Figure = sq
+    print(f"{f.area()}")

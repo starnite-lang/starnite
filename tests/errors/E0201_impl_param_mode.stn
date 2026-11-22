@@ -1,0 +1,11 @@
+# expect: E0201 8:5
+trait Named:
+    fn bump(x: Self, by: Int) -> Int
+
+type Box = struct(n: Int)
+
+impl Named for Box:
+    fn bump(x: Box, mut by: Int) -> Int:
+        by
+fn main():
+    print("x")
