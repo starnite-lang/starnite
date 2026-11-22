@@ -34,23 +34,28 @@ elif [ "$kinds" -lt 10 ] || printf '%s\n' "$counts" | grep -qx 0; then
     bad "negative fuzzing: a kind of violation was never tried"; printf '%s\n' "$out" | tail -20
 else ok "negative fuzzing against the compiler ($kinds kinds of violation)"; fi
 
-# 2. a checker that accepts a use after take: seen, and shrunk to a few lines that the real
-# compiler rejects with E0302
-d="$tmp/take"
-out=$(with_fault accept-take --negative-only --count 80 --seed 1 --shrink --keep "$d" 2>&1); status=$?
-n=$(ls "$d"/*.neg.min.stn 2>/dev/null | wc -l | tr -d ' ')
-if [ $status != 1 ] || ! printf '%s\n' "$out" | grep -q "was accepted; it should be rejected with E0302"; then
-    bad "fault accept-take: the fuzzer did not report an accepted mutation"; printf '%s\n' "$out" | tail -10
-elif [ "$n" = 0 ]; then bad "fault accept-take: nothing was shrunk"
-else
-    all=1
-    for m in "$d"/*.neg.min.stn; do
-        if [ "$(lines "$m")" -gt 60 ] || [ "$(code_of "$m")" != E0302 ]; then
-            bad "fault accept-take: $(basename "$m") has $(lines "$m") lines and is rejected with '$(code_of "$m")'"; all=0
-        fi
-    done
-    [ $all = 1 ] && ok "fault accept-take: $n programs shrunk, each a use after take"
-fi
+# 2. a checker that accepts what it rejects with a code: seen, and shrunk to a few lines that the real
+# compiler rejects with that code, a use after take and a match that does not cover every case
+accepts() {
+    code=$1; what=$2
+    d="$tmp/accept-$code"
+    out=$(with_fault "accept:$code" --negative-only --count 80 --seed 1 --shrink --keep "$d" 2>&1); status=$?
+    n=$(ls "$d"/*.neg.min.stn 2>/dev/null | wc -l | tr -d ' ')
+    if [ $status != 1 ] || ! printf '%s\n' "$out" | grep -q "was accepted; it should be rejected with $code"; then
+        bad "fault accept:$code: the fuzzer did not report an accepted mutation"; printf '%s\n' "$out" | tail -10
+    elif [ "$n" = 0 ]; then bad "fault accept:$code: nothing was shrunk"
+    else
+        all=1
+        for m in "$d"/*.neg.min.stn; do
+            if [ "$(lines "$m")" -gt 60 ] || [ "$(code_of "$m")" != "$code" ]; then
+                bad "fault accept:$code: $(basename "$m") has $(lines "$m") lines and is rejected with '$(code_of "$m")'"; all=0
+            fi
+        done
+        [ $all = 1 ] && ok "fault accept:$code: $n programs shrunk, each $what"
+    fi
+}
+accepts E0302 "a use after take"
+accepts E0202 "a match that does not cover every case"
 
 # 3. a checker that says E0303 for E0304: seen, and shrunk to a program that the real compiler
 # rejects with E0304
@@ -99,5 +104,48 @@ STARNITE="$starnite" "$fuzz" --reduce "$tmp/p.stn" --keeping 'fn main' > "$tmp/r
 if [ $status != 0 ] || [ "$(lines "$tmp/r.stn")" -gt 6 ] || ! grep -q 'fn main' "$tmp/r.stn" || ! "$starnite" check "$tmp/r.stn" > /dev/null 2>&1; then
     bad "--reduce --keeping: exit $status, $(lines "$tmp/r.stn") lines"; cat "$tmp/r.err"
 else ok "--reduce --keeping: $(lines "$tmp/p.stn") lines reduced to $(lines "$tmp/r.stn")"; fi
+
+# 6. --reduce of a program that imports a module that is next to it: the candidates are tried where
+# the module is, so that the program is found to fail and is reduced, in the way it fails, and nothing
+# is left in its directory
+proj="$tmp/proj"; mkdir "$proj"
+cat > "$proj/helpers.stn" <<'STN'
+fn twice*(n: Int) -> Int:
+    n * 2
+
+fn name*() -> Str:
+    "helper"
+STN
+cat > "$proj/main.stn" <<'STN'
+import helpers
+
+fn main():
+    var xs: Array[Int] = [3, 1, 2]
+    sort(mut xs)
+    print(f"{helpers.twice(xs[0])}")
+    print("unused")
+STN
+(cd "$tmp" && with_fault c-output --reduce "$proj/main.stn" > "$tmp/proj.out" 2> "$tmp/proj.err"); status=$?
+left=$(ls -A "$proj" | tr '\n' ' ')
+if [ $status != 0 ] || ! grep -q 'sort(mut' "$tmp/proj.out" || [ "$(lines "$tmp/proj.out")" -ge "$(lines "$proj/main.stn")" ]; then
+    bad "--reduce next to a module: exit $status, $(lines "$tmp/proj.out") lines of $(lines "$proj/main.stn")"; cat "$tmp/proj.err"
+elif [ "$left" != "helpers.stn main.stn " ]; then bad "--reduce next to a module left files in its directory: $left"
+else ok "--reduce next to a module: $(lines "$proj/main.stn") lines reduced to $(lines "$tmp/proj.out")"; fi
+
+# and by the code a program is rejected with, which a missing module would change
+cat > "$proj/main2.stn" <<'STN'
+import helpers
+
+fn main():
+    print("start")
+    let n: Int = helpers.name()
+    print(f"{n}")
+    print("end")
+STN
+(cd "$tmp" && STARNITE="$starnite" "$fuzz" --reduce "$proj/main2.stn" --rejected E0201 > "$tmp/proj2.out" 2> "$tmp/proj2.err"); status=$?
+cp "$tmp/proj2.out" "$proj/reduced.stn"
+if [ $status != 0 ] || [ "$(lines "$tmp/proj2.out")" -ge "$(lines "$proj/main2.stn")" ] || [ "$(code_of "$proj/reduced.stn")" != E0201 ]; then
+    bad "--reduce --rejected next to a module: exit $status, $(lines "$tmp/proj2.out") lines of $(lines "$proj/main2.stn"), rejected with '$(code_of "$proj/reduced.stn")'"; cat "$tmp/proj2.err"
+else ok "--reduce --rejected next to a module: $(lines "$proj/main2.stn") lines reduced to $(lines "$tmp/proj2.out")"; fi
 
 [ $fail = 0 ]

@@ -789,7 +789,15 @@ let mutations : mutation list =
               (* the line above it that is less indented is the header of the match *)
               let h = ref (i - 1) in
               while !h > 0 && (blank lines.(!h) || indent_of lines.(!h) >= indent_of lines.(i)) do decr h done;
-              Some (delete_lines lines i (group_at lines i), [ String.trim lines.(!h) ])
+              (* a reduction keeps the match and the arms that are left, so that it is still one that does not
+                 cover every case: it can only take arms away, and one that is missing stays missing *)
+              let arms = ref [] in
+              let k = ref (!h + 1) in
+              while !k < Array.length lines && (blank lines.(!k) || indent_of lines.(!k) > indent_of lines.(!h)) do
+                if !k <> i && (not (blank lines.(!k))) && indent_of lines.(!k) = indent_of lines.(i) then arms := String.trim lines.(!k) :: !arms;
+                incr k
+              done;
+              Some (delete_lines lines i (group_at lines i), String.trim lines.(!h) :: List.rev !arms)
           | None -> None);
       own = [ Statements [ "match Some(1):"; "    Some(neg_n) ->"; "        print(\"a\")" ] ] };
     { kind = "unknown name";
@@ -884,6 +892,16 @@ let json_code out =
 (* how long one run of the compiler may take, in seconds. A shrink shortens it: its candidates have
    things taken out, and one that loops costs a whole limit. *)
 let time_limit = ref 120.0
+
+(* where the programs of a shrink are written: the scratch directory, or for --reduce the directory of the
+   input, which is where a compiler looks for what the input imports. In that directory they have names of
+   their own, and are removed at the end. *)
+let candidate_dir : string option ref = ref None
+
+let candidate_path tmp name =
+  match !candidate_dir with
+  | Some dir -> Filename.concat dir (sprintf ".fuzz-reduce-%d-%s.stn" (Unix.getpid ()) name)
+  | None -> Filename.concat tmp (name ^ ".stn")
 
 (* simpler versions of a line: a declaration with the simplest expression of its type, a print of
    nothing, and its integers made 0 *)
@@ -1104,7 +1122,7 @@ let differential starnite tmp path =
     if ri = rc && out_i = out_c then `Agreed else `Differ (ri, out_i, rc, out_c)
 
 let still_differs starnite tmp (ri0, rc0) text =
-  let p = Filename.concat tmp "shrink.stn" in
+  let p = candidate_path tmp "shrink" in
   Out_channel.with_open_bin p (fun oc -> output_string oc text);
   match differential starnite tmp p with
   | `Differ (ri, _, rc, _) -> ri = ri0 && rc = rc0
@@ -1114,7 +1132,7 @@ let still_differs starnite tmp (ri0, rc0) text =
 (* what makes a mutated program that was accepted fail the same way: it is accepted, and still has the
    lines of the violation *)
 let still_has starnite tmp markers text =
-  let p = Filename.concat tmp "shrink.stn" in
+  let p = candidate_path tmp "shrink" in
   Out_channel.with_open_bin p (fun oc -> output_string oc text);
   List.for_all (contains text) markers
   && (match run starnite tmp [ "check" ] p with 0, _ -> true | _ -> false | exception Hang _ -> false)
@@ -1140,7 +1158,7 @@ let added_lines a b =
 
 (* what makes a mutated program fail the same way: the checker rejects it with the code it was rejected with *)
 let still_rejected starnite tmp code text =
-  let p = Filename.concat tmp "shrink.stn" in
+  let p = candidate_path tmp "shrink" in
   Out_channel.with_open_bin p (fun oc -> output_string oc text);
   match run starnite tmp [ "check"; "--json" ] p with
   | 0, _ -> false
@@ -1190,18 +1208,26 @@ let () =
   let tmp = Filename.concat (Filename.get_temp_dir_name ()) (sprintf "starnite-fuzz-%d-%08x" (Unix.getpid ()) (Random.bits ())) in
   Unix.mkdir tmp 0o700;
   let cleanup () =
-    List.iter (fun f -> try Sys.remove (Filename.concat tmp f) with Sys_error _ -> ()) [ "out.txt"; "shrink.stn" ];
+    List.iter (fun f -> try Sys.remove (Filename.concat tmp f) with Sys_error _ -> ()) [ "out.txt" ];
+    List.iter (fun n -> try Sys.remove (candidate_path tmp n) with Sys_error _ -> ()) [ "shrink"; "orig" ];
     try Unix.rmdir tmp with Unix.Unix_error _ -> ()
   in
   (match !reduce with
    | Some file ->
        let text = read_file file in
+       (* the program may import what is next to it *)
+       candidate_dir := Some (Filename.dirname file);
+       (try Out_channel.with_open_bin (candidate_path tmp "orig") (fun _ -> ())
+        with Sys_error e ->
+          Printf.eprintf "fuzz: cannot write next to %s, where what it imports is: %s\n" file e;
+          cleanup ();
+          exit 2);
        let still_fails =
          match (!keeping, !rejected) with
          | _ :: _, _ -> still_has starnite tmp !keeping
          | [], Some code -> still_rejected starnite tmp code
          | [], None -> (
-             let p = Filename.concat tmp "orig.stn" in
+             let p = candidate_path tmp "orig" in
              Out_channel.with_open_bin p (fun oc -> output_string oc text);
              match differential starnite tmp p with
              | `Differ (ri, _, rc, _) -> still_differs starnite tmp (ri, rc)
@@ -1213,7 +1239,6 @@ let () =
        let small, evals = shrink ~budget:!budget ~still_fails text in
        Printf.eprintf "reduced %d lines to %d, in %d checks\n%!" (Array.length (lines_of text)) (Array.length (lines_of small)) evals;
        print_string small;
-       (try Sys.remove (Filename.concat tmp "orig.stn") with Sys_error _ -> ());
        cleanup ();
        exit 0
    | None -> ());
@@ -1297,8 +1322,9 @@ let () =
           fail ()
       | 0, _ ->
           Printf.printf "case %d: the mutation '%s' was accepted; it should be rejected with %s\n%!" case name (show_expect expect);
-          (* with nothing added (an arm taken away) there is nothing to keep it by *)
-          fail ~can_shrink:(added <> []) ~still_fails:(still_has starnite tmp (List.map String.trim added @ essential)) ()
+          (* kept by the lines it added and the lines of the program that it needs: the match, for an arm that was taken away *)
+          let keep = List.map String.trim added @ essential in
+          fail ~can_shrink:(keep <> []) ~still_fails:(still_has starnite tmp keep) ()
       | _, out -> (
           match json_code out with
           | Some code when expected_ok expect code -> ()
