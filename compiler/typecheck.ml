@@ -1020,14 +1020,20 @@ and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : 
 and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
   let sg = Hashtbl.find c.tb.fns u in
   let s, ps, ret, eff = instantiate sg in
-  (* The expected type is a hint for the result. A result that is a bare type variable is
-     not taken from it when the value would be boxed or wrapped on the way (any Trait,
-     Option): the arguments decide it, and the coercion follows, as in
-     `let a: any Show = (Some(5)).or(4)`. *)
+  (* The expected type is a hint for the result, and it is what lets a literal argument
+     take its type from the context: `let x: F32? = pick(Some(1.0), None)`. A receiver has
+     been typed before the hint is used, so when it decides a result that is a bare type
+     variable, and the value would be boxed or wrapped on the way (any Trait, Option), the
+     hint is not taken: `let a: any Show = (Some(5)).or(4)` has the type Int, and the
+     coercion follows. *)
   (match exp with
    | Some t
      when (match repr ret with
-           | TVar _ -> (match repr t with TAny _ | TNamed ("Option", _) -> false | _ -> true)
+           | TVar r -> (
+               match repr t with
+               | TAny _ | TNamed ("Option", _) ->
+                   not (match (receiver, ps) with Some _, (_, _, pt, _) :: _ -> occurs r pt | _ -> false)
+               | _ -> true)
            | TNamed _ | TArray _ | TTuple _ -> true
            | _ -> false) ->
        (try unify t ret with Mismatch -> ())

@@ -1,5 +1,6 @@
-# The expected type is a hint for a generic result, but not when the arguments decide the result
-# and a coercion follows: a value that is boxed as a trait value, or wrapped in an Option.
+# The expected type is a hint for a generic result: it lets a literal argument take its type from
+# the context. A receiver is typed before the hint is used, so when it decides the result and the
+# value is then boxed or wrapped, the hint is not taken.
 fn pick[T](a: T, b: T) -> T:
     a
 
@@ -10,3 +11,7 @@ fn main() ! io:
     let d: Int? = pick(9, 10)
     let e: Array[any Show] = [pick("x", "y"), (Some(2)).or(3)]
     print(f"{a} {b} {c} {d} {e}")
+    # a literal inside an argument that is already wrapped takes its type from the context
+    let f: F32? = pick(Some(1.0), None)
+    let g: Float? = pick(Some(2.5), None)
+    print(f"{f} {g}")

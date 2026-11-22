@@ -456,7 +456,7 @@ and stmt g ind d =
         | [] -> fallback ()
         | vs -> (
             let v = choice_l g vs in
-            match int g 4 with
+            match int g 5 with
             | 0 -> [ sprintf "%s%s.push(%s)" p v (expr g "any Fig" 2) ]
             | 1 -> [ sprintf "%sif len(%s) > 0:" p v; sprintf "%s    %s[0] = %s" p v (expr g "any Fig" 2) ]
             | 2 -> [ sprintf "%sfor %s in %s:" p (fresh g "f") (expr g "Array[any Fig]" 1); sprintf "%s    %s.push(%s)" p v (expr g "any Fig" 1) ]
