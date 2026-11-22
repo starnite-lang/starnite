@@ -125,15 +125,11 @@ fn main():
     print(f"{helpers.twice(xs[0])}")
     print("unused")
 STN
-echo precious > "$proj/.fuzz-reduce-1-0000beef-shrink.stn"
 (cd "$tmp" && with_fault c-output --reduce "$proj/main.stn" > "$tmp/proj.out" 2> "$tmp/proj.err"); status=$?
 left=$(ls -A "$proj" | tr '\n' ' ')
-kept=$(cat "$proj/.fuzz-reduce-1-0000beef-shrink.stn" 2>/dev/null)
-rm -f "$proj/.fuzz-reduce-1-0000beef-shrink.stn"
 if [ $status != 0 ] || ! grep -q 'sort(mut' "$tmp/proj.out" || [ "$(lines "$tmp/proj.out")" -ge "$(lines "$proj/main.stn")" ]; then
     bad "--reduce next to a module: exit $status, $(lines "$tmp/proj.out") lines of $(lines "$proj/main.stn")"; cat "$tmp/proj.err"
-elif [ "$left" != ".fuzz-reduce-1-0000beef-shrink.stn helpers.stn main.stn " ]; then bad "--reduce next to a module left files in its directory, or took one away: $left"
-elif [ "$kept" != precious ]; then bad "--reduce next to a module changed a file of the directory that was there already"
+elif [ "$left" != "helpers.stn main.stn " ]; then bad "--reduce next to a module left files in its directory: $left"
 else ok "--reduce next to a module: $(lines "$proj/main.stn") lines reduced to $(lines "$tmp/proj.out")"; fi
 
 # and by the code a program is rejected with, which a missing module would change
@@ -177,5 +173,32 @@ cp "$tmp/m.out" "$proj/reduced.stn"
 if [ $status != 0 ] || ! grep -q 'fn one' "$tmp/m.out" || [ "$(code_of "$proj/reduced.stn")" != E0202 ]; then
     bad "--keeping-match: exit $status, the match that is the violation is not kept: rejected with '$(code_of "$proj/reduced.stn")'"; cat "$tmp/m.err" "$tmp/m.out"
 else ok "--keeping-match: the match with an arm too few is kept, and rejected with E0202 by the real compiler ($(lines "$proj/main.stn") lines reduced to $(lines "$tmp/m.out"))"; fi
+
+# 8. the name that the reducer tries first for a file of its own is taken, by a file that is there already: the
+# reducer tries another, and the file that was there is as it was
+proj="$tmp/proj4"; mkdir "$proj"
+cat > "$proj/main.stn" <<'STN'
+fn main():
+    var xs: Array[Int] = [3, 1, 2]
+    sort(mut xs)
+    print("unused")
+STN
+echo precious > "$proj/.fuzz-reduce-first-orig.stn"
+(cd "$tmp" && FUZZ_SCRATCH_TOKENS=first,second,third with_fault c-output --reduce "$proj/main.stn" > "$tmp/c.out" 2> "$tmp/c.err"); status=$?
+left=$(ls -A "$proj" | tr '\n' ' ')
+kept=$(cat "$proj/.fuzz-reduce-first-orig.stn" 2>/dev/null)
+if [ $status != 0 ] || ! grep -q 'sort(mut' "$tmp/c.out"; then bad "--reduce with its first name taken: exit $status"; cat "$tmp/c.err"
+elif [ "$kept" != precious ]; then bad "--reduce with its first name taken changed the file that was there: '$kept'"
+elif [ "$left" != ".fuzz-reduce-first-orig.stn main.stn " ]; then bad "--reduce with its first name taken left files, or took one away: $left"
+else ok "--reduce with its first name taken: another is made, the file that was there is as it was, nothing is left"; fi
+
+# 9. the compiler does not start: the reducer stops, and leaves nothing next to the input
+proj="$tmp/proj5"; mkdir "$proj"
+printf '%s\n' 'fn main():' '    print("x")' > "$proj/main.stn"
+(cd "$tmp" && STARNITE="$tmp/no-such-compiler" "$fuzz" --reduce "$proj/main.stn" > "$tmp/n.out" 2> "$tmp/n.err"); status=$?
+left=$(ls -A "$proj" | tr '\n' ' ')
+if [ $status != 2 ]; then bad "--reduce without a compiler: exit $status, not 2"; cat "$tmp/n.err"
+elif [ "$left" != "main.stn " ]; then bad "--reduce without a compiler left files next to the input: $left"
+else ok "--reduce without a compiler: it stops, and leaves nothing next to the input"; fi
 
 [ $fail = 0 ]

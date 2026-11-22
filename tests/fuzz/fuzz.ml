@@ -907,6 +907,16 @@ let candidate_dir : string option ref = ref None
 let candidate_files : (string, string) Hashtbl.t = Hashtbl.create 4
 let candidates_made : string list ref = ref []
 
+(* the part of the name of a scratch file that is not what it is for: a process number and random bits, or
+   in a test the tokens that FUZZ_SCRATCH_TOKENS has, separated by commas, in the order they are wanted, so that
+   a name that is taken can be made the first to be tried *)
+let scratch_tokens = ref (match Sys.getenv_opt "FUZZ_SCRATCH_TOKENS" with Some s -> String.split_on_char ',' s | None -> [])
+
+let next_scratch_token () =
+  match !scratch_tokens with
+  | t :: rest -> scratch_tokens := rest; t
+  | [] -> sprintf "%d-%08x" (Unix.getpid ()) (Random.bits ())
+
 let candidate_path tmp name =
   match !candidate_dir with
   | None -> Filename.concat tmp (name ^ ".stn")
@@ -915,7 +925,7 @@ let candidate_path tmp name =
       | Some p -> p
       | None ->
           let rec make k =
-            let p = Filename.concat dir (sprintf ".fuzz-reduce-%d-%08x-%s.stn" (Unix.getpid ()) (Random.bits ()) name) in
+            let p = Filename.concat dir (sprintf ".fuzz-reduce-%s-%s.stn" (next_scratch_token ()) name) in
             match Unix.openfile p [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL ] 0o600 with
             | fd -> Unix.close fd; p
             | exception Unix.Unix_error (Unix.EEXIST, _, _) when k < 100 -> make (k + 1)
@@ -1265,6 +1275,8 @@ let () =
      | Some _ -> List.iter (fun p -> try Sys.remove p with Sys_error _ -> ()) !candidates_made);
     try Unix.rmdir tmp with Unix.Unix_error _ -> ()
   in
+  (* whatever ends the run, an exit in the middle of a check or an exception, the files it made go *)
+  at_exit cleanup;
   (match !reduce with
    | Some file ->
        let text = read_file file in
@@ -1288,6 +1300,10 @@ let () =
              | `Differ (ri, _, rc, _) -> still_differs starnite tmp (ri, rc)
              | _ ->
                  prerr_endline "fuzz: the program does not fail: nothing to reduce";
+                 cleanup ();
+                 exit 2
+             | exception Hang what ->
+                 Printf.eprintf "fuzz: '%s' timed out on the program: nothing to reduce\n" what;
                  cleanup ();
                  exit 2)
        in
