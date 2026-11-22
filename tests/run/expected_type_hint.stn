@@ -1,12 +1,17 @@
 # The expected type is a hint for a generic result: it lets a literal argument take its type from
-# the context. A receiver is typed before the hint is used, so when it decides the result and the
-# value is then boxed or wrapped, the hint is not taken; a receiver that leaves the result open,
-# such as an empty literal, does not decide it.
+# the context. It is only a hint. When the call does not check with it, the call is checked on
+# its own and the result is coerced to the expected type afterwards.
 fn pick[T](a: T, b: T) -> T:
     a
 
 fn choose[T](xs: Array[T], fallback: T) -> T:
     fallback
+
+fn first_or[T](o: T?, default: T) -> T:
+    o.or(default)
+
+fn both[T](a: Array[T], o: T?, d: T) -> T:
+    o.or(d)
 
 fn main() ! io:
     let a: any Show = (Some(5)).or(4)
@@ -25,3 +30,19 @@ fn main() ! io:
     let ys = [3, 4]
     let i: any Show = ys.choose(5)
     print(f"{h} {i}")
+    # a receiver or an argument that is a variable of a fixed type is not rebuilt to fit the hint
+    let s = Some(5)
+    let m: any Show = s.or(4)
+    let n: any Show = first_or(s, 4)
+    let o: any Show = choose(ys, 5)
+    print(f"{m} {n} {o}")
+    # where the hint makes the value fit, it is taken: both call forms agree
+    let one = 1
+    let p: Int? = one.pick(Some(2))
+    let q: Int? = pick(one, Some(2))
+    print(f"{p} {q}")
+    # what a failed attempt did to a variable outside the call is undone: the empty array takes
+    # `any Show` from the hint first, and Int once the call is checked on its own
+    let zs = []
+    let r: any Show = both(zs, s, 6)
+    print(f"{r} {zs.len()}")

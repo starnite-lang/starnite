@@ -367,6 +367,45 @@ let lookup c name : var option =
 
 let all_names c = List.concat_map (fun f -> List.map fst f.vars) c.frames
 
+(* What an attempt at checking an expression can change, kept so that a failed attempt can
+   be taken back: the scopes, the effects and moves collected so far, the obligations, and
+   the closures emitted. The type variables are logged by Types.open_speculation. *)
+type snapshot = {
+  sn_frames : (frame * (string * var) list * var list) list;
+  sn_ret : ty; sn_errs : ty list; sn_io : bool; sn_in_try : int; sn_loops : int;
+  sn_obligations : (ty * string * ty list * loc) list;
+  sn_unsolved : (ty * loc) list;
+  sn_moved : (int * loc) list;
+  sn_lent : (int * loc) list;
+  sn_lambdas : lambda list;
+}
+
+let snapshot c =
+  { sn_frames = List.map (fun f -> (f, f.vars, match f.lam with Some lr -> lr.caps | None -> [])) c.frames;
+    sn_ret = c.ret; sn_errs = c.errs; sn_io = c.io; sn_in_try = c.in_try; sn_loops = c.loops;
+    sn_obligations = c.obligations; sn_unsolved = c.unsolved; sn_moved = c.moved; sn_lent = c.lent;
+    sn_lambdas = c.tb.lambdas }
+
+let restore c s =
+  c.frames <- List.map (fun (f, vars, caps) -> f.vars <- vars; (match f.lam with Some lr -> lr.caps <- caps | None -> ()); f) s.sn_frames;
+  c.ret <- s.sn_ret; c.errs <- s.sn_errs; c.io <- s.sn_io; c.in_try <- s.sn_in_try; c.loops <- s.sn_loops;
+  c.obligations <- s.sn_obligations; c.unsolved <- s.sn_unsolved; c.moved <- s.sn_moved; c.lent <- s.sn_lent;
+  c.tb.lambdas <- s.sn_lambdas
+
+(* Run an attempt. If it fails with a compile error, everything it did is undone and the
+   error is returned; the caller can try another way. *)
+let speculate c (f : unit -> 'a) : ('a, exn) result =
+  let snap = snapshot c in
+  let mark = open_speculation () in
+  match f () with
+  | r -> close_speculation (); Ok r
+  | exception (Syntax.Error _ as e) ->
+      undo_speculation mark;
+      close_speculation ();
+      restore c snap;
+      Error e
+  | exception e -> close_speculation (); raise e
+
 (* Edit distance for "did you mean" hints (section 19.2). *)
 let edit_distance a b =
   let n = String.length a and m = String.length b in
@@ -1019,32 +1058,39 @@ and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : 
 
 and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
   let sg = Hashtbl.find c.tb.fns u in
-  let s, ps, ret, eff = instantiate sg in
+  let first = instantiate sg in
   (* The expected type is a hint for the result, and it is what lets a literal argument
-     take its type from the context: `let x: F32? = pick(Some(1.0), None)`. A receiver has
-     been typed before the hint is used, so when it decides a result that is a bare type
-     variable, and the value would be boxed or wrapped on the way (any Trait, Option), the
-     hint is not taken: `let a: any Show = (Some(5)).or(4)` has the type Int, and the
-     coercion follows. *)
-  (match exp with
-   | Some t
-     when (match repr ret with
-           | TVar r -> (
-               match repr t with
-               | TAny _ | TNamed ("Option", _) -> (
-                   match (receiver, ps) with
-                   | Some recv, (_, _, pt, _) :: _ when occurs r pt ->
-                       (* the receiver decides the result only if it fixes it completely: an
-                          empty literal leaves its element type open, and the hint settles it *)
-                       (try unify pt recv.ty with Mismatch -> ());
-                       has_tvar ret
-                   | _ -> true)
-               | _ -> true)
-           | TNamed _ | TArray _ | TTuple _ -> true
-           | _ -> false) ->
-       (try unify t ret with Mismatch -> ())
-   | _ -> ());
-  let targs, poly = check_args c l ~receiver ps args in
+     take its type from the context: `let x: F32? = pick(Some(1.0), None)`. It is only a
+     hint. When the call does not check with it, the call is checked on its own and the
+     coercion to the expected type follows: `let a: any Show = (Some(5)).or(4)` has the
+     type Int, which is then boxed, where the hint would ask for an Option[any Show]. *)
+  let hinted =
+    match (exp, first) with
+    | Some _, (_, _, ret, _) -> (match repr ret with TVar _ | TNamed _ | TArray _ | TTuple _ -> true | _ -> false)
+    | None, _ -> false
+  in
+  let hint_bound = ref false in
+  let attempt (s, ps, ret, eff) hint =
+    (match exp with
+     | Some t when hint ->
+         let before = !trail in
+         (try unify t ret with Mismatch -> ());
+         hint_bound := !trail != before
+     | _ -> ());
+    let targs, poly = check_args c l ~receiver ps args in
+    (s, ret, eff, targs, poly)
+  in
+  let s, ret, eff, targs, poly =
+    if not hinted then attempt first false
+    else
+      match speculate c (fun () -> attempt first true) with
+      | Ok r -> r
+      | Error e when not !hint_bound -> raise e   (* the hint changed nothing: another try would fail the same way *)
+      | Error e -> (
+          match speculate c (fun () -> attempt (instantiate sg) false) with
+          | Ok r -> r
+          | Error _ -> raise e)
+  in
   let convs = add_eff c l eff @ List.concat_map (add_eff c l) poly in
   (* bounds become obligations *)
   List.iter
@@ -1053,7 +1099,6 @@ and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
       List.iter (fun (tr, ta) -> c.obligations <- (t, tr, List.map (subst s) ta, l) :: c.obligations) bs)
     sg.stparams;
   let callee = if is_builtin u then CBuiltin (String.sub u 8 (String.length u - 8), List.map snd s) else CFn (u, List.map snd s) in
-  let ret = ret in
   mk (XCall (callee, targs, convs)) ret l
 
 (* Pick an overload by the head of the first argument's type. *)
@@ -1931,6 +1976,15 @@ and zonk_s (s : tstmt) : tstmt =
     | SLend e -> SLend (zonk_e e)
   in
   { s with st }
+
+(* Every type in the tree must be known after checking (E0210). *)
+let rec has_tvar t =
+  match repr t with
+  | TVar _ -> true
+  | TArray t -> has_tvar t
+  | TTuple ts | TNamed (_, ts) | TErr ts | TAny (_, ts) -> List.exists has_tvar ts
+  | TFn f -> List.exists (fun (_, t) -> has_tvar t) f.fps || has_tvar f.fret
+  | _ -> false
 
 (* ---------- declarations ---------- *)
 
