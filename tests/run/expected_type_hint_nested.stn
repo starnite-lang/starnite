@@ -41,6 +41,9 @@ fn inner_pair[A, B](xs: Array[A], b: B) -> (Array[A], B):
 fn outer_seed[T](seed: T, xs: Array[T], p: (Array[Int], F32?)) -> T:
     seed
 
+fn inner_default[A, B](b: B, values: Array[A] = zs) -> (Array[A], B):
+    (values, b)
+
 fn contextual[T](inner: F32?, value: T) -> T:
     value
 
@@ -86,3 +89,8 @@ fn main() ! io:
     let ys = []
     let out: Int? = outer_seed(1, ys, inner_pair(ys, Some(1.0)))
     print(f"{out}")
+    # and when the array reaches the call through the default of a parameter that is left out,
+    # which is checked in the caller: the key has to see it too
+    let zs = []
+    let out2: Int? = outer_seed(1, zs, inner_default(Some(1.0)))
+    print(f"{out2}")

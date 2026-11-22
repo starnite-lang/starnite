@@ -465,8 +465,9 @@ let rec names_in (e : Syntax.expr) (acc : string list) : string list =
   | Comp (body, comps) ->
       many (body :: List.concat_map (fun (cp : Syntax.comp) -> cp.citer :: Option.to_list cp.cif) comps) acc
   | IfE (a, b, c) -> many [ a; b; c ] acc
-  | Lambda (_, Syntax.LExpr e) -> names_in e acc
-  | Lambda (_, Syntax.LAssign (p, _, v)) -> many [ p; v ] acc
+  | Lambda (ps, body) -> (
+      let acc = many (List.filter_map (fun (p : Syntax.param) -> p.pdefault) ps) acc in
+      match body with Syntax.LExpr e -> names_in e acc | Syntax.LAssign (p, _, v) -> many [ p; v ] acc)
   | Binop (_, a, b) | Range (a, b) -> many [ a; b ] acc
   | Unop (_, a) -> names_in a acc
 
@@ -1227,11 +1228,17 @@ and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
                was undone, and will not now: the retry of a call that contains it comes here again,
                and checking it twice at every level is the doubling. It is checked on its own at
                once. The state is what the check depends on: the place, the callee, the expected
-               type, the receiver, and the types of the variables the arguments mention, with
-               unresolved type variables told apart. A try that is undone can bind such a
-               variable's type one way and the retry another, and then the failure says nothing. *)
+               type, the receiver, and the types of the variables that the arguments, and the
+               defaults of the parameters, mention, with unresolved type variables told apart. A
+               try that is undone can bind such a variable's type one way and the retry another,
+               and then the failure says nothing. *)
             let key =
-              let names = List.sort_uniq compare (List.concat_map (fun (a : Syntax.arg) -> names_in a.aexpr []) args) in
+              let names =
+                List.sort_uniq compare
+                  (List.concat_map (fun (a : Syntax.arg) -> names_in a.aexpr []) args
+                   (* the default of a parameter that is left out is checked in the caller too *)
+                   @ List.concat_map (fun (_, _, _, d) -> match d with Some e -> names_in e [] | None -> []) ps)
+              in
               let vars =
                 List.map (fun nm -> match peek c nm with Some v -> nm ^ ":" ^ key_ty v.vty | None -> nm) names
               in
