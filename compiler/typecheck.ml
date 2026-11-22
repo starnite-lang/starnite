@@ -338,6 +338,16 @@ type fctx = {
   retries : int ref;                (* retries left for the outermost call being checked; shared with closures *)
 }
 
+(* The arguments of one call, slot by slot in parameter order, the receiver being slot 0 when
+   there is one. The matching of arguments to parameters is made when the first of them is
+   needed, so that an error in the receiver comes before one in the number of arguments. *)
+type args_state = {
+  a_receiver : texpr option;
+  a_params : (mode * string * ty * Syntax.expr option) list;
+  a_args : Syntax.arg list;
+  mutable a_matched : (mode * string * ty * Syntax.arg option * Syntax.expr option) list option;
+}
+
 let push_frame c ?lam () = c.frames <- { vars = []; lam } :: c.frames
 let pop_frame c = c.frames <- List.tl c.frames
 
@@ -430,17 +440,28 @@ let check_known_bounds c l (sg : fsig) s =
           bs)
     sg.stparams
 
-(* What the expected type of a call says about the types of its parameters: each parameter
-   type with the result unified with the expected type, copied before the unification is
-   undone. None when it says nothing, that is, when no parameter type changes. *)
-let hint_expectations ps ret (t : ty) : ty list option =
+(* The type variables of a call that its expected type would bind to the result: those it
+   binds, and whether they are all variables of the call itself, which s lists. None if it
+   binds nothing. The binding is undone. *)
+let hint_binding (s : (string * ty) list) ret (t : ty) : (tvar ref list * bool) option =
+  let own = List.filter_map (fun (_, v) -> match repr v with TVar r -> Some r | _ -> None) s in
   let mark = open_speculation () in
   (try unify t ret with Mismatch -> ());
-  let exps = List.map (fun (_, _, pt, _) -> zonk pt) ps in
+  let bound = List.filter_map (fun (r, old) -> match old with Unbound _ -> Some r | Link _ -> None) (trail_since mark) in
   undo_speculation mark;
   close_speculation ();
-  if List.for_all2 (fun e (_, _, pt, _) -> ty_equal e pt) exps ps then None else Some exps
+  if bound = [] then None else Some (bound, List.for_all (fun r -> List.memq r own) bound)
 
+(* Does a bound already fail on the types the expected type gives the call? The arguments
+   cannot change a type the hint has fixed, so a hinted attempt could not succeed, and none
+   is made: `id_eq(5)` into an `any Show`, with `T: Eq`, is checked on its own at once. *)
+let hint_bounds_fail c l (sg : fsig) s ret (t : ty) : bool =
+  let mark = open_speculation () in
+  (try unify t ret with Mismatch -> ());
+  let fails = (try check_known_bounds c l sg s; false with Syntax.Error _ -> true) in
+  undo_speculation mark;
+  close_speculation ();
+  fails
 
 (* Edit distance for "did you mean" hints (section 19.2). *)
 let edit_distance a b =
@@ -999,25 +1020,36 @@ and mutable_place c (e : Syntax.expr) : bool =
      | Some n -> (match lookup c n with Some v -> v.vmut || v.vkind = VParam MMut | None -> false)
      | None -> false
 
-(* Check the arguments of a call against instantiated parameters. *)
-and check_args c l ?(expects : ty list option) ~(receiver : texpr option) params (args : Syntax.arg list) : targ list * eff list =
-  (* [expects]: for each parameter, the type its argument is checked against as an expectation
-     (what a literal reads its type from), while it is coerced to the parameter itself *)
-  let expects_rest = match (expects, receiver) with Some (_ :: rest), Some _ -> Some rest | e, _ -> e in
-  let params_rest, recv_targ =
-    match (receiver, params) with
-    | Some r, (m, _, t, _) :: rest ->
-        (* a mut argument is the place itself: boxing it would write to a copy *)
-        let r = if m = MMut then (unify_at r.l t r.ty; r) else coerce c r t in
-        (rest, [ { amode = m; a = r } ])
-    | Some _, [] -> err "E0203" l "this function takes no arguments"
-    | None, _ -> (params, [])
-  in
-  let matched = match_args c l params_rest args in
-  let poly_effs = ref [] in
-  let targs =
-    List.mapi
-      (fun i (m, n, t, (a : Syntax.arg option), d) ->
+(* The matching of the arguments to the parameters, made once, when the first argument that is
+   not the receiver is needed. *)
+and args_matched c l (st : args_state) =
+  match st.a_matched with
+  | Some m -> m
+  | None ->
+      let rest =
+        match (st.a_receiver, st.a_params) with
+        | Some _, [] -> err "E0203" l "this function takes no arguments"
+        | Some _, _ :: rest -> rest
+        | None, ps -> ps
+      in
+      let m = match_args c l rest st.a_args in
+      st.a_matched <- Some m;
+      m
+
+(* Check the arguments in the given slots against the parameters, in the order given. *)
+and args_check c l (st : args_state) (slots : int list) : targ list =
+  let slot i : targ =
+    match (st.a_receiver, i) with
+    | Some r, 0 -> (
+        match st.a_params with
+        | (m, _, t, _) :: _ ->
+            (* a mut argument is the place itself: boxing it would write to a copy *)
+            let r = if m = MMut then (unify_at r.l t r.ty; r) else coerce c r t in
+            { amode = m; a = r }
+        | [] -> err "E0203" l "this function takes no arguments")
+    | _ -> (
+        let k = match st.a_receiver with Some _ -> i - 1 | None -> i in
+        let m, n, t, (a : Syntax.arg option), d = List.nth (args_matched c l st) k in
         match a with
         | Some a ->
             (match (m, a.amode) with
@@ -1028,10 +1060,7 @@ and check_args c l ?(expects : ty list option) ~(receiver : texpr option) params
              | _ -> ());
             let te =
               if m = MMut then (let te = check_or_infer c a.aexpr (Some t) in unify_at te.l t te.ty; te)
-              else
-                match expects_rest with
-                | Some es -> coerce c (check_or_infer c a.aexpr (Some (List.nth es i))) t
-                | None -> check c a.aexpr t
+              else check c a.aexpr t
             in
             if m = MTake && lend_of c.tb te <> None then
               err "E0320" a.aloc "a lent place cannot be stored; copy it with let first";
@@ -1040,18 +1069,31 @@ and check_args c l ?(expects : ty list option) ~(receiver : texpr option) params
              | Some MTake, XVar v -> c.moved <- (v.vid, a.aloc) :: c.moved
              | Some MTake, _ -> err "E0302" a.aloc "'take' moves a variable; write it before a variable name"
              | _ -> ());
-            (match (repr t, repr te.ty) with
-             | TFn pf, TFn af when pf.feff.poly && not af.feff.poly -> poly_effs := af.feff :: !poly_effs
-             | _ -> ());
             { amode = m; a = te }
         | None -> (
             match d with
             | Some d -> { amode = m; a = check c d t }
             | None -> assert false))
-      matched
   in
+  let rec go = function [] -> [] | i :: rest -> (let ta = slot i in ta :: go rest) in
+  go slots
+
+(* What follows the checking of all the arguments: the effects of the functions passed for
+   effect-polymorphic parameters, and the exclusivity of the mut arguments. *)
+and args_finish c l (st : args_state) (all : targ list) : targ list * eff list =
+  let matched = args_matched c l st in
+  let skip = match st.a_receiver with Some _ -> 1 | None -> 0 in
+  let poly_effs = ref [] in
+  List.iteri
+    (fun i (_, _, t, (a : Syntax.arg option), _) ->
+      match (a, List.nth_opt all (i + skip)) with
+      | Some _, Some ta -> (
+          match (repr t, repr ta.a.ty) with
+          | TFn pf, TFn af when pf.feff.poly && not af.feff.poly -> poly_effs := af.feff :: !poly_effs
+          | _ -> ())
+      | _ -> ())
+    matched;
   (* exclusivity: a mut argument must not overlap another argument (section 4.3) *)
-  let all = recv_targ @ targs in
   let rec path (e : texpr) =
     match e.e with
     | XVar v -> Some (v.vid, [])
@@ -1098,69 +1140,104 @@ and check_args c l ?(expects : ty list option) ~(receiver : texpr option) params
     all;
   (all, !poly_effs)
 
+(* Check the arguments of a call against instantiated parameters. *)
+and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : targ list * eff list =
+  let st = { a_receiver = receiver; a_params = params; a_args = args; a_matched = None } in
+  args_finish c l st (args_check c l st (List.init (List.length params) Fun.id))
+
 and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
   let sg = Hashtbl.find c.tb.fns u in
   (* the budget of retries belongs to one outermost call and the calls nested in it *)
   if !speculating = 0 then c.retries := retry_budget;
-  let first = instantiate sg in
-  (* The expected type reaches the arguments of a generic call as an expectation, which is
-     what lets a literal take its type from the context: `let x: F32? = pick(Some(1.0), None)`
-     checks `1.0` as an F32. The parameters are not bound to it: they take their types from
-     the arguments, and the result is coerced to the expected type afterwards, so
-     `let a: any Show = (Some(5)).or(4)` has the type Int, which is then boxed. When that
-     does not check, or the result does not fit the expected type, the call is checked again
-     with its parameters bound to the expected type, which is what puts a value into an
-     Option or a trait value before the call: `one.pick(Some(2))` as an `Int?` wraps `one`. *)
+  let s, ps, ret, eff = instantiate sg in
+  let st = { a_receiver = receiver; a_params = ps; a_args = args; a_matched = None } in
+  let n = List.length ps in
+  let all_slots = List.init n Fun.id in
+  (* The expected type is a hint for the result: the parameters are bound to it before the
+     arguments are checked, which is what lets a literal take its type from the context
+     (`let x: F32? = pick(Some(1.0), None)` checks `1.0` as an F32) and what puts a value into
+     an Option or a trait value before the call (`one.pick(Some(2))` as an `Int?` wraps `one`;
+     an impl is chosen for the type the parameter was bound to). It is only a hint. When the
+     call does not check with it, the call is checked on its own and the coercion to the
+     expected type follows: `let a: any Show = (Some(5)).or(4)` has the type Int, which is then
+     boxed, where the hint would ask for an Option[any Show]. *)
   let hinted =
-    match (exp, first) with
-    | Some _, (_, _, ret, _) -> (match repr ret with TVar _ | TNamed _ | TArray _ | TTuple _ -> true | _ -> false)
-    | None, _ -> false
+    match (exp, repr ret) with
+    | Some _, (TVar _ | TNamed _ | TArray _ | TTuple _) -> true
+    | _ -> false
   in
-  let attempt ?expects ~bind (s, ps, ret, eff) =
-    (match exp with Some t when bind -> (try unify t ret with Mismatch -> ()) | _ -> ());
-    let targs, poly = check_args c l ?expects ~receiver ps args in
-    if bind || expects <> None then check_known_bounds c l sg s;
+  let finish targs =
+    let targs, poly = args_finish c l st targs in
     (s, ret, eff, targs, poly)
   in
   let s, ret, eff, targs, poly =
     match exp with
     | Some t when hinted -> (
-        let _, ps0, ret0, _ = first in
-        match hint_expectations ps0 ret0 t with
-        | None -> attempt ~bind:false first   (* the expected type tells the arguments nothing *)
-        | Some exps -> (
-            let result_fits nret =
-              let mark = open_speculation () in
-              let ok = (try ignore (coerce c { e = XNone; ty = nret; l } t); true with Syntax.Error _ | Mismatch -> false) in
-              undo_speculation mark;
-              close_speculation ();
-              ok
+        match hint_binding s ret t with
+        | None -> finish (args_check c l st all_slots)   (* the hint binds nothing *)
+        | Some (bound, only_fresh) ->
+            (* The arguments whose parameters the hint cannot change are checked once, before it
+               is applied, and kept by both tries. That holds when the hint binds only type
+               variables of this call, since then nothing such an argument is checked against, and
+               nothing it can bind, is touched by it. It also needs the arguments before it to
+               leave the state it is checked in alone, which a literal does: a literal is checked
+               against the call's own type variables and nothing else. So an argument counts as
+               long as every argument before it that the hint does change is a literal. *)
+            let independent (_, _, pt, _) = not (List.exists (fun r -> occurs r pt) bound) in
+            let is_literal i =
+              match (st.a_receiver, i) with
+              | Some _, 0 -> false
+              | _ -> (
+                  let k = match st.a_receiver with Some _ -> i - 1 | None -> i in
+                  match List.nth (args_matched c l st) k with
+                  | _, _, _, Some { aexpr = { d = Lit _ | Unop ("-", { d = Lit _; _ }); _ }; amode = None; _ }, _ -> true
+                  | _ -> false)
             in
-            (* with the budget spent a call is not checked twice: its first result stands *)
-            let unfit = ref false in
-            let own () =
-              let ((_, nret, _, _, _) as r) = attempt ~expects:exps ~bind:false first in
-              if result_fits nret || !(c.retries) <= 0 then r
+            let shared =
+              if not only_fresh then []
               else begin
-                unfit := true;
-                err "E0201" l "the result does not fit the expected type"
+                let ok = ref true in
+                List.filter_map
+                  (fun i ->
+                    if independent (List.nth ps i) then (if !ok then Some i else None)
+                    else begin
+                      if not (is_literal i) then ok := false;
+                      None
+                    end)
+                  all_slots
               end
             in
-            match speculate c own with
-            | Ok r -> r
-            | Error e1 when !(c.retries) <= 0 -> raise e1
-            | Error _ -> (
-                decr c.retries;
-                match speculate c (fun () -> attempt ~bind:true (instantiate sg)) with
-                | Ok r -> r
-                | Error e2 when not !unfit -> raise e2
-                | Error _ ->
-                    (* the call checks but its result does not fit, and binding the parameters to
-                       the expected type does not work either: the expected type was only an
-                       expectation of the caller's, which coerces the result and says so if it
-                       does not fit *)
-                    attempt ~expects:exps ~bind:false first)))
-    | _ -> attempt ~bind:false first
+            let others = List.filter (fun i -> not (List.mem i shared)) all_slots in
+            let table = Array.make n None in
+            let fill slots targs = List.iter2 (fun i ta -> table.(i) <- Some ta) slots targs in
+            fill shared (args_check c l st shared);
+            let rest () =
+              fill others (args_check c l st others);
+              List.init n (fun i -> Option.get table.(i))
+            in
+            let plain () = finish (rest ()) in
+            if hint_bounds_fail c l sg s ret t then plain ()   (* a bound fails on the type it gives *)
+            else if !(c.retries) <= 0 then begin
+              (* the budget is spent: the call is checked with the hint alone, as it was before
+                 there was a second try *)
+              (try unify t ret with Mismatch -> ());
+              plain ()
+            end
+            else (
+              let hinted_try () =
+                (try unify t ret with Mismatch -> ());
+                let r = finish (rest ()) in
+                check_known_bounds c l sg s;
+                r
+              in
+              match speculate c hinted_try with
+              | Ok r -> r
+              | Error e -> (
+                  decr c.retries;
+                  match speculate c plain with
+                  | Ok r -> r
+                  | Error _ -> raise e)))
+    | _ -> finish (args_check c l st all_slots)
   in
   let convs = add_eff c l eff @ List.concat_map (add_eff c l) poly in
   (* bounds become obligations *)

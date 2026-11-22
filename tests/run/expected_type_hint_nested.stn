@@ -1,11 +1,13 @@
-# Nested calls that all fall back are checked in bounded time. In each call here, the expected type
-# the call gets for its result does not match what its arguments say (the variable `xs` is an
-# Array[Int], where the expected type asks for an Array[Int?]), so a check that bound the
-# parameters to it would fail at `xs` after checking the nested call, and be repeated without it:
-# the work would double at every level. The expected type is an expectation first, and parameters
-# are bound to it only if that does not check, or the result does not fit. Chains of forty calls
-# are checked beside calls that need the expected type for their literals, in the same call and
-# in the same function, and beside a bound that only the bound version satisfies.
+# Nested calls are checked in bounded time. In the chains of `choose_nested`, the expected type
+# asks for an Array[Int?] where the variable `xs` is an Array[Int], so a check with the
+# parameters bound to it fails at `xs` and the call is checked on its own. The nested call is
+# the first argument, which the expected type cannot change, so it is checked once and kept by
+# both tries, and the work does not double at every level. So it is in `late`, where only a
+# literal comes before it. `need_tag` is the other way round: the bound holds only for the type
+# the expected type gives, so the first try is the one that works, and no level is checked
+# twice. Chains of forty calls are checked beside calls that need the expected type for their
+# literals, in the same call and in the same function, and beside a bound that only the bound
+# version satisfies.
 trait Tag:
     fn tag(x: Self) -> Str
 
@@ -16,8 +18,14 @@ impl Tag for Option[Int]:
 fn keep_tag[T: Tag](x: T) -> T:
     x
 
+fn need_tag[T: Tag](inner: Int?, x: T) -> T:
+    x
+
 fn choose_nested[T](inner: Int?, xs: Array[T], fallback: T) -> T:
     fallback
+
+fn late[T](x: T, inner: Int?, xs: Array[T]) -> T:
+    x
 
 fn contextual[T](inner: F32?, value: T) -> T:
     value
@@ -47,5 +55,9 @@ fn main() ! io:
     print(f"{r.0} {r.1}")
     let t: (Int?, Int?) = two(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(Some(0), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), copy(xs), 1), keep_tag(1))
     print(f"{t.0} {t.1}")
+    let w: Int? = need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(need_tag(Some(0), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1), 1)
+    print(f"{w}")
+    let z: Int? = late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, late(1, Some(0), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs), xs)
+    print(f"{z}")
     let g: F32? = pick(Some(4.0), None)
     print(f"{g}")

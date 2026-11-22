@@ -53,6 +53,13 @@ let open_speculation () = incr speculating; !trail
 (* the attempt held: its changes stay in the log while an enclosing attempt can still fail *)
 let close_speculation () = decr speculating; if !speculating = 0 then trail := []
 
+(* the bindings and compressions logged since [mark], oldest first *)
+let trail_since mark =
+  let rec go l acc =
+    if l == mark then acc else match l with e :: rest -> go rest (e :: acc) | [] -> acc
+  in
+  go !trail []
+
 let undo_speculation mark =
   let rec go l = if l != mark then match l with (r, old) :: rest -> r := old; go rest | [] -> () in
   go !trail;

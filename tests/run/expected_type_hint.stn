@@ -1,6 +1,7 @@
-# The expected type is a hint for a generic result: it lets a literal argument take its type from
-# the context. It is only a hint. When the call does not check with it, the call is checked on
-# its own and the result is coerced to the expected type afterwards.
+# The expected type is a hint for a generic result: the parameters are bound to it first, which
+# lets a literal take its type from the context and puts a value into an Option or a trait value
+# before the call. It is only a hint. When the call does not check with it, the call is checked
+# on its own and the result is coerced to the expected type afterwards.
 fn pick[T](a: T, b: T) -> T:
     a
 
@@ -18,6 +19,21 @@ fn id_eq[T: Eq](x: T) -> T:
 
 fn keep[A, B](a: A, b: A, c: A, tail: B) -> B:
     tail
+
+trait Tag:
+    fn tag(x: Self) -> Str
+
+impl Tag for Int:
+    fn tag(x: Int) -> Str:
+        "int"
+
+impl Tag for Option[Int]:
+    fn tag(x: Option[Int]) -> Str:
+        "opt"
+
+fn marked[T: Tag](x: T) -> T ! io:
+    print(x.tag())
+    x
 
 fn boxed() -> any Show:
     5
@@ -64,3 +80,7 @@ fn main() ! io:
     let ss = "x"
     let k: F32? = keep(boxed(), nn, ss, Some(1.0))
     print(f"{k}")
+    # the parameter is bound to the expected type first, so the impl that runs is the one for Int?,
+    # not the one for Int that the argument alone would pick
+    let tagged: Int? = marked(1)
+    print(f"{tagged}")
