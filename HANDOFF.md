@@ -6,7 +6,7 @@ The `handoff/` directory (bundle and patches) exists only in the local clone and
 ## 1. State
 
 - `origin/main` is at `5923c05` (PR #8, squash-merged). PRs #1-#8 are merged, all squash merges. Tests: 201 pass with GCC and with Clang.
-- Two branches, both based on `5923c05`, both green, pushed to `origin` as `wip/fuzz-modules` and `wip/trait-generic-methods` (no PRs yet: opening one needs the user's ask).
+- Two branches, both based on `5923c05`, both green, pushed to `origin`, and each has an open PR: [#9](https://github.com/starnite-lang/starnite/pull/9) (`wip/trait-generic-methods`, the compiler fixes) and [#10](https://github.com/starnite-lang/starnite/pull/10) (`wip/fuzz-modules`, the fuzzer's module and crash oracles). Neither has been reviewed yet.
 - `claude/spec-draft-0.1` (remote) holds the spec as a branch. **Leave it** until the user says milestone 1 is done, then delete it.
 
 | Branch | Commits | Tests |
@@ -14,7 +14,7 @@ The `handoff/` directory (bundle and patches) exists only in the local clone and
 | `wip/fuzz-modules` | `58fbf3f` Fuzzer: programs split across a module; `50d9f02` Fuzzer: the compiler must not crash (§21.2, first oracle) | 204 pass; `tests/fuzz/selftest.sh` 14/14 |
 | `wip/trait-generic-methods` | `054225b` trait methods with type parameters of their own; `34c98ce` explicit type arguments `first[Int](xs)`; `9ecdf3d` an integer literal is an Int, never a Float; `d7b908b` prelude `swap` and `words`; `643d154` two crashes found by byte mutation; `69a10b1` unsettled constructed generic values are E0210; `9dc70e9` stack overflow is a trap / E0100 | 221 pass |
 
-The two branches are independent; merged together they conflict only in `README.md` (one paragraph). Proposed order: `wip/fuzz-modules` first (it needs none of the compiler changes), then `wip/trait-generic-methods`, which may be split (generic methods + explicit type args; literal rule; library; crash fixes; stack overflow). The `--crash` campaign in CI (`--crash --count 300 --shrink`) will find the unresolved-type-variable crash (`None` as a statement) until the crash-fix branch lands, so publish the compiler fixes first or in the same PR if you want CI green on the fuzz branch. The fuzz-modules branch alone found that crash in its first campaign.
+The two branches are independent; merged together they conflict only in `README.md` (one paragraph). **Merge order: #9 first, then #10.** #10's CI step `--crash --count 300` finds the unresolved-type-variable crash that #9 fixes, so it can fail until #9 is on main. After #9 merges, rebase `wip/fuzz-modules` onto `origin/main` (the only conflict is one README paragraph, in the "Passes 2 and 3" bullet or "Not done yet") and re-run the checks. #9 could be split into several PRs (generic methods and explicit type arguments; literal rule; library; crash fixes; stack overflow), but its commits are already separate. Both PRs are squash-merged on request only.
 
 ### Getting the work (the branches are also on origin)
 
