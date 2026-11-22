@@ -1,0 +1,9 @@
+# With two mut places out of range, the first one written traps, in the interpreter and in C alike.
+fn put(mut a: Int, mut b: Int):
+    a = b
+
+fn main():
+    var xs = [1]
+    var ys = [2]
+    put(mut xs[5], mut ys[7])
+    print("not reached")

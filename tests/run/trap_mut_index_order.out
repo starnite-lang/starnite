@@ -1,0 +1,4 @@
+mark
+trap: index out of range at tests/run/trap_mut_index_order.stn:14:16
+index 1, length 1
+exit 2

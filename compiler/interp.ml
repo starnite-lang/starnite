@@ -45,6 +45,13 @@ let out = Buffer.create 65536
 let busy : value ref list ref = ref []
 
 let cell_busy_trap l what = trap "shared cell busy" l ("a shared cell was " ^ what ^ " while it was lent out")
+
+(* The C backend gives a condition, an operand of and/or, the value of a branch, an arm or a
+   block, the body of a comprehension, a try and a function body each a frame of its own, and
+   releases the cells a long access holds when that frame ends. So does the interpreter. *)
+let scoped f =
+  let saved = !busy in
+  Fun.protect ~finally:(fun () -> busy := saved) f
 let flush_out () = print_string (Buffer.contents out); Buffer.clear out; flush stdout
 
 let tsub env t = subst env.sub t
@@ -168,7 +175,7 @@ and invoke env (tf : tfn) sub (vals : value list) : value * value list =
   let env' = { env with vars = Hashtbl.create 16; sub } in
   List.iter2 (fun v a -> bind env' v a) tf.fparams vals;
   let outs () = List.map (fun (v : var) -> !(get_var env' v)) tf.fparams in
-  match eval env' tf.fbody with
+  match scoped (fun () -> eval env' tf.fbody) with
   | r -> (r, outs ())
   | exception Return r -> (r, outs ())
   | exception (Failed _ as e) -> raise (Partial (outs (), e))
@@ -178,7 +185,7 @@ and invoke_closure env (lam : lambda) caps sub (vals : value list) : value * val
   List.iter (fun (id, r) -> Hashtbl.replace env'.vars id r) caps;
   List.iter2 (fun v a -> bind env' v a) lam.lparams vals;
   let outs () = List.map (fun (v : var) -> !(get_var env' v)) lam.lparams in
-  match eval env' lam.lbody with
+  match scoped (fun () -> eval env' lam.lbody) with
   | r -> (r, outs ())
   | exception Return r -> (r, outs ())
   | exception (Failed _ as e) -> raise (Partial (outs (), e))
@@ -213,7 +220,7 @@ and lend_target env (cl : callee) : (tfn * (string * ty) list) option =
    the place writes into the callee's copy of its mut parameters, which are then
    copied back to the caller's places, as for any mut argument (section 4.2). *)
 and lend_place env (tf, sub) (targs : targ list) : (unit -> value) * (value -> unit) =
-  let places, vals = eval_args env targs in
+  let places, vals = eval_args env ~hold:true targs in
   let env' = { env with vars = Hashtbl.create 16; sub } in
   List.iter2 (fun v a -> bind env' v a) tf.fparams vals;
   let get, set =
@@ -226,25 +233,32 @@ and lend_place env (tf, sub) (targs : targ list) : (unit -> value) * (value -> u
   in
   (get, fun x -> set x; write_back ())
 
-(* Arguments are evaluated left to right. A mut argument is read from its place, and the
-   shared cell it lives in is busy from that point to the end of the statement (section
-   13.3), as in the C backend: a later argument that reaches the cell traps, an earlier one
-   does not. *)
-and eval_args env (targs : targ list) : (((unit -> value) * (value -> unit)) option list * value list) =
-  let rec go places vals = function
-    | [] -> (List.rev places, List.rev vals)
+(* Arguments are evaluated left to right. A mut argument is resolved to its place where it
+   is written, and when the callee is a function the shared cell it lives in is busy from
+   there to the end of the frame (section 13.3), as in the C backend: a later argument that
+   reaches the cell traps, an earlier one does not. A built-in cannot reach a closure, so
+   nothing is lent for it. The callee works on a mut place as it is when the call starts, so
+   the places are read after the other arguments, in order, as C reads them at the call. *)
+and eval_args env ~hold (targs : targ list) : ((unit -> value) * (value -> unit)) option list * value list =
+  let rec go acc = function
+    | [] -> List.rev acc
     | ta :: rest ->
-        if ta.amode = MMut then begin
-          let (get, _) as p = place_of_expr env ta.a in
-          hold_busy env ta.a;
-          let v = get () in
-          go (Some p :: places) (v :: vals) rest
-        end else begin
-          let v = eval env ta.a in
-          go (None :: places) (v :: vals) rest
-        end
+        let slot =
+          if ta.amode = MMut then begin
+            let p = place_of_expr env ta.a in
+            if hold then hold_busy env ta.a;
+            `Place p
+          end else `Val (eval env ta.a)
+        in
+        go (slot :: acc) rest
   in
-  go [] [] targs
+  let slots = go [] targs in
+  let rec read = function
+    | [] -> []
+    | `Place (get, _) :: rest -> let v = get () in v :: read rest
+    | `Val v :: rest -> v :: read rest
+  in
+  (List.map (function `Place p -> Some p | `Val _ -> None) slots, read slots)
 
 and eval_call env (cl : callee) (targs : targ list) convs loc : value =
   match lend_target env cl with
@@ -252,7 +266,7 @@ and eval_call env (cl : callee) (targs : targ list) convs loc : value =
   | None ->
   apply_convs env convs (fun () ->
       let fval = match cl with CClosure f -> Some (eval env f) | _ -> None in
-      let places, vals = eval_args env targs in
+      let places, vals = eval_args env ~hold:(match cl with CBuiltin _ -> false | _ -> true) targs in
       let write_back outs =
         let rec go ps os =
           match (ps, os) with
@@ -372,7 +386,7 @@ and place_of_expr env (e : texpr) : (unit -> value) * (value -> unit) =
       let get, set = place_of_expr env b in
       let i = as_int (eval env ix) in
       let check a = if Int64.compare i 0L < 0 || Int64.compare i (Int64.of_int (Array.length a)) >= 0 then
-          trap "index out of range" e.l (Printf.sprintf "index %Ld, length %d" i (Array.length a)) in
+          trap "index out of range" ix.l (Printf.sprintf "index %Ld, length %d" i (Array.length a)) in
       ( (fun () -> let a = as_arr (get ()) in check a; a.(Int64.to_int i)),
         fun x -> let a = Array.copy (as_arr (get ())) in check a; a.(Int64.to_int i) <- x; set (VArr a) )
   | _ ->
@@ -456,22 +470,24 @@ and eval env (te : texpr) : value =
   | XArray es -> VArr (Array.of_list (List.map (eval env) es))
   | XStruct (_, _, es) -> VStruct (Array.of_list (List.map (eval env) es))
   | XVariant (_, _, i, es) -> VVariant (i, Array.of_list (List.map (eval env) es))
-  | XIf (c, a, b) -> if as_bool (eval env c) then eval env a else eval env b
-  | XBlock (ss, v) -> List.iter (exec env) ss; eval env v
+  | XIf (c, a, b) ->
+      if scoped (fun () -> as_bool (eval env c)) then scoped (fun () -> eval env a) else scoped (fun () -> eval env b)
+  | XBlock (ss, v) -> List.iter (exec env) ss; scoped (fun () -> eval env v)
   | XMatch (s, arms) ->
       let v = eval env s in
       let rec go = function
         | [] -> failwith "interp: no arm matched"
         | a :: rest ->
-            if match_pat env a.pat v && (match a.guard with Some g -> as_bool (eval env g) | None -> true) then eval env a.body
+            if match_pat env a.pat v && (match a.guard with Some g -> scoped (fun () -> as_bool (eval env g)) | None -> true)
+            then scoped (fun () -> eval env a.body)
             else go rest
       in
       go arms
   | XLambda lam ->
       let caps = List.map (fun (v : var) -> (v.vid, get_var env v)) lam.lcaps in
       VClosure (lam, caps, env.sub)
-  | XBin (And, a, b) -> VBool (as_bool (eval env a) && as_bool (eval env b))
-  | XBin (Or, a, b) -> VBool (as_bool (eval env a) || as_bool (eval env b))
+  | XBin (And, a, b) -> VBool (scoped (fun () -> as_bool (eval env a)) && scoped (fun () -> as_bool (eval env b)))
+  | XBin (Or, a, b) -> VBool (scoped (fun () -> as_bool (eval env a)) || scoped (fun () -> as_bool (eval env b)))
   | XBin (((Eq | Ne | Lt | Le | Gt | Ge) as op), a, b) ->
       let x = eval env a and y = eval env b in
       let t = tsub env a.ty in
@@ -499,7 +515,7 @@ and eval env (te : texpr) : value =
       | _ -> failwith "neg")
   | XNot a -> VBool (not (as_bool (eval env a)))
   | XTry a -> (
-      match eval env a with
+      match scoped (fun () -> eval env a) with
       | v -> VVariant (0, [| v |])
       | exception Failed (t, v) ->
           let ety = match repr (tsub env te.ty) with TNamed ("Result", [ _; e ]) -> e | _ -> t in
@@ -530,11 +546,11 @@ and eval env (te : texpr) : value =
   | XComp (body, comps) ->
       let acc = ref [] in
       let rec go = function
-        | [] -> acc := eval env body :: !acc
+        | [] -> acc := scoped (fun () -> eval env body) :: !acc
         | cp :: rest ->
             iterate env cp.csrc (fun x ->
                 if match_pat env cp.cvar x then
-                  match cp.ccond with Some c when not (as_bool (eval env c)) -> () | _ -> go rest)
+                  match cp.ccond with Some c when not (scoped (fun () -> as_bool (eval env c))) -> () | _ -> go rest)
       in
       go comps;
       VArr (Array.of_list (List.rev !acc))
@@ -630,7 +646,7 @@ and exec_ env (s : tstmt) : unit =
   | SContinue -> raise Continue
   | SWhile (c, body) -> (
       try
-        while as_bool (eval env c) do
+        while scoped (fun () -> as_bool (eval env c)) do
           try ignore (eval env body) with Continue -> ()
         done
       with Break -> ())

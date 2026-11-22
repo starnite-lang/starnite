@@ -1,0 +1,3 @@
+trap: shared cell busy at tests/run/trap_cell_busy_arg.stn:11:34
+a shared cell was accessed while it was lent out
+exit 2

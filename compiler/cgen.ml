@@ -892,17 +892,36 @@ and construct fc t i (vals : string list) : r =
 
 (* ---------- calls ---------- *)
 
+(* The arguments of a call, as C expressions. The address of a place holds its bounds check,
+   and C leaves open in which order the arguments of a call are evaluated, so when there is
+   more than one address each is taken into a variable, in order, once the other arguments
+   have been evaluated: the checks then run left to right, as in the interpreter. *)
+and arg_strings fc (items : [ `Addr of string * ty | `Arg of string ] list) : string list =
+  let many = List.length (List.filter (function `Addr _ -> true | `Arg _ -> false) items) > 1 in
+  let rec go = function
+    | [] -> []
+    | `Arg s :: rest -> s :: go rest
+    | `Addr (lv, t) :: rest ->
+        if many then begin
+          let p = fresh fc.st "_ap" in
+          line fc "%s* %s = &%s;" (ct fc t) p lv;
+          p :: go rest
+        end else ("&" ^ lv) :: go rest
+  in
+  go items
+
 and args_c fc (params : (mode * ty) list) (targs : targ list) : string list =
-  List.map2
-    (fun (m, pt) ta ->
-      match m with
-      | MMut -> let lv = place_lvalue_of_expr fc ta.a in hold_busy fc ta.a; "&" ^ lv
-      | MTake -> tmp fc ta.a.ty (own fc (expr fc ta.a) ta.a.ty)
-      | MBorrow ->
-          let x = expr fc ta.a in
-          let v = borrow fc x ta.a.ty in
-          v)
-    params targs
+  arg_strings fc
+    (List.map2
+       (fun (m, pt) ta ->
+         match m with
+         | MMut -> let lv = place_lvalue_of_expr fc ta.a in hold_busy fc ta.a; `Addr (lv, ts fc ta.a.ty)
+         | MTake -> `Arg (tmp fc ta.a.ty (own fc (expr fc ta.a) ta.a.ty))
+         | MBorrow ->
+             let x = expr fc ta.a in
+             let v = borrow fc x ta.a.ty in
+             `Arg v)
+       params targs)
 
 and call fc (e : texpr) (cl : callee) (targs : targ list) convs : r =
   let st = fc.st in
@@ -1038,16 +1057,17 @@ and call_instance fc (e : texpr) uname tys (sg : fsig) targs convs : r =
     (* every parameter it can lend from is passed by address, so the place outlives
        the call; the pointer is good for the rest of the caller's statement *)
     let avs =
-      List.map2
-        (fun (m, _) ta ->
-          match m with
-          | MMut -> let lv = place_lvalue_of_expr fc ta.a in hold_busy fc ta.a; "&" ^ lv
-          | MTake -> tmp fc ta.a.ty (own fc (expr fc ta.a) ta.a.ty)
-          | MBorrow -> (
-              match to_place fc ta.a with
-              | Some p -> "&" ^ place_lvalue ~write:false fc p
-              | None -> "&" ^ tmp fc ta.a.ty (borrow fc (expr fc ta.a) ta.a.ty)))
-        ps targs
+      arg_strings fc
+        (List.map2
+           (fun (m, _) ta ->
+             match m with
+             | MMut -> let lv = place_lvalue_of_expr fc ta.a in hold_busy fc ta.a; `Addr (lv, ts fc ta.a.ty)
+             | MTake -> `Arg (tmp fc ta.a.ty (own fc (expr fc ta.a) ta.a.ty))
+             | MBorrow -> (
+                 match to_place fc ta.a with
+                 | Some p -> `Addr (place_lvalue ~write:false fc p, ts fc ta.a.ty)
+                 | None -> `Arg ("&" ^ tmp fc ta.a.ty (borrow fc (expr fc ta.a) ta.a.ty))))
+           ps targs)
     in
     let p = fresh st "_lp" in
     line fc "%s* %s = %s(%s);" (ct fc t) p name (String.concat ", " avs);
@@ -1859,9 +1879,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
   let arg i = List.nth targs i in
   let b i = borrow fc (expr fc (arg i).a) (arg i).a.ty in
   let o i = tmp fc (arg i).a.ty (own fc (expr fc (arg i).a) (arg i).a.ty) in
-  (* a mut receiver or argument is a long access: its cell is busy from here on, as for the
-     mut argument of any other call *)
-  let m i = let lv = place_lvalue_of_expr fc (arg i).a in hold_busy fc (arg i).a; lv in
+  let m i = place_lvalue_of_expr fc (arg i).a in
   let unit_ () = { c = "0"; owned = false } in
   let value c = { c; owned = false } in
   let owned c = { c = tmp fc t c; owned = true } in
