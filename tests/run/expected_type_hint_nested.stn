@@ -5,11 +5,14 @@
 # that is the first argument, which the expected type cannot change (`choose_nested`), is checked
 # once and kept by both tries. A call that already failed with the expected type is not tried with
 # it again, which is what bounds `late`, where a literal or a variable comes before the nested
-# call, and `dep`, where the nested call is the argument the expected type changes. And a budget
-# of retries stands behind both. `need_tag` is the other way round: the bound holds only for the
-# type the expected type gives, so the first try is the one that works. Chains of forty calls are
-# checked beside calls that need the expected type for their literals, in the same call and in the
-# same function, and beside a bound that only the bound version satisfies.
+# call, and `dep`, where the nested call is the argument the expected type changes. What it
+# remembers is the state the failure depended on, so it is not used when a retry has changed the
+# type of a variable the call mentions. And a budget of retries stands behind both.
+#
+# `need_tag` is the other way round: the bound holds only for the type the expected type gives, so
+# the first try is the one that works. Chains of forty calls are checked beside calls that need the
+# expected type for their literals, in the same call and in the same function, and beside a bound
+# that only the bound version satisfies.
 trait Tag:
     fn tag(x: Self) -> Str
 
@@ -31,6 +34,12 @@ fn late[T](x: T, inner: Int?, xs: Array[T]) -> T:
 
 fn dep[T](x: T, xs: Array[T]) -> T:
     x
+
+fn inner_pair[A, B](xs: Array[A], b: B) -> (Array[A], B):
+    (xs, b)
+
+fn outer_seed[T](seed: T, xs: Array[T], p: (Array[Int], F32?)) -> T:
+    seed
 
 fn contextual[T](inner: F32?, value: T) -> T:
     value
@@ -71,3 +80,9 @@ fn main() ! io:
     print(f"{e}")
     let g: F32? = pick(Some(4.0), None)
     print(f"{g}")
+    # a call that failed with the expected type in one try is not skipped in the retry when what it
+    # depends on has changed: the empty array takes its element type from the outer call's hint in
+    # one, and from its argument in the other, and only the second lets inner_pair take F32?
+    let ys = []
+    let out: Int? = outer_seed(1, ys, inner_pair(ys, Some(1.0)))
+    print(f"{out}")

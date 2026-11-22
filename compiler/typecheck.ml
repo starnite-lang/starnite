@@ -377,6 +377,14 @@ let lookup c name : var option =
   in
   go [] c.frames
 
+(* A variable by name, like lookup, but without marking it captured: for looking, not using. *)
+let peek c name : var option =
+  let rec go = function
+    | [] -> None
+    | f :: rest -> (match List.assoc_opt name f.vars with Some v -> Some v | None -> go rest)
+  in
+  go c.frames
+
 let all_names c = List.concat_map (fun f -> List.map fst f.vars) c.frames
 
 (* What an attempt at checking an expression can change, kept so that a failed attempt can
@@ -423,6 +431,44 @@ let speculate c (f : unit -> 'a) : ('a, exn) result =
    multiply the work at every level; once the budget is spent, the calls nested in it are
    checked on their own. *)
 let retry_budget = 4096
+
+(* A type as a string that tells unresolved type variables apart, for what must not be
+   confused with another type that merely looks the same. *)
+let rec key_ty t =
+  match repr t with
+  | TVar { contents = Unbound n } -> "?" ^ string_of_int n
+  | TVar _ -> "?"
+  | TArray t -> "[" ^ key_ty t ^ "]"
+  | TTuple ts -> "(" ^ String.concat "," (List.map key_ty ts) ^ ")"
+  | TNamed (n, ts) -> n ^ "<" ^ String.concat "," (List.map key_ty ts) ^ ">"
+  | TAny (n, ts) -> "any " ^ n ^ "<" ^ String.concat "," (List.map key_ty ts) ^ ">"
+  | TErr ts -> "err(" ^ String.concat "," (List.map key_ty ts) ^ ")"
+  | TFn f ->
+      let m = function MMut -> "mut " | MTake -> "take " | _ -> "" in
+      "fn(" ^ String.concat "," (List.map (fun (md, t) -> m md ^ key_ty t) f.fps) ^ ")->" ^ key_ty f.fret
+      ^ (if f.feff.io then "!io" else "") ^ (if f.feff.poly then "!poly" else "")
+      ^ "[" ^ String.concat "," (List.map key_ty f.feff.errs) ^ "]"
+  | t -> show_ty t
+
+(* Every name an expression mentions, bound inside it or not. *)
+let rec names_in (e : Syntax.expr) (acc : string list) : string list =
+  let many es acc = List.fold_left (fun a e -> names_in e a) acc es in
+  match e.d with
+  | Lit _ -> acc
+  | FStr ps -> List.fold_left (fun a -> function Syntax.FLit _ -> a | Syntax.FExpr e -> names_in e a) acc ps
+  | Name n -> n :: acc
+  | Field (b, _) -> names_in b acc
+  | Call (f, args) -> many (List.map (fun (a : Syntax.arg) -> a.aexpr) args) (names_in f acc)
+  | Bracket (b, bargs) -> List.fold_left (fun a -> function Syntax.BExpr e -> names_in e a | Syntax.BType _ -> a) (names_in b acc) bargs
+  | Tuple es | ArrayLit es | BraceLit es -> many es acc
+  | MapLit kvs -> many (List.concat_map (fun (k, v) -> [ k; v ]) kvs) acc
+  | Comp (body, comps) ->
+      many (body :: List.concat_map (fun (cp : Syntax.comp) -> cp.citer :: Option.to_list cp.cif) comps) acc
+  | IfE (a, b, c) -> many [ a; b; c ] acc
+  | Lambda (_, Syntax.LExpr e) -> names_in e acc
+  | Lambda (_, Syntax.LAssign (p, _, v)) -> many [ p; v ] acc
+  | Binop (_, a, b) | Range (a, b) -> many [ a; b ] acc
+  | Unop (_, a) -> names_in a acc
 
 (* A bound on a type that is already known is checked as soon as the call is, not only when
    the function ends. Inside the attempt with the expected type, this lets a bound that the
@@ -1177,15 +1223,23 @@ and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
         match hint_binding s ret t with
         | None -> finish (args_check c l st all_slots)   (* the hint binds nothing *)
         | Some (bound, only_fresh) ->
-            (* A call that did not check with the hint, at this place and with this expected type, did not
-               check in a try that was undone, and will not now: the retry of a call that
-               contains it comes here again, and checking it twice at every level is the
-               doubling. It is checked on its own at once. *)
+            (* A call that did not check with the hint, in this state, did not check in a try that
+               was undone, and will not now: the retry of a call that contains it comes here again,
+               and checking it twice at every level is the doubling. It is checked on its own at
+               once. The state is what the check depends on: the place, the callee, the expected
+               type, the receiver, and the types of the variables the arguments mention, with
+               unresolved type variables told apart. A try that is undone can bind such a
+               variable's type one way and the retry another, and then the failure says nothing. *)
             let key =
-              if has_tvar t then None
-              else Some (Printf.sprintf "%s:%d:%d:%s:%d:%s" l.file l.line l.col u n (show_ty t))
+              let names = List.sort_uniq compare (List.concat_map (fun (a : Syntax.arg) -> names_in a.aexpr []) args) in
+              let vars =
+                List.map (fun nm -> match peek c nm with Some v -> nm ^ ":" ^ key_ty v.vty | None -> nm) names
+              in
+              Printf.sprintf "%s:%d:%d:%s:%d:%s|%s|%s" l.file l.line l.col u n (key_ty t)
+                (match receiver with Some r -> key_ty r.ty | None -> "")
+                (String.concat "," vars)
             in
-            if (match key with Some k -> Hashtbl.mem c.hint_failed k | None -> false) then finish (args_check c l st all_slots)
+            if Hashtbl.mem c.hint_failed key then finish (args_check c l st all_slots)
             else begin
               (* The leading arguments whose parameters the hint cannot change are checked once,
                  before it is applied, and kept by both tries. This holds when the hint binds
@@ -1217,7 +1271,7 @@ and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
                     decr c.retries;
                     match speculate c plain with
                     | Ok r ->
-                        Option.iter (fun k -> Hashtbl.replace c.hint_failed k ()) key;
+                        Hashtbl.replace c.hint_failed key ();
                         r
                     | Error _ -> raise e))
             end)
