@@ -1714,11 +1714,30 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
          receiver would be taken (its instantiation of the type, and the bounds it fixes), come
          first; if there are none, the call is a type error against all of them. *)
       let fitting =
-        match (by_head, args) with
-        | _ :: _ :: _, ({ aname = None; _ } as a) :: _ -> (
-            match probe_type c a.aexpr with
-            | Some t -> List.filter (fun u -> match (Hashtbl.find c.tb.fns u).sparams with [] -> true | _ -> fits_receiver c t u) by_head
-            | None -> by_head)
+        match by_head with
+        | _ :: _ :: _ ->
+            (* the argument of a function's first parameter is the first written one, or else the one
+               named for it; the type of each is found once *)
+            let probed = ref [] in
+            let type_of (a : Syntax.arg) =
+              match List.assq_opt a.aexpr !probed with
+              | Some t -> t
+              | None -> let t = probe_type c a.aexpr in probed := (a.aexpr, t) :: !probed; t
+            in
+            List.filter
+              (fun u ->
+                match (Hashtbl.find c.tb.fns u).sparams with
+                | [] -> true
+                | (_, pname, _, dflt) :: _ -> (
+                    let first =
+                      match List.find_opt (fun (a : Syntax.arg) -> a.aname = None) args with
+                      | Some a -> Some a
+                      | None -> List.find_opt (fun (a : Syntax.arg) -> a.aname = Some pname) args
+                    in
+                    match first with
+                    | None -> dflt <> None     (* left to its default, or not given: such a call needs the default *)
+                    | Some a -> (match type_of a with Some t -> fits_receiver c t u | None -> true)))
+              by_head
         | _ -> by_head
       in
       let ok = prefer_owner c.tb self_ty (if fitting = [] then by_head else fitting) in

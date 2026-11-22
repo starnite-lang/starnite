@@ -46,3 +46,6 @@ impl[T: Label] Reads[Int] for Box[T]:
 impl Reads[Str] for Box[Str]:
     fn extract(self: Box[Str]) -> Str:
         self.item
+
+fn width*(box: Box[Int]) -> Int:
+    1

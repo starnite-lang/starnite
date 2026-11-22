@@ -15,6 +15,10 @@ impl Peek for boxes.Box[Str]:
     fn peek(self: boxes.Box[Str]) -> Str:
         f"the program peeks at a string box {self.item}"
 
+# a second function of the same name, whose first parameter is named differently
+fn width(b: boxes.Box[Str]) -> Int:
+    2
+
 # the library's show_label needs T: Label, which Str has no impl of
 fn show_label(b: boxes.Box[Str]) -> Str:
     f"the program labels a string box {b.item}"
@@ -58,3 +62,8 @@ fn main() ! io:
     print(f"{len(value)}")
     let n = boxes.Box(1).extract()
     print(f"{n + 1}")
+
+    # and with the first argument given by name, which is the first parameter's name for each function
+    print(boxes.Box.read(b = boxes.Box(1)))
+    print(boxes.Box.read(b = boxes.Box("x")))
+    print(f"{boxes.Box.width(box = boxes.Box(1))} {boxes.Box.width(b = boxes.Box("x"))}")
