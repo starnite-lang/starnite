@@ -1699,6 +1699,16 @@ and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
        | TVar _ -> err "E0201" l "the type of this function value must be known; add an annotation"
        | t -> err "E0201" l "%s is not a function" (show_ty t))
 
+(* The type arguments that a value of a generic type is made with are found from its fields, or from where
+   the value goes, as those of a call are; if nothing settles one by the end of the function, the value needs
+   an annotation: `let x: Int? = None`. *)
+and settle_by_the_end c l (what : string) (s : (string * ty) list) =
+  List.iter
+    (fun (p, v) ->
+      c.unsolved <-
+        (v, l, Printf.sprintf "the type parameter %s of %s is never settled by this value; give it a type with an annotation" p what) :: c.unsolved)
+    s
+
 (* a type argument written in brackets: a type, or a name that the parser could not tell from an expression *)
 and explicit_type_arg c (a : Syntax.barg) : ty =
   match a with
@@ -1711,6 +1721,7 @@ and construct_struct c l n args exp : texpr =
   match d.dbody with
   | DStruct fs ->
       let s = List.map (fun p -> (p, fresh ())) d.dparams in
+      settle_by_the_end c l n s;
       let ty = TNamed (n, List.map snd s) in
       (match exp with Some t -> (try unify t ty with Mismatch -> ()) | None -> ());
       let defaults = struct_defaults c n in
@@ -1731,6 +1742,7 @@ and construct_variant c l tn idx vn (args : Syntax.arg list) exp : texpr =
       let shown_vn = vn in
       let vn = v.vname_ in
       let s = List.map (fun p -> (p, fresh ())) d.dparams in
+      settle_by_the_end c l shown_vn s;
       let ty = TNamed (tn, List.map snd s) in
       (match exp with
        | Some t -> (try unify t ty with Mismatch -> ())
