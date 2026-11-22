@@ -1,0 +1,14 @@
+# A mut place is read when the call starts, after the other arguments are evaluated. The second
+# argument grows the array that the first one points into, so a place taken any earlier would
+# point at freed memory in C.
+fn bump(mut xs: Array[Int]) -> Int:
+    xs.push(1)
+    len(xs)
+
+fn put(mut a: Int, n: Int):
+    a = n
+
+fn main() ! io:
+    var xs = [0]
+    put(mut xs[0], bump(mut xs))
+    print(f"{xs}")
