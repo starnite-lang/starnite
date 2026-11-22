@@ -2091,6 +2091,14 @@ let declare_items tb modname (items : item list) =
           in
           let tps0 = List.map (fun g -> g.gname) im.igenerics in
           let fty = conv_ty tb tps0 None im.ifor in
+          (* a call on a trait value runs the methods of its own trait, through the method
+             table, and never looks at other impls: an impl for it could not be used *)
+          (match repr fty with
+           | TAny _ ->
+               err "E0230" im.iloc
+                 "%s cannot be implemented for %s: a call on a trait value uses only the methods of its own trait; add the method to that trait, or write a function that takes %s"
+                 trn (show_ty fty) (show_ty fty)
+           | _ -> ());
           let tps = tparams_of tb im.igenerics (Some fty) in
           let targs = List.map (conv_ty tb tps0 (Some fty)) im.itargs in
           let targs = if targs = [] then List.map (fun _ -> fty) info.trparams else targs in

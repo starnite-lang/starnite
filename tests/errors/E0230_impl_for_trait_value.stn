@@ -1,0 +1,13 @@
+# expect: E0230 8:1
+trait Figure:
+    fn area(f: Self) -> Float
+
+trait Describe:
+    fn describe(x: Self) -> Str
+
+impl Describe for any Figure:
+    fn describe(x: any Figure) -> Str:
+        f"figure {x.area()}"
+
+fn main():
+    print("x")

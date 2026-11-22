@@ -1,0 +1,10 @@
+# expect: E0230 5:1
+trait Figure:
+    fn area(f: Self) -> Float
+
+impl Figure for any Figure:
+    fn area(f: any Figure) -> Float:
+        f.area()
+
+fn main():
+    print("x")
