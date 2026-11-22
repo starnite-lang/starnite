@@ -1,4 +1,8 @@
 lib reads an int box 1
 the program reads a string box x
 1 2
+lib peeks at an int box 1
+the program peeks at a string box x
+an int
+the program labels a string box y
 exit 0

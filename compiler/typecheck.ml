@@ -19,6 +19,7 @@ type tables = {
   traits : (string, trait_info) Hashtbl.t;
   mutable impls : impl_info list;
   consts : (string, const_info) Hashtbl.t;
+  mutable tenv : (string * ty) list;                    (* type names bound to types, for the default of a parameter: the type parameters of its function, as the call instantiates them *)
   mutable cur : string;                                 (* the module being declared or checked (section 3.5) *)
   mutable entry : string;                               (* the module of the file given to the compiler *)
   imports : (string, (string * string) list) Hashtbl.t; (* module -> (name it is imported as, module path) *)
@@ -136,19 +137,6 @@ let method_fns tb self m =
     (fun u -> (sg u).smodule = tb.cur || (sg u).smodule = "core" || ((sg u).smodule = home && (sg u).sexport))
     (try Hashtbl.find tb.by_name m with Not_found -> [])
 
-(* Whether the receiver [self] can be the first argument of the function [u]. Nothing stays bound. *)
-let fits_receiver_in tb self u =
-  let sg = Hashtbl.find tb.fns u in
-  match sg.sparams with
-  | (_, _, t, _) :: _ ->
-      let s = List.map (fun (p, _) -> (p, fresh ())) sg.stparams in
-      let mark = open_speculation () in
-      let ok = (try unify self (subst s t); true with Mismatch -> false) in
-      undo_speculation mark;
-      close_speculation ();
-      ok
-  | [] -> false
-
 (* Of the functions a method call can mean, those of the module that defines the type of the
    receiver come first (section 4.7); only when none of them fits does the call find those of the
    calling module and of the prelude. *)
@@ -246,6 +234,7 @@ let rec conv_ty tb (tps : string list) (self : ty option) (t : Syntax.ty) : ty =
   | TyPath ([ "Self" ], [], l) -> (
       match self with Some s -> s | None -> err "E0101" l "Self is only valid inside a trait or impl")
   | TyPath ([ n ], [], _) when List.mem n tps -> TParam n
+  | TyPath ([ n ], [], _) when List.mem_assoc n tb.tenv -> List.assoc n tb.tenv
   | TyPath ([ n ], args, l) when List.mem_assoc n prim_names ->
       if args <> [] then err "E0102" l "type %s takes no type arguments" n else List.assoc n prim_names
   | TyPath ([ "Array" ], args, l) -> (
@@ -504,6 +493,7 @@ type fctx = {
    there is one. The matching of arguments to parameters is made when the first of them is
    needed, so that an error in the receiver comes before one in the number of arguments. *)
 type args_state = {
+  a_tenv : (string * ty) list;   (* the type parameters of the callee, as this call instantiates them *)
   a_receiver : texpr option;
   a_params : (mode * string * ty * Syntax.expr option) list;
   a_args : Syntax.arg list;
@@ -629,6 +619,25 @@ let check_known_bounds c l (sg : fsig) s =
               err "E0204" l "%s does not implement %s" (show_ty t) tr)
           bs)
     sg.stparams
+
+(* Whether the receiver [self] can be the first argument of the function [u]: the type fits, and a
+   bound on a type parameter that the receiver fixes holds. Nothing stays bound. *)
+let fits_receiver c self u =
+  let sg = Hashtbl.find c.tb.fns u in
+  match sg.sparams with
+  | (_, _, t, _) :: _ ->
+      let s = List.map (fun (p, _) -> (p, fresh ())) sg.stparams in
+      let mark = open_speculation () in
+      let ok =
+        (try
+           unify self (subst s t);
+           (try check_known_bounds c noloc sg s; true with Syntax.Error _ -> false)
+         with Mismatch -> false)
+      in
+      undo_speculation mark;
+      close_speculation ();
+      ok
+  | [] -> false
 
 (* The type variables of a call that its expected type would bind to the result: those it
    binds, and whether they are all variables of the call itself, which s lists. None if it
@@ -1328,13 +1337,15 @@ and args_check c l (st : args_state) (slots : int list) : targ list =
                 let dm = try List.assq d !default_modules with Not_found -> c.tb.cur in
                 (* nor are its type parameters, or its Self: a type written in the default is the
                    module's own, not one that the caller happens to have a parameter of that name for *)
-                let caller_frames = c.frames and caller_tparams = c.tparams and caller_self = c.self_ty in
+                let caller_frames = c.frames and caller_tparams = c.tparams and caller_self = c.self_ty and caller_tenv = c.tb.tenv in
                 c.frames <- [ { vars = []; lam = None } ];
                 c.tparams <- [];
                 c.self_ty <- None;
+                (* a type parameter of the function the default belongs to means what this call made of it *)
+                c.tb.tenv <- st.a_tenv;
                 let te =
                   Fun.protect
-                    ~finally:(fun () -> c.frames <- caller_frames; c.tparams <- caller_tparams; c.self_ty <- caller_self)
+                    ~finally:(fun () -> c.frames <- caller_frames; c.tparams <- caller_tparams; c.self_ty <- caller_self; c.tb.tenv <- caller_tenv)
                     (fun () -> in_module c.tb dm (fun () -> check c d t))
                 in
                 { amode = m; a = te }
@@ -1406,8 +1417,8 @@ and args_finish c l (st : args_state) (all : targ list) : targ list * eff list =
   (all, !poly_effs)
 
 (* Check the arguments of a call against instantiated parameters. *)
-and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : targ list * eff list =
-  let st = { a_receiver = receiver; a_params = params; a_args = args; a_matched = None } in
+and check_args c l ~tenv ~(receiver : texpr option) params (args : Syntax.arg list) : targ list * eff list =
+  let st = { a_tenv = tenv; a_receiver = receiver; a_params = params; a_args = args; a_matched = None } in
   args_finish c l st (args_check c l st (List.init (List.length params) Fun.id))
 
 and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
@@ -1415,7 +1426,7 @@ and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
   (* the budget of retries belongs to one outermost call and the calls nested in it *)
   if !speculating = 0 then c.retries := retry_budget;
   let s, ps, ret, eff = instantiate sg in
-  let st = { a_receiver = receiver; a_params = ps; a_args = args; a_matched = None } in
+  let st = { a_tenv = s; a_receiver = receiver; a_params = ps; a_args = args; a_matched = None } in
   let n = List.length ps in
   let all_slots = List.init n Fun.id in
   (* The expected type is a hint for the result: the parameters are bound to it before the
@@ -1605,7 +1616,7 @@ and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
       (match repr tf.ty with
        | TFn ft ->
            let ps = List.mapi (fun i (m, t) -> (m, Printf.sprintf "arg%d" i, t, None)) ft.fps in
-           let targs, _ = check_args c l ~receiver:None ps args in
+           let targs, _ = check_args c l ~tenv:[] ~receiver:None ps args in
            let convs = add_eff c l { ft.feff with poly = false } in
            mk (XCall (CClosure tf, targs, convs)) ft.fret l
        | TVar _ -> err "E0201" l "the type of this function value must be known; add an annotation"
@@ -1620,7 +1631,7 @@ and construct_struct c l n args exp : texpr =
       (match exp with Some t -> (try unify t ty with Mismatch -> ()) | None -> ());
       let defaults = struct_defaults c n in
       let params = List.map2 (fun fi dflt -> (MTake, fi.fname_, subst s fi.fty, dflt)) fs defaults in
-      let targs, _ = check_args c l ~receiver:None params args in
+      let targs, _ = check_args c l ~tenv:s ~receiver:None params args in
       mk (XStruct (n, List.map snd s, List.map (fun a -> a.a) targs)) ty l
   | _ -> err "E0201" l "%s is not a struct" n
 
@@ -1643,7 +1654,7 @@ and construct_variant c l tn idx vn (args : Syntax.arg list) exp : texpr =
       if v.vfields = [] && args <> [] then err "E0203" l "variant %s takes no arguments" shown_vn;
       let defaults = try Hashtbl.find defaults_table (tn ^ "." ^ vn) with Not_found -> List.map (fun _ -> None) v.vfields in
       let params = List.map2 (fun fi dflt -> (MTake, fi.fname_, subst s fi.fty, dflt)) v.vfields defaults in
-      let targs, _ = if v.vfields = [] then ([], []) else check_args c l ~receiver:None params args in
+      let targs, _ = if v.vfields = [] then ([], []) else check_args c l ~tenv:s ~receiver:None params args in
       if v.vfields <> [] && args = [] && List.exists (fun d -> d = None) defaults then
         err "E0203" l "variant %s needs %d argument(s)" shown_vn (List.length v.vfields);
       List.iter (fun (_, t) -> ()) s;
@@ -1688,11 +1699,20 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
               | [] -> false)
             (method_fns c.tb self m)
         in
-        (* of the functions for this kind of type, those that take this instantiation of it: a
-           function of Box[Int] is not a method of a Box[Str]. With none that does, the call is
-           a type error, and is reported as one. *)
-        let fitting = List.filter (fits_receiver_in c.tb self) by_head in
-        prefer_owner c.tb self (if fitting = [] then by_head else fitting)
+        (* of the functions for this kind of type, those that take this receiver: a function of
+           Box[Int] is not a method of a Box[Str], nor is one whose bound the receiver breaks *)
+        prefer_owner c.tb self (List.filter (fits_receiver c self) by_head)
+      in
+      (* what the call is a type error against, if nothing takes the receiver: the functions
+         for this kind of type, and only after the traits are looked at *)
+      let misfit_fns () =
+        prefer_owner c.tb self
+          (List.filter
+             (fun u ->
+               match (Hashtbl.find c.tb.fns u).sparams with
+               | (_, _, t, _) :: _ -> head t = h && h <> "_param"
+               | [] -> false)
+             (method_fns c.tb self m))
       in
       let generic_cands =
         prefer_owner c.tb self
@@ -1739,6 +1759,10 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
       | [], [] -> (
           match generic_cands with
           | u :: _ -> check_recv (recv_mode u); call_sig c l u ~receiver:(Some tb) args exp
+          | [] when misfit_fns () <> [] -> (
+              match misfit_fns () with
+              | [ u ] -> check_recv (recv_mode u); call_sig c l u ~receiver:(Some tb) args exp
+              | _ -> err "E0105" l "'%s' matches more than one function" m)
           | [] -> (
               match self with
               | TNamed _ | TTuple _ -> (
@@ -1778,7 +1802,7 @@ and trait_call c l tn trargs m (sg : fsig) self (receiver : texpr option) args e
            let sb = List.map (fun (p, _) -> (p, try List.assoc p sb with Not_found -> fresh ())) im.itparams in
            List.iter2 (fun a b -> try unify a (subst sb b) with Mismatch -> ()) ta im.itargs_
        | _ -> ()));
-  let targs, poly = check_args c l ~receiver ps args in
+  let targs, poly = check_args c l ~tenv:[] ~receiver ps args in
   c.obligations <- (self, tn, ta, l) :: c.obligations;
   (* the method's own effects, and those of any function argument whose effects are open *)
   let convs = add_eff c l { sg.seff with errs = List.map (subst s) sg.seff.errs } @ List.concat_map (add_eff c l) poly in
@@ -2876,7 +2900,7 @@ let () = ensure_const := check_const
 let new_tables () =
   { decls = Hashtbl.create 64; variants = Hashtbl.create 64; fns = Hashtbl.create 64; by_name = Hashtbl.create 64;
     bodies = Hashtbl.create 64; traits = Hashtbl.create 16; impls = []; consts = Hashtbl.create 8;
-    cur = "core"; entry = ""; imports = Hashtbl.create 8;
+    tenv = []; cur = "core"; entry = ""; imports = Hashtbl.create 8;
     typed_consts = Hashtbl.create 8; lambdas = []; final_pass = false; decl_errors = []; any_uses = []; traits_ready = false; impl_contracts = [] }
 
 (* what a module imports: the name it is known by here (`import a.b` makes `b`, and

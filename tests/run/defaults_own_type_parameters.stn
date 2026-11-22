@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Sections 2.2, 3.4 and 5.2: a type written in a default may name a type parameter of its own
+# function, and means what the call made of it: the type of the argument. It does not matter what
+# the caller's own type parameters are called, or whether the caller has any.
+fn apply[T](x: T, f: fn(T) -> T = fn(y: T): y) -> T:
+    f(x)
+
+fn run[T](x: T) -> T:
+    apply(x)
+
+fn other[U](x: U) -> U:
+    apply(x)
+
+fn first_or[T](xs: Array[T], none: Array[T] = []) -> Array[T]:
+    if len(xs) > 0:
+        xs
+    else:
+        none
+
+type Holder[T] = struct(items: Array[T] = [])
+
+fn main() ! io:
+    print(f"{apply(3)} {apply("t")} {apply(4, fn(v: Int): v * 2)}")
+    print(f"{run(5)} {run("s")} {other(1.5)}")
+    let none: Array[Int] = []
+    print(f"{len(first_or([1, 2]))} {len(first_or(none))}")
+    let h: Holder[Int] = Holder()
+    print(f"{len(h.items)}")

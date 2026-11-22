@@ -2,7 +2,21 @@
 # Section 4.7: the functions of the module that defines the type of the receiver come first, among
 # those that take the receiver. A function of Box[Int] does not take a Box[Str], so the program's
 # own function for Box[Str] is the method of that one; for the same instantiation, the module's wins.
+# A function whose bound the receiver breaks does not take it either, and when no function takes
+# the receiver, a trait that is in scope supplies the method before the call is a type error.
 import lib.boxes
+
+# a trait of this program, for the instantiation that the library's function peek does not take
+trait Peek:
+    fn peek(self: Self) -> Str
+
+impl Peek for boxes.Box[Str]:
+    fn peek(self: boxes.Box[Str]) -> Str:
+        f"the program peeks at a string box {self.item}"
+
+# the library's show_label needs T: Label, which Str has no impl of
+fn show_label(b: boxes.Box[Str]) -> Str:
+    f"the program labels a string box {b.item}"
 
 fn read(b: boxes.Box[Str]) -> Str:
     f"the program reads a string box {b.item}"
@@ -14,3 +28,7 @@ fn main() ! io:
     print(boxes.Box(1).read())
     print(boxes.Box("x").read())
     print(f"{boxes.Box(5).size()} {size(boxes.Box(5))}")
+    print(boxes.Box(1).peek())
+    print(boxes.Box("x").peek())
+    print(boxes.Box(2).show_label())
+    print(boxes.Box("y").show_label())

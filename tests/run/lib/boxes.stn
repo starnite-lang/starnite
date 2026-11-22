@@ -8,3 +8,16 @@ fn read*(b: Box[Int]) -> Str:
 
 fn size*(b: Box[Int]) -> Int:
     1
+
+fn peek*(b: Box[Int]) -> Str:
+    f"lib peeks at an int box {b.item}"
+
+trait Label*:
+    fn label(self: Self) -> Str
+
+impl Label for Int:
+    fn label(self: Int) -> Str:
+        "an int"
+
+fn show_label*[T: Label](b: Box[T]) -> Str:
+    b.item.label()
