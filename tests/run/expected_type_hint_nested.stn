@@ -1,10 +1,19 @@
 # Nested calls that all fall back are checked in bounded time. Every call here is first tried with
 # the expected type, which fails at `xs`, and then on its own; each retry would check the nested
-# call again, so without a bound the work doubles at every level.
+# call again, so without a bound the work doubles at every level. The bound belongs to one
+# outermost call, so a call after it still gets the expected type for its literals.
 fn choose_nested[T](inner: Int?, xs: Array[T], fallback: T) -> T:
     fallback
+
+fn pick[T](a: T, b: T) -> T:
+    a
 
 fn main() ! io:
     let xs = [1]
     let x: Int? = choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(Some(0), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1)
     print(f"{x}")
+    let f: F32? = pick(Some(1.0), None)
+    print(f"{f}")
+    let y: Int? = choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(Some(0), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1)
+    let g: F32? = pick(Some(2.0), None)
+    print(f"{y} {g}")

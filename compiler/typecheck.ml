@@ -335,7 +335,7 @@ type fctx = {
   fname : string;
   self_ty : ty option;
   lend_kind : bool option;          (* Some m inside a function declared -> lend [mut] T *)
-  retries : int ref;                (* calls left that may be checked again without the expected type; shared with closures *)
+  retries : int ref;                (* retries left for the outermost call being checked; shared with closures *)
 }
 
 let push_frame c ?lam () = c.frames <- { vars = []; lam } :: c.frames
@@ -407,9 +407,10 @@ let speculate c (f : unit -> 'a) : ('a, exn) result =
       Error e
   | exception e -> close_speculation (); raise e
 
-(* How many calls of one function may be checked again without the expected type. A retry
-   checks the arguments of the call again, so nested calls that all fall back would multiply
-   the work at every level; once the budget is spent, calls are checked on their own. *)
+(* How many calls in one outermost call may be checked again without the expected type. A
+   retry checks the arguments of the call again, so nested calls that all fall back would
+   multiply the work at every level; once the budget is spent, the calls nested in it are
+   checked on their own. *)
 let retry_budget = 4096
 
 (* A bound on a type that is already known is checked as soon as the call is, not only when
@@ -1081,6 +1082,9 @@ and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : 
 
 and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
   let sg = Hashtbl.find c.tb.fns u in
+  (* the budget of retries belongs to one outermost call and the calls nested in it, so a
+     deep chain that spends it does not take the expected type from the calls after it *)
+  if !speculating = 0 then c.retries := retry_budget;
   let first = instantiate sg in
   (* The expected type is a hint for the result, and it is what lets a literal argument
      take its type from the context: `let x: F32? = pick(Some(1.0), None)`. It is only a
