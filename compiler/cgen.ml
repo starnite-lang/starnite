@@ -1879,7 +1879,8 @@ and stmt fc (s : tstmt) =
        fc.frames <- List.tl fc.frames;
        let n = tmp fc e.ty init in
        emit_drops fc f;
-       own_in fc n e.ty;
+       (* a value with nothing counted in it has no drop function to call *)
+       if rc fc e.ty then own_in fc n e.ty;
        let _, binds = pat_test fc e.ty p n in
        bind_pattern fc binds;
        fc.frames <- { fk = FStmt; owned = [] } :: fc.frames

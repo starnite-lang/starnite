@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A let with a pattern over a value that has nothing counted in it, a tuple or a struct of
+# integers: the C build did not link, because it released the value with a drop function
+# that only types with counted parts have.
+type Vec = struct(x: Int, y: Int)
+
+type Labelled = struct(tag: Str, at: (Int, Int))
+
+fn main() ! io:
+    let (a, b) = (1, 2)
+    print(f"{a + b}")
+    let pair = (3, 4)
+    let (c, d) = pair
+    print(f"{c + d} {pair.0}")
+    let Vec(px, py) = Vec(5, 6)
+    print(f"{px * py}")
+    let v = Vec(7, 8)
+    let Vec(qx, qy) = v
+    print(f"{qx - qy} {v.x}")
+    let (e, (f, g)) = (1, (2, 3))
+    print(f"{e + f + g}")
+    # with a counted part the value is still released
+    let (name, n) = ("star", 3)
+    print(f"{name} {n}")
+    let Labelled(tag, (lx, ly)) = Labelled("t", (10, 20))
+    print(f"{tag} {lx + ly}")
