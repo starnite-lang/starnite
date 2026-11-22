@@ -6,7 +6,7 @@ The `handoff/` directory (bundle and patches) exists only in the local clone and
 ## 1. State
 
 - `origin/main` is at `5923c05` (PR #8, squash-merged). PRs #1-#8 are merged, all squash merges. Tests: 201 pass with GCC and with Clang.
-- Two unpublished local branches, both based on `5923c05`, both green. Nothing of them is on GitHub: pushing them or opening PRs needs the user's approval.
+- Two branches, both based on `5923c05`, both green, pushed to `origin` as `wip/fuzz-modules` and `wip/trait-generic-methods` (no PRs yet: opening one needs the user's ask).
 - `claude/spec-draft-0.1` (remote) holds the spec as a branch. **Leave it** until the user says milestone 1 is done, then delete it.
 
 | Branch | Commits | Tests |
@@ -16,7 +16,7 @@ The `handoff/` directory (bundle and patches) exists only in the local clone and
 
 The two branches are independent; merged together they conflict only in `README.md` (one paragraph). Proposed order: `wip/fuzz-modules` first (it needs none of the compiler changes), then `wip/trait-generic-methods`, which may be split (generic methods + explicit type args; literal rule; library; crash fixes; stack overflow). The `--crash` campaign in CI (`--crash --count 300 --shrink`) will find the unresolved-type-variable crash (`None` as a statement) until the crash-fix branch lands, so publish the compiler fixes first or in the same PR if you want CI green on the fuzz branch. The fuzz-modules branch alone found that crash in its first campaign.
 
-### Getting the work
+### Getting the work (the branches are also on origin)
 
 In `/home/user/starnite/handoff/`:
 - `starnite-unpublished.bundle`: `git fetch handoff/starnite-unpublished.bundle wip/fuzz-modules:wip/fuzz-modules wip/trait-generic-methods:wip/trait-generic-methods`
