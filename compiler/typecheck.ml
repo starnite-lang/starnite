@@ -1068,7 +1068,6 @@ and check_or_infer c (e : Syntax.expr) (expected : ty option) : texpr =
   | Lit (LInt s) -> (
       match exp with
       | Some (TInt k) -> int_fits k s l; mk (XLit (LInt s)) (TInt k) l
-      | Some (TFloat | TF32 as t) -> mk (XLit (LFloat (float_of_string s))) t l
       | _ -> int_fits IInt s l; mk (XLit (LInt s)) (TInt IInt) l)
   | Lit (LFloat f) -> (
       match exp with Some TF32 -> mk (XLit (LFloat f)) TF32 l | _ -> mk (XLit (LFloat f)) TFloat l)

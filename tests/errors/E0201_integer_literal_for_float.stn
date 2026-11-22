@@ -1,0 +1,5 @@
+# expect: E0201 5:19
+fn half(x: Float) -> Float:
+    x / 2.0
+fn main():
+    print(f"{half(3)}")
