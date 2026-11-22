@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Section 20.2 with section 3.5: tests in a module that imports another, and rejection
+# tests that name the module.
+import lib.vault
+
+test "an exported function of another module":
+    assert vault.open(1) == 4
+
+test rejects E0101 "a private function of another module":
+    let x = vault.secret(1)
+
+test rejects E0101 "a module that is not imported":
+    let x = other.open(1)
+
+test rejects E0101 "an exported name used without its module":
+    let x = open(1)

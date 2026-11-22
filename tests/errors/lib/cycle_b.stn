@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Imports cycle_a, which imports this module.
+import lib.cycle_a
+
+fn from_b*() -> Int:
+    2

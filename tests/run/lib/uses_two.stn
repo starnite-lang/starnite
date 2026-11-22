@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A library module for modules_trait_scope.stn: it imports label_two, so a call of label here is its.
+import lib.geometry
+import lib.label_two
+
+fn label_of*(p: geometry.Vec) -> Str:
+    p.label()

@@ -1,0 +1,5 @@
+# expect: E0101 5:13
+import lib.vault
+
+fn main():
+    let x = open(1)

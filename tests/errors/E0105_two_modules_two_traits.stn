@@ -1,0 +1,8 @@
+# expect: E0105 8:14
+import lib.pt
+import lib.lab1
+import lib.lab2
+
+fn main():
+    let p = pt.Pt(1)
+    let s = p.label()

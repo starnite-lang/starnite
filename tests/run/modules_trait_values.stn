@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Section 3.4 and 3.5: a trait value of a trait that another module defines, written
+# `any geometry.Area`, holding values of types from both modules.
+import lib.geometry
+
+type Sq = struct(w: Int)
+
+impl geometry.Area for Sq:
+    fn area(self: Sq) -> Int:
+        self.w * self.w
+
+fn total(xs: Array[any geometry.Area]) -> Int:
+    var t = 0
+    for x in xs:
+        t += x.area()
+    t
+
+fn main() ! io:
+    let shapes: Array[any geometry.Area] = [geometry.Circle(1), geometry.Rect(2, 3), Sq(4), geometry.Dot]
+    print(f"{total(shapes)}")
+    let one: any geometry.Area = Sq(5)
+    print(f"{one.area()}")

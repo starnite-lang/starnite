@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A module for tests/unit/modules_test.stn: one private function, one exported.
+fn secret(x: Int) -> Int:
+    x + 1
+
+fn open*(x: Int) -> Int:
+    secret(x) * 2

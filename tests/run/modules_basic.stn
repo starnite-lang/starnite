@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Section 3.5: `import a.b` loads a/b.stn, and its exported items are reached through the
+# last name of the path, or the name after `as`.
+import lib.geometry
+import lib.geometry as g
+
+fn main() ! io:
+    let a = geometry.Vec(1, 2)
+    let b = g.Vec(3, 4)
+    let c = geometry.add(a, b)
+    print(f"{c.x} {c.y}")
+    # a function of the module of the type is a method of it (section 4.7)
+    print(f"{c.norm2()} {geometry.norm2(c)}")
+    print(f"{geometry.origin().x} {geometry.Vec.origin().y}")
+    print(f"{geometry.counted()}")
+    # variants of an exported type, written with the module, and with the type
+    let s = geometry.Rect(2, 5)
+    let t: geometry.Shape = geometry.Circle(2)
+    let u = g.Shape.Dot
+    print(f"{s.area()} {t.area()} {u.area()}")
+    for sh in [s, t, u]:
+        match sh:
+            geometry.Circle(r) -> print(f"circle {r}")
+            geometry.Rect(w, h) -> print(f"rect {w} {h}")
+            g.Shape.Dot -> print("dot")
+    # constants
+    print(f"{geometry.ORIGIN.x} {g.TWICE_LIMIT}")
+    # struct patterns
+    let geometry.Vec(px, py) = c
+    print(f"{px + py}")

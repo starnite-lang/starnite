@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Section 4.7: the methods of a trait are found where the trait is in scope. lib.label_two is
+# loaded here, because lib.uses_two imports it, and implements Label for Vec, but only the
+# Label of lib.label_one is in scope in this module, so p.label() is not ambiguous.
+import lib.geometry
+import lib.label_one
+import lib.uses_two
+
+fn main() ! io:
+    let p = geometry.Vec(1, 2)
+    print(p.label())
+    print(uses_two.label_of(p))

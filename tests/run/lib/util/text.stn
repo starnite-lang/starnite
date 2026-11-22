@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A library module for the modules_* tests: another private helper, and another type Item.
+
+type Item* = Single(Str) | Pair(Str, Str)
+
+fn helper(s: Str) -> Str:
+    f"<{s}>"
+
+fn wrap*(s: Str) -> Str:
+    helper(s)
+
+fn describe*(i: Item) -> Str:
+    match i:
+        Single(a) -> helper(a)
+        Pair(a, b) -> helper(a) + helper(b)

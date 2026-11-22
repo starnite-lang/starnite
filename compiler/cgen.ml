@@ -40,7 +40,8 @@ let pr buf fmt = Printf.bprintf buf fmt
 (* A name chosen in the program, as part of a C name. The C names join their parts with
    an underscore, so a name that has one, or that reads like a part of the scheme (Arr,
    Any, E, Tup2, anything starting with Fn or with a lower-case letter, ...), is spelled out instead: Zq, then the name with Z written ZZ and
-   an underscore Zu. A plain name never starts with Z, so the two kinds cannot meet,
+   an underscore Zu, and a dot, which a module's path puts in the name of its types and traits, Zd.
+   A plain name never starts with Z, so the two kinds cannot meet,
    and two different types or traits always get different C names. *)
 let mangle_name n =
   let reserved = [ "Int"; "I8"; "I16"; "I32"; "I64"; "U8"; "U16"; "U32"; "U64"; "Float"; "F32"; "Bool"; "Char"; "Unit";
@@ -61,7 +62,7 @@ let mangle_name n =
   in
   if plain then n
   else
-    "Zq" ^ String.concat "" (List.map (function 'Z' -> "ZZ" | '_' -> "Zu" | c -> String.make 1 c) (List.init (String.length n) (String.get n)))
+    "Zq" ^ String.concat "" (List.map (function 'Z' -> "ZZ" | '_' -> "Zu" | '.' -> "Zd" | c -> String.make 1 c) (List.init (String.length n) (String.get n)))
 
 (* The C name of a type. Every function type is one C type, so [mangle] gives them all the
    name Fn. [mangle_eff] keeps them apart: where two types must stay different by more

@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A library module for modules_traits.stn: another trait with the name and the method of
+# the one in label_one.stn, and a private trait.
+import lib.geometry
+
+trait Label*:
+    fn label(self: Self) -> Str
+
+impl Label for geometry.Vec:
+    fn label(self: geometry.Vec) -> Str:
+        "two"
+
+trait Hidden:
+    fn hidden(self: Self) -> Int
+
+impl Hidden for geometry.Vec:
+    fn hidden(self: geometry.Vec) -> Int:
+        7
+
+fn hidden_of*(p: geometry.Vec) -> Int:
+    p.hidden()

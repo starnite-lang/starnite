@@ -1,0 +1,5 @@
+# expect: E0101 2:1
+import lib.nothing_here
+
+fn main():
+    ()

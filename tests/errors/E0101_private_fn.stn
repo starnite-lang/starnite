@@ -1,0 +1,5 @@
+# expect: E0101 5:18
+import lib.vault
+
+fn main():
+    let x = vault.secret(1)

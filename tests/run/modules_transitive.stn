@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Section 3.5: a module is loaded once, after the modules it imports, and the program sees
+# only what it imports itself. A value of a type from a module the program does not import
+# can still be used: its exported functions are methods of the type (section 4.7).
+import lib.shapes
+
+fn main() ! io:
+    let c = shapes.Circle(2)
+    let q = shapes.Square(3)
+    print(f"{shapes.area(c)} {shapes.area(q)}")
+    print(c.name())
+    print(shapes.big(c, q).name())
+    let i = shapes.item(4)
+    print(i.show_item())
+    print(f"{i.n}")

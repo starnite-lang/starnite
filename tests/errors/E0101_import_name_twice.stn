@@ -1,0 +1,6 @@
+# expect: E0101 3:1
+import lib.vault
+import lib.deeper.vault
+
+fn main():
+    ()

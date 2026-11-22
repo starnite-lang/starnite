@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Section 3.5: a constant may use constants of its own module, or of an imported one, whether
+# they are written before it or after it.
+import lib.limits
+
+let TOTAL = limits.DOUBLE + limits.LATE
+let FIRST = SECOND + limits.BASE
+let SECOND = 2
+
+fn main() ! io:
+    print(f"{limits.LATE} {limits.DOUBLE} {TOTAL}")
+    print(f"{FIRST} {SECOND}")

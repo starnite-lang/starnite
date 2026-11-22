@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A trait Label with a method label, implemented for lib.pt's Pt, as in the other lab module.
+import lib.pt
+
+trait Label*:
+    fn label(self: Self) -> Str
+
+impl Label for pt.Pt:
+    fn label(self: pt.Pt) -> Str:
+        "1"
