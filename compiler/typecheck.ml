@@ -1020,8 +1020,16 @@ and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : 
 and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
   let sg = Hashtbl.find c.tb.fns u in
   let s, ps, ret, eff = instantiate sg in
+  (* The expected type is a hint for the result. A result that is a bare type variable is
+     not taken from it when the value would be boxed or wrapped on the way (any Trait,
+     Option): the arguments decide it, and the coercion follows, as in
+     `let a: any Show = (Some(5)).or(4)`. *)
   (match exp with
-   | Some t when (match repr ret with TVar _ | TNamed _ | TArray _ | TTuple _ -> true | _ -> false) ->
+   | Some t
+     when (match repr ret with
+           | TVar _ -> (match repr t with TAny _ | TNamed ("Option", _) -> false | _ -> true)
+           | TNamed _ | TArray _ | TTuple _ -> true
+           | _ -> false) ->
        (try unify t ret with Mismatch -> ())
    | _ -> ());
   let targs, poly = check_args c l ~receiver ps args in

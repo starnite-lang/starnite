@@ -82,7 +82,7 @@ Working now:
 - **Arithmetic (section 17.1).** Overflow traps, wrapping operators, checked conversions, and division traps.
 - **C output (section 11).** The object header, size-class allocator, inline and boxed data layouts with field-less variants encoded in the pointer (section 3.3), copy-on-write arrays, per-type release functions, and status-byte error returns. The debug build poisons freed memory and checks counts at exit.
 - **The reference interpreter (section 21.1)**, the test runner with `assert`, `assert_fails` and `rejects` (section 20.2), and diagnostics in the format of section 19.1, plus JSON.
-- **A first differential fuzzer (section 21.2)**, `tests/fuzz/fuzz.ml`. It builds well-typed programs by construction and requires the interpreter and the debug C build to agree, with balanced counts.
+- **A first differential fuzzer (section 21.2)**, `tests/fuzz/fuzz.ml`. It builds well-typed programs by construction and requires the interpreter and the debug C build to agree, with balanced counts. Its programs include trait values: boxing in arguments, arrays, fields and `Option`, calls through method tables, nested values, closures that capture them, `mut` parameters, failures that cross a trait method, and `any Show` of primitives, tuples and user types.
 
 Not done yet:
 

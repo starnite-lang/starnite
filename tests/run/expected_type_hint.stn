@@ -1,0 +1,12 @@
+# The expected type is a hint for a generic result, but not when the arguments decide the result
+# and a coercion follows: a value that is boxed as a trait value, or wrapped in an Option.
+fn pick[T](a: T, b: T) -> T:
+    a
+
+fn main() ! io:
+    let a: any Show = (Some(5)).or(4)
+    let b: Int? = (Some(5)).or(4)
+    let c: any Show = pick(7, 8)
+    let d: Int? = pick(9, 10)
+    let e: Array[any Show] = [pick("x", "y"), (Some(2)).or(3)]
+    print(f"{a} {b} {c} {d} {e}")
