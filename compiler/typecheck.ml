@@ -1762,12 +1762,12 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
         in
         (* of the functions for this kind of type, those that accept the other arguments of the call, by
            position and by name, and take this receiver: a function of Box[Int] is not a method of a
-           Box[Str], nor is one whose bound the receiver breaks *)
-        let accepting = List.filter (fun u -> takes_args (Hashtbl.find c.tb.fns u)) by_head in
-        prefer_owner c.tb self (List.filter (fits_receiver c self) (if accepting = [] then by_head else accepting))
+           Box[Str], nor is one whose bound the receiver breaks. The others are kept for the error. *)
+        prefer_owner c.tb self
+          (List.filter (fun u -> takes_args (Hashtbl.find c.tb.fns u) && fits_receiver c self u) by_head)
       in
-      (* what the call is a type error against, if nothing takes the receiver: the functions
-         for this kind of type, and only after the traits are looked at *)
+      (* what the call is an error against, if nothing takes this receiver with these arguments: the
+         functions for this kind of type, and only after the traits are looked at *)
       let misfit_fns () =
         prefer_owner c.tb self
           (List.filter
@@ -1777,17 +1777,17 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
                | [] -> false)
              (method_fns c.tb self m))
       in
+      let generic_all =
+        List.filter
+          (fun u ->
+            match (Hashtbl.find c.tb.fns u).sparams with
+            | (_, _, t, _) :: _ -> (match repr t with TParam _ -> true | _ -> false)
+            | [] -> false)
+          (method_fns c.tb self m)
+      in
       let generic_cands =
-        let all =
-          List.filter
-            (fun u ->
-              match (Hashtbl.find c.tb.fns u).sparams with
-              | (_, _, t, _) :: _ -> (match repr t with TParam _ -> true | _ -> false)
-              | [] -> false)
-            (method_fns c.tb self m)
-        in
-        let accepting = List.filter (fun u -> takes_args (Hashtbl.find c.tb.fns u)) all in
-        prefer_owner c.tb self (List.filter (fits_receiver c self) (if accepting = [] then all else accepting))
+        prefer_owner c.tb self
+          (List.filter (fun u -> takes_args (Hashtbl.find c.tb.fns u) && fits_receiver c self u) generic_all)
       in
       let trait_all =
         Hashtbl.fold
@@ -1811,10 +1811,8 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
             | None -> acc)
           c.tb.traits []
       in
-      (* the methods that accept the other arguments of the call, if any do *)
-      let trait_cands =
-        match List.filter (fun (_, sg) -> takes_args sg) trait_all with [] -> trait_all | accepting -> accepting
-      in
+      (* the methods that accept the other arguments of the call; the others are kept for the error *)
+      let trait_cands = List.filter (fun (_, sg) -> takes_args sg) trait_all in
       let recv_mode u = match (Hashtbl.find c.tb.fns u).sparams with (m, _, _, _) :: _ -> m | [] -> MBorrow in
       let check_recv mode =
         if mode = MMut && not (mutable_place c b) then
@@ -1829,9 +1827,18 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
           match generic_cands with
           | u :: _ -> check_recv (recv_mode u); call_sig c l u ~receiver:(Some tb) args exp
           | [] when misfit_fns () <> [] -> (
+              (* nothing takes the receiver with these arguments, and no trait or generic function does:
+                 the call is checked against the functions for this kind of type, which reports why not *)
               match misfit_fns () with
               | [ u ] -> check_recv (recv_mode u); call_sig c l u ~receiver:(Some tb) args exp
               | _ -> err "E0105" l "'%s' matches more than one function" m)
+          | [] when trait_all <> [] -> (
+              match trait_all with
+              | [ (tn, sg) ] -> trait_call c l tn [] m sg self (Some tb) args exp
+              | _ -> err "E0105" l "method '%s' matches more than one trait; write Trait.%s(x, ...)" m m)
+          | [] when generic_all <> [] ->
+              let u = List.hd (prefer_owner c.tb self generic_all) in
+              check_recv (recv_mode u); call_sig c l u ~receiver:(Some tb) args exp
           | [] -> (
               match self with
               | TNamed _ | TTuple _ -> (

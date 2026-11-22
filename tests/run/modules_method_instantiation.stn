@@ -27,6 +27,14 @@ fn inspect(b: boxes.Box[Str]) -> Int:
 fn mark(b: boxes.Box[Int]) -> Int:
     1
 
+# the library's tick takes a count; a trait of the program has a tick that takes none
+trait Tick:
+    fn tick(self: Self) -> Int
+
+impl Tick for boxes.Box[Int]:
+    fn tick(self: boxes.Box[Int]) -> Int:
+        2
+
 # the library's show_label needs T: Label, which Str has no impl of
 fn show_label(b: boxes.Box[Str]) -> Str:
     f"the program labels a string box {b.item}"
@@ -78,3 +86,5 @@ fn main() ! io:
     # the arguments the call gives decide which functions it can mean, before the types do
     print(f"{boxes.Box.inspect()} {boxes.Box.inspect(b = boxes.Box("x"))}")
     print(f"{boxes.Box(1).mark()} {boxes.Box(1).mark(3)}")
+    # a trait method is tried before a function that does not take the arguments is restored
+    print(f"{boxes.Box(1).tick()} {boxes.Box(1).tick(3)}")

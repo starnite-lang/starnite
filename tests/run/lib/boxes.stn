@@ -55,3 +55,6 @@ fn inspect*() -> Int:
 
 fn mark*(b: Box[Int], times: Int) -> Int:
     times * 10
+
+fn tick*(b: Box[Int], times: Int) -> Int:
+    times * 100
