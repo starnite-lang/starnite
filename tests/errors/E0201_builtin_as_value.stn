@@ -1,0 +1,4 @@
+# expect: E0201 3:13
+fn main():
+    let p = print
+    p("hi")

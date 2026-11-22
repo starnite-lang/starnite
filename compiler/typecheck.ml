@@ -1192,6 +1192,8 @@ and infer_name c l n exp : texpr =
                   let sg = Hashtbl.find c.tb.fns u in
                   if sg.slend <> None then
                     err "E0320" l "'%s' lends a place, so it cannot be used as a function value" n;
+                  (* a built-in has no body to make a closure object of, on the interpreter and in C alike *)
+                  if is_builtin u then err "E0201" l "'%s' is built in, so it is called directly; wrap it to use it as a value, as in fn(...): %s(...)" n n;
                   let s, ps, ret, eff = instantiate sg in
                   let ty = TFn { fps = List.map (fun (m, _, t, _) -> (m, t)) ps; fret = ret; feff = eff } in
                   (match exp with Some t -> unify_at l t ty | None -> ());
@@ -2105,7 +2107,12 @@ and infer_binop c l op a b exp : texpr =
                 mk (XCall (CTrait (tr, [ tb.ty ], String.lowercase_ascii tr, t, []), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], convs)) t l
             | None -> err "E0204" l "'%s' is not defined on %s" op (show_ty t))
       end else begin
-        let bop = List.assoc op cmp in
+        (* the operators that are left are the comparisons, and the set operators | and &, which arrive with sets *)
+        let bop =
+          match List.assoc_opt op cmp with
+          | Some b -> b
+          | None -> err "E0204" l "'%s' is not defined on %s (the set operators arrive with sets, in milestone 2)" op (show_ty t)
+        in
         unify_at tb.l ta.ty tb.ty;
         let eqop = bop = Eq || bop = Ne in
         if prim && (eqop || t <> TUnit) then mk (XBin (bop, ta, tb)) TBool l
