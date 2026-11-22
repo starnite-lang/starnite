@@ -477,6 +477,14 @@ let tmp fc t init =
   line fc "%s %s = %s;" (ct fc t) n init;
   n
 
+(* A value for code that is never reached, such as the end of a function whose body always
+   fails. 0 is not an initializer for every type, a struct among them, so it is zeroed. *)
+let dead_value fc (t : ty) : string =
+  let z = fresh fc.st "_z" in
+  line fc "%s %s;" (ct fc t) z;
+  line fc "memset(&%s, 0, sizeof %s);" z z;
+  z
+
 let own fc (x : r) t = if x.owned || not (rc fc t) then x.c else dup_expr fc.st (ts fc t) x.c
 
 let borrow fc (x : r) t =
@@ -800,7 +808,9 @@ let rec expr fc (e : texpr) : r =
        | TErr _ -> line fc "StnError %s = %s;" ev v
        | _ -> line fc "StnError %s = errmake_%s(%s);" ev (mangle at) v; ignore (err_id st at));
       propagate fc ev;
-      { c = "0"; owned = false }
+      (* control does not come back, but the checker gave the expression the type it was used at,
+         and C wants a value of it *)
+      { c = (match repr t with TNever | TUnit -> "0" | _ -> dead_value fc t); owned = false }
   | XComp (body, comps) ->
       let elt = match repr t with TArray et -> et | _ -> assert false in
       let a = fresh st "_t" in
