@@ -1,0 +1,4 @@
+start
+trap: stack overflow
+the program recursed deeper than its stack allows
+exit 2

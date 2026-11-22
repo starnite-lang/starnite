@@ -1,11 +1,17 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* The Starnite runtime (section 11). */
-#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
 #include "stn_runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
+#if defined(__unix__) || defined(__APPLE__)
+#include <signal.h>
+#include <unistd.h>
+#include <sys/resource.h>
+#define STN_STACK_TRAP 1
+#endif
 
 int64_t stn_live_objects = 0;
 
@@ -581,7 +587,47 @@ int stn_parse_float(StnStr s, double* out) {
 void stn_runtime_flush_for_error(void) { stn_flush(); }
 
 /* ---- start-up ---- */
+#ifdef STN_STACK_TRAP
+/* A program that recurses without end runs the stack out. The fault is reported as a trap, like the other
+   ways a program can be wrong, with the status of one, instead of ending in a signal. The handler runs on a
+   stack of its own, and only code that is safe in a handler runs in it. A fault anywhere else is a bug, and
+   ends the process as it would have. */
+static char* stn_stack_high;
+static size_t stn_stack_size;
+static void stn_on_fault(int sig, siginfo_t* si, void* ctx) {
+    (void)ctx;
+    char* a = (char*)si->si_addr;
+    if (a < stn_stack_high && a + stn_stack_size + 65536 >= stn_stack_high) {
+        static const char msg[] = "trap: stack overflow\nthe program recursed deeper than its stack allows\n";
+        ssize_t r = write(1, stn_outbuf, stn_outlen);
+        r = write(2, msg, sizeof msg - 1);
+        (void)r;
+        _exit(2);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+void stn_runtime_init(void) {
+    struct rlimit rl;
+    char here;
+    stn_stack_high = &here;
+    stn_stack_size = (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY) ? (size_t)rl.rlim_cur : (size_t)8 << 20;
+    size_t alt_size = 64 * 1024;
+    void* alt = malloc(alt_size);
+    if (alt == NULL) return;
+    stack_t ss;
+    ss.ss_sp = alt; ss.ss_size = alt_size; ss.ss_flags = 0;
+    if (sigaltstack(&ss, NULL) != 0) return;
+    struct sigaction sa;
+    sa.sa_sigaction = stn_on_fault;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+}
+#else
 void stn_runtime_init(void) {}
+#endif
 
 void stn_runtime_exit(int status) {
     stn_flush();

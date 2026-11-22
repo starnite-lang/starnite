@@ -100,6 +100,11 @@ let run_interp (prog : Types.tprog) =
           Printf.eprintf "error: %s\n" (Interp.show_value env t v);
           exit 1
       | Values.Trap (kind, l, msg) -> trap_exit kind l msg
+      | Stack_overflow ->
+          (* the C build reports the same, from a handler of the fault *)
+          Interp.flush_out ();
+          prerr_string "trap: stack overflow\nthe program recursed deeper than its stack allows\n";
+          exit 2
       (* the same report as the C backend's trap for a failed assert *)
       | Interp.Assert_failed (_, l) -> trap_exit "assertion failed" l "assert")
 
@@ -120,7 +125,8 @@ let run_tests_interp file (user : Syntax.file) imported (prog : Types.tprog) =
           incr pass; Interp.flush_out (); Printf.printf "ok   %s\n" name
       | exception Interp.Failed (t, v) -> fail_with ("failed with " ^ Interp.show_value env t v)
       | exception Interp.Assert_failed (msg, al) -> fail_with (Printf.sprintf "%s at %s:%d:%d" msg al.file al.line al.col)
-      | exception Values.Trap (kind, tl, msg) -> fail_with (Printf.sprintf "trap: %s at %s:%d:%d: %s" kind tl.file tl.line tl.col msg))
+      | exception Values.Trap (kind, tl, msg) -> fail_with (Printf.sprintf "trap: %s at %s:%d:%d: %s" kind tl.file tl.line tl.col msg)
+      | exception Stack_overflow -> fail_with "trap: stack overflow")
     prog.tests;
   (* rejection tests: the body must fail to compile with the given code *)
   List.iter
@@ -198,3 +204,7 @@ let () =
   | Error (code, l, msg) -> report code l msg; exit 1
   | Unsupported (msg, l) -> report "" l ("not supported yet: " ^ msg); exit 1
   | Sys_error m -> Printf.eprintf "error: %s\n" m; exit 1
+  | Stack_overflow ->
+      (* a program nested deeper than the compiler's own recursion can follow *)
+      prerr_endline "error[E0100]: the program is nested too deeply to be compiled";
+      exit 1
