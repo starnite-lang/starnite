@@ -208,6 +208,16 @@ let rec unify a b =
         List.iter2 unify xs ys
     | x, y -> if x <> y then raise Mismatch
 
+(* Does the type still hold an unresolved type variable? Every type in the tree must be
+   known after checking (E0210). *)
+let rec has_tvar t =
+  match repr t with
+  | TVar _ -> true
+  | TArray t -> has_tvar t
+  | TTuple ts | TNamed (_, ts) | TErr ts | TAny (_, ts) -> List.exists has_tvar ts
+  | TFn f -> List.exists (fun (_, t) -> has_tvar t) f.fps || has_tvar f.fret
+  | _ -> false
+
 let is_numeric t = match repr t with TInt _ | TFloat | TF32 -> true | _ -> false
 let is_int t = match repr t with TInt _ -> true | _ -> false
 let opt t = TNamed ("Option", [ t ])

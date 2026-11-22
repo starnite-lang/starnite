@@ -1,0 +1,10 @@
+# Nested calls that all fall back are checked in bounded time. Every call here is first tried with
+# the expected type, which fails at `xs`, and then on its own; each retry would check the nested
+# call again, so without a bound the work doubles at every level.
+fn choose_nested[T](inner: Int?, xs: Array[T], fallback: T) -> T:
+    fallback
+
+fn main() ! io:
+    let xs = [1]
+    let x: Int? = choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(choose_nested(Some(0), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1), xs, 1)
+    print(f"{x}")

@@ -335,6 +335,7 @@ type fctx = {
   fname : string;
   self_ty : ty option;
   lend_kind : bool option;          (* Some m inside a function declared -> lend [mut] T *)
+  retries : int ref;                (* calls left that may be checked again without the expected type; shared with closures *)
 }
 
 let push_frame c ?lam () = c.frames <- { vars = []; lam } :: c.frames
@@ -405,6 +406,28 @@ let speculate c (f : unit -> 'a) : ('a, exn) result =
       restore c snap;
       Error e
   | exception e -> close_speculation (); raise e
+
+(* How many calls of one function may be checked again without the expected type. A retry
+   checks the arguments of the call again, so nested calls that all fall back would multiply
+   the work at every level; once the budget is spent, calls are checked on their own. *)
+let retry_budget = 4096
+
+(* A bound on a type that is already known is checked as soon as the call is, not only when
+   the function ends. Inside the attempt with the expected type, this lets a bound that the
+   hint breaks fail the attempt like an argument that does not fit: `id_eq(5)` into an
+   `any Show`, with `T: Eq`, has the type Int, which is then boxed. *)
+let check_known_bounds c l (sg : fsig) s =
+  List.iter
+    (fun (p, bs) ->
+      let t = zonk (List.assoc p s) in
+      if not (has_tvar t) then
+        List.iter
+          (fun (tr, ta) ->
+            let ta = List.map (fun x -> zonk (subst s x)) ta in
+            if (not (List.exists has_tvar ta)) && find_impl (rtab_of c.tb) ~bounds:c.tparams tr ta t = None then
+              err "E0204" l "%s does not implement %s" (show_ty t) tr)
+          bs)
+    sg.stparams
 
 (* Edit distance for "did you mean" hints (section 19.2). *)
 let edit_distance a b =
@@ -1078,15 +1101,17 @@ and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
          hint_bound := !trail != before
      | _ -> ());
     let targs, poly = check_args c l ~receiver ps args in
+    if hint then check_known_bounds c l sg s;
     (s, ret, eff, targs, poly)
   in
   let s, ret, eff, targs, poly =
-    if not hinted then attempt first false
+    if (not hinted) || !(c.retries) <= 0 then attempt first false
     else
       match speculate c (fun () -> attempt first true) with
       | Ok r -> r
       | Error e when not !hint_bound -> raise e   (* the hint changed nothing: another try would fail the same way *)
       | Error e -> (
+          decr c.retries;
           match speculate c (fun () -> attempt (instantiate sg) false) with
           | Ok r -> r
           | Error _ -> raise e)
@@ -1977,15 +2002,6 @@ and zonk_s (s : tstmt) : tstmt =
   in
   { s with st }
 
-(* Every type in the tree must be known after checking (E0210). *)
-let rec has_tvar t =
-  match repr t with
-  | TVar _ -> true
-  | TArray t -> has_tvar t
-  | TTuple ts | TNamed (_, ts) | TErr ts | TAny (_, ts) -> List.exists has_tvar ts
-  | TFn f -> List.exists (fun (_, t) -> has_tvar t) f.fps || has_tvar f.fret
-  | _ -> false
-
 (* ---------- declarations ---------- *)
 
 let module_name path =
@@ -2277,7 +2293,7 @@ let new_ctx tb (sg : fsig) self : fctx =
   { tb; frames = [ { vars = []; lam = None } ]; tparams = sg.stparams; ret = sg.sret; errs = []; io = false;
     in_try = 0; loops = 0;
     declared = (if sg.sdeclared && (sg.seff.errs <> [] || sg.sexport) then Some sg.seff.errs else None);
-    obligations = []; unsolved = []; moved = []; lent = []; closure_caps = Hashtbl.create 8; fname = sg.sdisplay; self_ty = self; lend_kind = sg.slend }
+    obligations = []; unsolved = []; moved = []; lent = []; closure_caps = Hashtbl.create 8; fname = sg.sdisplay; self_ty = self; lend_kind = sg.slend; retries = ref retry_budget }
 
 let finish_ctx c l =
   List.iter

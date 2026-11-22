@@ -13,6 +13,9 @@ fn first_or[T](o: T?, default: T) -> T:
 fn both[T](a: Array[T], o: T?, d: T) -> T:
     o.or(d)
 
+fn id_eq[T: Eq](x: T) -> T:
+    x
+
 fn main() ! io:
     let a: any Show = (Some(5)).or(4)
     let b: Int? = (Some(5)).or(4)
@@ -46,3 +49,6 @@ fn main() ! io:
     let zs = []
     let r: any Show = both(zs, s, 6)
     print(f"{r} {zs.len()}")
+    # a bound the hint would break (any Show has no Eq) fails the attempt too
+    let w: any Show = id_eq(5)
+    print(f"{w}")
