@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A module for the test of a trait method whose receiver is passed as mut.
+type Counter* = struct(n: Int)
+
+trait Bump*:
+    fn bump(mut self: Self)
+
+impl Bump for Counter:
+    fn bump(mut self: Counter):
+        self.n = self.n + 1

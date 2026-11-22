@@ -88,3 +88,8 @@ fn main() ! io:
     print(f"{boxes.Box(1).mark()} {boxes.Box(1).mark(3)}")
     # a trait method is tried before a function that does not take the arguments is restored
     print(f"{boxes.Box(1).tick()} {boxes.Box(1).tick(3)}")
+    # a trait method that takes its receiver by mut works on a variable
+    var bumped = boxes.Box(1)
+    bumped.bump()
+    bumped.bump()
+    print(f"{bumped.item}")

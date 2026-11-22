@@ -58,3 +58,10 @@ fn mark*(b: Box[Int], times: Int) -> Int:
 
 fn tick*(b: Box[Int], times: Int) -> Int:
     times * 100
+
+trait Bump*:
+    fn bump(mut self: Self)
+
+impl Bump for Box[Int]:
+    fn bump(mut self: Box[Int]):
+        self.item = self.item + 1

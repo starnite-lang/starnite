@@ -1814,6 +1814,7 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
       (* the methods that accept the other arguments of the call; the others are kept for the error *)
       let trait_cands = List.filter (fun (_, sg) -> takes_args sg) trait_all in
       let recv_mode u = match (Hashtbl.find c.tb.fns u).sparams with (m, _, _, _) :: _ -> m | [] -> MBorrow in
+      let trait_recv_mode (sg : fsig) = match sg.sparams with (m, _, _, _) :: _ -> m | [] -> MBorrow in
       let check_recv mode =
         if mode = MMut && not (mutable_place c b) then
           err "E0303" b.loc "the receiver of this call is passed as mut and must be a mutable place"
@@ -1821,7 +1822,7 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
       match (fn_cands, trait_cands) with
       | [ u ], _ -> check_recv (recv_mode u); call_sig c l u ~receiver:(Some tb) args exp
       | _ :: _ :: _, _ -> err "E0105" l "'%s' matches more than one function" m
-      | [], [ (tn, sg) ] -> trait_call c l tn [] m sg self (Some tb) args exp
+      | [], [ (tn, sg) ] -> check_recv (trait_recv_mode sg); trait_call c l tn [] m sg self (Some tb) args exp
       | [], _ :: _ :: _ -> err "E0105" l "method '%s' matches more than one trait; write Trait.%s(x, ...)" m m
       | [], [] -> (
           match generic_cands with
@@ -1834,7 +1835,7 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
               | _ -> err "E0105" l "'%s' matches more than one function" m)
           | [] when trait_all <> [] -> (
               match trait_all with
-              | [ (tn, sg) ] -> trait_call c l tn [] m sg self (Some tb) args exp
+              | [ (tn, sg) ] -> check_recv (trait_recv_mode sg); trait_call c l tn [] m sg self (Some tb) args exp
               | _ -> err "E0105" l "method '%s' matches more than one trait; write Trait.%s(x, ...)" m m)
           | [] when generic_all <> [] ->
               let u = List.hd (prefer_owner c.tb self generic_all) in
