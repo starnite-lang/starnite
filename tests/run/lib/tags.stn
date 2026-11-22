@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A library module for modules_impl_structural.stn: a trait, and a generic type.
+trait Tag*:
+    fn tag(self: Self) -> Int
+
+type Box*[T] = struct(item: T)

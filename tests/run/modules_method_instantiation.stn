@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Section 4.7: the functions of the module that defines the type of the receiver come first, among
+# those that take the receiver. A function of Box[Int] does not take a Box[Str], so the program's
+# own function for Box[Str] is the method of that one; for the same instantiation, the module's wins.
+import lib.boxes
+
+fn read(b: boxes.Box[Str]) -> Str:
+    f"the program reads a string box {b.item}"
+
+fn size(b: boxes.Box[Int]) -> Int:
+    2
+
+fn main() ! io:
+    print(boxes.Box(1).read())
+    print(boxes.Box("x").read())
+    print(f"{boxes.Box(5).size()} {size(boxes.Box(5))}")

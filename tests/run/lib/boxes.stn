@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A library module for modules_method_instantiation.stn: a generic type, and functions over one
+# instantiation of it.
+type Box*[T] = struct(item: T)
+
+fn read*(b: Box[Int]) -> Str:
+    f"lib reads an int box {b.item}"
+
+fn size*(b: Box[Int]) -> Int:
+    1

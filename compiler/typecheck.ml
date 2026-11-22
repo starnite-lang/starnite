@@ -136,6 +136,19 @@ let method_fns tb self m =
     (fun u -> (sg u).smodule = tb.cur || (sg u).smodule = "core" || ((sg u).smodule = home && (sg u).sexport))
     (try Hashtbl.find tb.by_name m with Not_found -> [])
 
+(* Whether the receiver [self] can be the first argument of the function [u]. Nothing stays bound. *)
+let fits_receiver_in tb self u =
+  let sg = Hashtbl.find tb.fns u in
+  match sg.sparams with
+  | (_, _, t, _) :: _ ->
+      let s = List.map (fun (p, _) -> (p, fresh ())) sg.stparams in
+      let mark = open_speculation () in
+      let ok = (try unify self (subst s t); true with Mismatch -> false) in
+      undo_speculation mark;
+      close_speculation ();
+      ok
+  | [] -> false
+
 (* Of the functions a method call can mean, those of the module that defines the type of the
    receiver come first (section 4.7); only when none of them fits does the call find those of the
    calling module and of the prelude. *)
@@ -143,13 +156,17 @@ let prefer_owner tb self us =
   let home = module_of_type tb self in
   match List.filter (fun u -> (Hashtbl.find tb.fns u).smodule = home) us with [] -> us | owners -> owners
 
-(* The modules that define the types a type is made of (section 3.4): the module of a type
-   declared in a program, and what the built-in constructors (Array, Option, tuples, functions) are
-   applied to. *)
+(* The modules that define a type (section 3.4): the module that declares it, if a module of the
+   program does; and for what the prelude's constructors make (Array, Option, tuples, functions),
+   the modules that define what they are applied to. *)
 let rec type_modules tb t : string list =
   match repr t with
-  | TNamed (n, args) ->
-      (match Hashtbl.find_opt tb.decls n with Some d -> [ d.dmodule ] | None -> []) @ List.concat_map (type_modules tb) args
+  | TNamed (n, args) -> (
+      match Hashtbl.find_opt tb.decls n with
+      (* a type that a module of the program declares is that module's, whatever it is applied to *)
+      | Some d when d.dmodule <> "core" -> [ d.dmodule ]
+      (* Option, Result and the like are the prelude's, and made from what they are applied to *)
+      | _ -> List.concat_map (type_modules tb) args)
   | TAny (n, args) ->
       (match Hashtbl.find_opt tb.traits n with Some tr -> [ tr.trmodule ] | None -> []) @ List.concat_map (type_modules tb) args
   | TArray t -> type_modules tb t
@@ -460,7 +477,7 @@ type frame = { mutable vars : (string * var) list; lam : lamrec option }
 type fctx = {
   tb : tables;
   mutable frames : frame list;
-  tparams : (string * (string * ty list) list) list;
+  mutable tparams : (string * (string * ty list) list) list;
   mutable ret : ty;
   mutable errs : ty list;           (* collected errors of the current function or try *)
   mutable io : bool;
@@ -473,7 +490,7 @@ type fctx = {
   mutable lent : (int * loc) list;         (* roots iterated by an enclosing 'for ... in mut' *)
   closure_caps : (int, var list) Hashtbl.t;  (* captures of closures bound to names *)
   fname : string;
-  self_ty : ty option;
+  mutable self_ty : ty option;
   lend_kind : bool option;          (* Some m inside a function declared -> lend [mut] T *)
   retries : int ref;                (* retries left for the outermost call being checked; shared with closures *)
   hint_failed : (string, (string * var * string) list) Hashtbl.t;
@@ -1309,9 +1326,17 @@ and args_check c l (st : args_state) (slots : int list) : targ list =
                    caller's `let RATE = 99` does not change a default `by: Int = RATE`. It is
                    still evaluated here, at the call, and its effects are the call's. *)
                 let dm = try List.assq d !default_modules with Not_found -> c.tb.cur in
-                let caller = c.frames in
+                (* nor are its type parameters, or its Self: a type written in the default is the
+                   module's own, not one that the caller happens to have a parameter of that name for *)
+                let caller_frames = c.frames and caller_tparams = c.tparams and caller_self = c.self_ty in
                 c.frames <- [ { vars = []; lam = None } ];
-                let te = Fun.protect ~finally:(fun () -> c.frames <- caller) (fun () -> in_module c.tb dm (fun () -> check c d t)) in
+                c.tparams <- [];
+                c.self_ty <- None;
+                let te =
+                  Fun.protect
+                    ~finally:(fun () -> c.frames <- caller_frames; c.tparams <- caller_tparams; c.self_ty <- caller_self)
+                    (fun () -> in_module c.tb dm (fun () -> check c d t))
+                in
                 { amode = m; a = te }
             | None -> assert false))
   in
@@ -1654,14 +1679,20 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
       let self = repr tb.ty in
       let h = head self in
       let fn_cands =
-        prefer_owner c.tb self
-          (List.filter
-             (fun u ->
-               let sg = Hashtbl.find c.tb.fns u in
-               match sg.sparams with
-               | (_, _, t, _) :: _ -> head t = h && h <> "_param"
-               | [] -> false)
-             (method_fns c.tb self m))
+        let by_head =
+          List.filter
+            (fun u ->
+              let sg = Hashtbl.find c.tb.fns u in
+              match sg.sparams with
+              | (_, _, t, _) :: _ -> head t = h && h <> "_param"
+              | [] -> false)
+            (method_fns c.tb self m)
+        in
+        (* of the functions for this kind of type, those that take this instantiation of it: a
+           function of Box[Int] is not a method of a Box[Str]. With none that does, the call is
+           a type error, and is reported as one. *)
+        let fitting = List.filter (fits_receiver_in c.tb self) by_head in
+        prefer_owner c.tb self (if fitting = [] then by_head else fitting)
       in
       let generic_cands =
         prefer_owner c.tb self

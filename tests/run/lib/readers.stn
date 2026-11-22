@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A library module for modules_defaults_generics.stn: a private type, and a default that is a
+# function written with its name.
+type Item = struct(value: Int)
+
+fn read*(cb: fn(Item) -> Int = fn(x: Item): x.value) -> Int:
+    cb(Item(7))

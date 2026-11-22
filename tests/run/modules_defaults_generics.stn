@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Sections 2.2 and 3.5: a type written in a default is the declaring module's. The type parameters
+# of the call, here one named Item, are not in scope in it.
+import lib.readers
+
+fn run[Item](dummy: Item) -> Int:
+    readers.read()
+
+fn main() ! io:
+    print(f"{run(5)} {run("s")}")
+    print(f"{readers.read()}")
