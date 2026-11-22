@@ -1,0 +1,15 @@
+# The places of mut arguments are resolved in the order they are written, and read once the other
+# arguments are evaluated, so the marker is printed before the out-of-range element traps. Both
+# backends do the same.
+fn mark() -> Int ! io:
+    print("mark")
+    0
+
+fn put(mut a: Int, mut b: Int):
+    a = b
+
+fn main() ! io:
+    var xs = [1]
+    var ys = [2]
+    put(mut xs[1], mut ys[mark()])
+    print("not reached")

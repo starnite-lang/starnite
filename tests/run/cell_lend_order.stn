@@ -1,0 +1,57 @@
+# A shared cell passed as mut to a function is lent from where that argument is written, until
+# the frame it was taken in ends (section 13.3). An argument written before it can read the
+# cell; one written after it cannot (see trap_cell_busy_arg). A built-in such as push lends
+# nothing, since it cannot call a closure, so its arguments can read the receiver, and even
+# change it, first. A condition, an operand of and/or, a branch, a comprehension, a try and a
+# function body each end the lend. The interpreter and the C backend agree on all of it.
+type Boom = Broke(code: Int)
+
+fn call_it(f: fn() -> Int) -> Int:
+    f()
+
+fn bump(mut xs: Array[Int]) -> Int:
+    xs.push(1)
+    len(xs)
+
+fn flag(mut xs: Array[Int]) -> Bool:
+    xs.push(2)
+    true
+
+fn put(n: Int, mut xs: Array[Int]):
+    xs.push(n)
+
+fn bad(mut xs: Array[Int]) -> Int ! Boom:
+    xs.push(3)
+    fail(Broke(len(xs)))
+
+fn describe(r: Result[Int, Boom], n: Int) -> Str:
+    match r:
+        Ok(x) -> f"ok {x} {n}"
+        Err(e) -> f"failed, then {n}"
+
+fn main() ! io:
+    var v: Array[Int] = [1, 2]
+    # v is a shared cell: the closure reads it while calls change it
+    let size = fn(): len(v)
+    # an argument written before the mut one reads the cell
+    put(call_it(fn(): len(v)), mut v)
+    print(f"{v}")
+    # a built-in lends nothing: its arguments read the receiver, and may change it
+    v.push(len(v))
+    v.push(call_it(fn(): len(v)))
+    v.push(call_it(fn(): bump(mut v)))
+    print(f"{v}")
+    # the lend ends with the condition, the operand, the branch, the comprehension and the try
+    if flag(mut v):
+        print(f"condition {size()}")
+    let both = flag(mut v) and size() > 0
+    let chosen = if flag(mut v): size() else: 0
+    let counts = [bump(mut v) for i in 0..2]
+    print(f"{both} {chosen} {counts}")
+    print(describe(try bad(mut v), size()))
+    var n = 0
+    while flag(mut v) and n < 2:
+        n += 1
+    print(f"{n} {size()}")
+    # and so does the return of a closure
+    print(f"{call_it(fn(): bump(mut v)) + size()}")

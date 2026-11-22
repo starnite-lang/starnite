@@ -1,0 +1,6 @@
+failed boom
+ok Some(2)
+failed pick
+failed tup
+failed lam
+exit 0

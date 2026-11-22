@@ -1,0 +1,28 @@
+# The same default expression is checked at every call that leaves its parameter out, so a call
+# inside it can be checked with the expected type in one place and again in another. What the first
+# check found must not be taken to hold for the second when errors are handled differently there:
+# `stage` fails with Problem[T], and with the expected type T is Int?, which `demo` does not list
+# but a try collects. So the first call, outside the try, goes on without the hint and has the
+# error type Problem[Int], and the second, inside it, must still be checked with the hint.
+type Problem[T] = Bad(value: T)
+
+fn stage[T](x: T) -> T ! Problem[T]:
+    fail(Bad(x))
+
+fn id[T](x: T) -> T:
+    x
+
+fn with_default(x: Int? = id(stage(1))) -> Int?:
+    x
+
+fn demo(skip: Bool) ! io, Problem[Int]:
+    if skip:
+        let first = with_default()
+        print(f"{first}")
+    let caught: Result[Int?, Problem[Int?]] = try with_default()
+    match caught:
+        Ok(v) -> print(f"ok {v}")
+        Err(e) -> print("failed")
+
+fn main() ! io, Problem[Int]:
+    demo(false)

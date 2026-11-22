@@ -335,6 +335,22 @@ type fctx = {
   fname : string;
   self_ty : ty option;
   lend_kind : bool option;          (* Some m inside a function declared -> lend [mut] T *)
+  retries : int ref;                (* retries left for the outermost call being checked; shared with closures *)
+  hint_failed : (string, (string * var * string) list) Hashtbl.t;
+      (* calls that did not check with the expected type, by place, callee and types, with the
+         variables the failed check looked at and their types *)
+  lookups : var list ref;           (* every variable looked up in this function, latest first; shared with closures *)
+  nlookups : int ref;               (* how many *)
+}
+
+(* The arguments of one call, slot by slot in parameter order, the receiver being slot 0 when
+   there is one. The matching of arguments to parameters is made when the first of them is
+   needed, so that an error in the receiver comes before one in the number of arguments. *)
+type args_state = {
+  a_receiver : texpr option;
+  a_params : (mode * string * ty * Syntax.expr option) list;
+  a_args : Syntax.arg list;
+  mutable a_matched : (mode * string * ty * Syntax.arg option * Syntax.expr option) list option;
 }
 
 let push_frame c ?lam () = c.frames <- { vars = []; lam } :: c.frames
@@ -360,12 +376,125 @@ let lookup c name : var option =
                 v.vcaptured <- true;
                 if v.vmut then v.vcell <- true)
               crossed;
+            c.lookups := v :: !(c.lookups);
+            incr c.nlookups;
             Some v
         | None -> go (match f.lam with Some lr -> lr :: crossed | None -> crossed) rest)
   in
   go [] c.frames
 
+(* A variable by name, like lookup, but without marking it captured: for looking, not using. *)
+let peek c name : var option =
+  let rec go = function
+    | [] -> None
+    | f :: rest -> (match List.assoc_opt name f.vars with Some v -> Some v | None -> go rest)
+  in
+  go c.frames
+
 let all_names c = List.concat_map (fun f -> List.map fst f.vars) c.frames
+
+(* What an attempt at checking an expression can change, kept so that a failed attempt can
+   be taken back: the scopes, the effects and moves collected so far, the obligations, and
+   the closures emitted. The type variables are logged by Types.open_speculation. *)
+type snapshot = {
+  sn_frames : (frame * (string * var) list * var list) list;
+  sn_ret : ty; sn_errs : ty list; sn_io : bool; sn_in_try : int; sn_loops : int;
+  sn_obligations : (ty * string * ty list * loc) list;
+  sn_unsolved : (ty * loc) list;
+  sn_moved : (int * loc) list;
+  sn_lent : (int * loc) list;
+  sn_lambdas : lambda list;
+}
+
+let snapshot c =
+  { sn_frames = List.map (fun f -> (f, f.vars, match f.lam with Some lr -> lr.caps | None -> [])) c.frames;
+    sn_ret = c.ret; sn_errs = c.errs; sn_io = c.io; sn_in_try = c.in_try; sn_loops = c.loops;
+    sn_obligations = c.obligations; sn_unsolved = c.unsolved; sn_moved = c.moved; sn_lent = c.lent;
+    sn_lambdas = c.tb.lambdas }
+
+let restore c s =
+  c.frames <- List.map (fun (f, vars, caps) -> f.vars <- vars; (match f.lam with Some lr -> lr.caps <- caps | None -> ()); f) s.sn_frames;
+  c.ret <- s.sn_ret; c.errs <- s.sn_errs; c.io <- s.sn_io; c.in_try <- s.sn_in_try; c.loops <- s.sn_loops;
+  c.obligations <- s.sn_obligations; c.unsolved <- s.sn_unsolved; c.moved <- s.sn_moved; c.lent <- s.sn_lent;
+  c.tb.lambdas <- s.sn_lambdas
+
+(* Run an attempt. If it fails with a compile error, everything it did is undone and the
+   error is returned; the caller can try another way. *)
+let speculate c (f : unit -> 'a) : ('a, exn) result =
+  let snap = snapshot c in
+  let mark = open_speculation () in
+  match f () with
+  | r -> close_speculation (); Ok r
+  | exception (Syntax.Error _ as e) ->
+      undo_speculation mark;
+      close_speculation ();
+      restore c snap;
+      Error e
+  | exception e -> close_speculation (); raise e
+
+(* How many calls in one outermost call may be checked again without the expected type. A
+   retry checks the arguments of the call again, so nested calls that all fall back would
+   multiply the work at every level; once the budget is spent, the calls nested in it are
+   checked on their own. *)
+let retry_budget = 4096
+
+(* A type as a string that tells unresolved type variables apart, for what must not be
+   confused with another type that merely looks the same. *)
+let rec key_ty t =
+  match repr t with
+  | TVar { contents = Unbound n } -> "?" ^ string_of_int n
+  | TVar _ -> "?"
+  | TArray t -> "[" ^ key_ty t ^ "]"
+  | TTuple ts -> "(" ^ String.concat "," (List.map key_ty ts) ^ ")"
+  | TNamed (n, ts) -> n ^ "<" ^ String.concat "," (List.map key_ty ts) ^ ">"
+  | TAny (n, ts) -> "any " ^ n ^ "<" ^ String.concat "," (List.map key_ty ts) ^ ">"
+  | TErr ts -> "err(" ^ String.concat "," (List.map key_ty ts) ^ ")"
+  | TFn f ->
+      let m = function MMut -> "mut " | MTake -> "take " | _ -> "" in
+      "fn(" ^ String.concat "," (List.map (fun (md, t) -> m md ^ key_ty t) f.fps) ^ ")->" ^ key_ty f.fret
+      ^ (if f.feff.io then "!io" else "") ^ (if f.feff.poly then "!poly" else "")
+      ^ "[" ^ String.concat "," (List.map key_ty f.feff.errs) ^ "]"
+  | t -> show_ty t
+
+(* A bound on a type that is already known is checked as soon as the call is, not only when
+   the function ends. Inside the attempt with the expected type, this lets a bound that the
+   hint breaks fail the attempt like an argument that does not fit: `id_eq(5)` into an
+   `any Show`, with `T: Eq`, has the type Int, which is then boxed. *)
+let check_known_bounds c l (sg : fsig) s =
+  List.iter
+    (fun (p, bs) ->
+      let t = zonk (List.assoc p s) in
+      if not (has_tvar t) then
+        List.iter
+          (fun (tr, ta) ->
+            let ta = List.map (fun x -> zonk (subst s x)) ta in
+            if (not (List.exists has_tvar ta)) && find_impl (rtab_of c.tb) ~bounds:c.tparams tr ta t = None then
+              err "E0204" l "%s does not implement %s" (show_ty t) tr)
+          bs)
+    sg.stparams
+
+(* The type variables of a call that its expected type would bind to the result: those it
+   binds, and whether they are all variables of the call itself, which s lists. None if it
+   binds nothing. The binding is undone. *)
+let hint_binding (s : (string * ty) list) ret (t : ty) : (tvar ref list * bool) option =
+  let own = List.filter_map (fun (_, v) -> match repr v with TVar r -> Some r | _ -> None) s in
+  let mark = open_speculation () in
+  (try unify t ret with Mismatch -> ());
+  let bound = List.filter_map (fun (r, old) -> match old with Unbound _ -> Some r | Link _ -> None) (trail_since mark) in
+  undo_speculation mark;
+  close_speculation ();
+  if bound = [] then None else Some (bound, List.for_all (fun r -> List.memq r own) bound)
+
+(* Does a bound already fail on the types the expected type gives the call? The arguments
+   cannot change a type the hint has fixed, so a hinted attempt could not succeed, and none
+   is made: `id_eq(5)` into an `any Show`, with `T: Eq`, is checked on its own at once. *)
+let hint_bounds_fail c l (sg : fsig) s ret (t : ty) : bool =
+  let mark = open_speculation () in
+  (try unify t ret with Mismatch -> ());
+  let fails = (try check_known_bounds c l sg s; false with Syntax.Error _ -> true) in
+  undo_speculation mark;
+  close_speculation ();
+  fails
 
 (* Edit distance for "did you mean" hints (section 19.2). *)
 let edit_distance a b =
@@ -924,22 +1053,36 @@ and mutable_place c (e : Syntax.expr) : bool =
      | Some n -> (match lookup c n with Some v -> v.vmut || v.vkind = VParam MMut | None -> false)
      | None -> false
 
-(* Check the arguments of a call against instantiated parameters. *)
-and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : targ list * eff list =
-  let params_rest, recv_targ =
-    match (receiver, params) with
-    | Some r, (m, _, t, _) :: rest ->
-        (* a mut argument is the place itself: boxing it would write to a copy *)
-        let r = if m = MMut then (unify_at r.l t r.ty; r) else coerce c r t in
-        (rest, [ { amode = m; a = r } ])
-    | Some _, [] -> err "E0203" l "this function takes no arguments"
-    | None, _ -> (params, [])
-  in
-  let matched = match_args c l params_rest args in
-  let poly_effs = ref [] in
-  let targs =
-    List.map
-      (fun (m, n, t, (a : Syntax.arg option), d) ->
+(* The matching of the arguments to the parameters, made once, when the first argument that is
+   not the receiver is needed. *)
+and args_matched c l (st : args_state) =
+  match st.a_matched with
+  | Some m -> m
+  | None ->
+      let rest =
+        match (st.a_receiver, st.a_params) with
+        | Some _, [] -> err "E0203" l "this function takes no arguments"
+        | Some _, _ :: rest -> rest
+        | None, ps -> ps
+      in
+      let m = match_args c l rest st.a_args in
+      st.a_matched <- Some m;
+      m
+
+(* Check the arguments in the given slots against the parameters, in the order given. *)
+and args_check c l (st : args_state) (slots : int list) : targ list =
+  let slot i : targ =
+    match (st.a_receiver, i) with
+    | Some r, 0 -> (
+        match st.a_params with
+        | (m, _, t, _) :: _ ->
+            (* a mut argument is the place itself: boxing it would write to a copy *)
+            let r = if m = MMut then (unify_at r.l t r.ty; r) else coerce c r t in
+            { amode = m; a = r }
+        | [] -> err "E0203" l "this function takes no arguments")
+    | _ -> (
+        let k = match st.a_receiver with Some _ -> i - 1 | None -> i in
+        let m, n, t, (a : Syntax.arg option), d = List.nth (args_matched c l st) k in
         match a with
         | Some a ->
             (match (m, a.amode) with
@@ -959,18 +1102,31 @@ and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : 
              | Some MTake, XVar v -> c.moved <- (v.vid, a.aloc) :: c.moved
              | Some MTake, _ -> err "E0302" a.aloc "'take' moves a variable; write it before a variable name"
              | _ -> ());
-            (match (repr t, repr te.ty) with
-             | TFn pf, TFn af when pf.feff.poly && not af.feff.poly -> poly_effs := af.feff :: !poly_effs
-             | _ -> ());
             { amode = m; a = te }
         | None -> (
             match d with
             | Some d -> { amode = m; a = check c d t }
             | None -> assert false))
-      matched
   in
+  let rec go = function [] -> [] | i :: rest -> (let ta = slot i in ta :: go rest) in
+  go slots
+
+(* What follows the checking of all the arguments: the effects of the functions passed for
+   effect-polymorphic parameters, and the exclusivity of the mut arguments. *)
+and args_finish c l (st : args_state) (all : targ list) : targ list * eff list =
+  let matched = args_matched c l st in
+  let skip = match st.a_receiver with Some _ -> 1 | None -> 0 in
+  let poly_effs = ref [] in
+  List.iteri
+    (fun i (_, _, t, (a : Syntax.arg option), _) ->
+      match (a, List.nth_opt all (i + skip)) with
+      | Some _, Some ta -> (
+          match (repr t, repr ta.a.ty) with
+          | TFn pf, TFn af when pf.feff.poly && not af.feff.poly -> poly_effs := af.feff :: !poly_effs
+          | _ -> ())
+      | _ -> ())
+    matched;
   (* exclusivity: a mut argument must not overlap another argument (section 4.3) *)
-  let all = recv_targ @ targs in
   let rec path (e : texpr) =
     match e.e with
     | XVar v -> Some (v.vid, [])
@@ -1017,14 +1173,112 @@ and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : 
     all;
   (all, !poly_effs)
 
+(* Check the arguments of a call against instantiated parameters. *)
+and check_args c l ~(receiver : texpr option) params (args : Syntax.arg list) : targ list * eff list =
+  let st = { a_receiver = receiver; a_params = params; a_args = args; a_matched = None } in
+  args_finish c l st (args_check c l st (List.init (List.length params) Fun.id))
+
 and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
   let sg = Hashtbl.find c.tb.fns u in
+  (* the budget of retries belongs to one outermost call and the calls nested in it *)
+  if !speculating = 0 then c.retries := retry_budget;
   let s, ps, ret, eff = instantiate sg in
-  (match exp with
-   | Some t when (match repr ret with TVar _ | TNamed _ | TArray _ | TTuple _ -> true | _ -> false) ->
-       (try unify t ret with Mismatch -> ())
-   | _ -> ());
-  let targs, poly = check_args c l ~receiver ps args in
+  let st = { a_receiver = receiver; a_params = ps; a_args = args; a_matched = None } in
+  let n = List.length ps in
+  let all_slots = List.init n Fun.id in
+  (* The expected type is a hint for the result: the parameters are bound to it before the
+     arguments are checked, which is what lets a literal take its type from the context
+     (`let x: F32? = pick(Some(1.0), None)` checks `1.0` as an F32) and what puts a value into
+     an Option or a trait value before the call (`one.pick(Some(2))` as an `Int?` wraps `one`;
+     an impl is chosen for the type the parameter was bound to). It is only a hint. When the
+     call does not check with it, the call is checked on its own and the coercion to the
+     expected type follows: `let a: any Show = (Some(5)).or(4)` has the type Int, which is then
+     boxed, where the hint would ask for an Option[any Show]. *)
+  let hinted =
+    match (exp, repr ret) with
+    | Some _, (TVar _ | TNamed _ | TArray _ | TTuple _) -> true
+    | _ -> false
+  in
+  let finish targs =
+    let targs, poly = args_finish c l st targs in
+    (s, ret, eff, targs, poly)
+  in
+  let s, ret, eff, targs, poly =
+    match exp with
+    | Some t when hinted -> (
+        match hint_binding s ret t with
+        | None -> finish (args_check c l st all_slots)   (* the hint binds nothing *)
+        | Some (bound, only_fresh) ->
+            let mark = !(c.nlookups) in
+            (* The leading arguments whose parameters the hint cannot change are checked once,
+               before it is applied, and kept by both tries. This holds when the hint binds only
+               type variables of this call, since then nothing such an argument is checked
+               against, and nothing it can bind, is touched by it. *)
+            let independent (_, _, pt, _) = not (List.exists (fun r -> mentions r pt) bound) in
+            let rec leading k = function p :: rest when independent p -> leading (k + 1) rest | _ -> k in
+            let j = if only_fresh then leading 0 ps else 0 in
+            let prefix = args_check c l st (List.init j Fun.id) in
+            let others = List.init (n - j) (fun k -> j + k) in
+            let plain () = finish (prefix @ args_check c l st others) in
+            (* A call that did not check with the hint, in this state, did not check in a try that
+               was undone, and will not now: the retry of a call that contains it comes here again,
+               and checking it twice at every level is the doubling. It is checked on its own at
+               once. The state is what the failed check looked at: the place, the callee, the
+               expected type, the receiver, how errors are handled where the call is (inside a try,
+               or in a function that lists its errors), and the variables it looked up, with their
+               types, unresolved type variables told apart. It is taken from the check itself, so that a
+               default checked in the caller, in this call or in one inside it, counts. A try that
+               is undone can bind such a variable's type one way and the retry another, and then
+               the failure says nothing. *)
+            let site =
+              Printf.sprintf "%s:%d:%d:%s:%d:%s|%s|%b:%s" l.file l.line l.col u n (key_ty t)
+                (match receiver with Some r -> key_ty r.ty | None -> "")
+                (c.in_try > 0)
+                (match c.declared with None -> "-" | Some decl -> String.concat "," (List.map key_ty decl))
+            in
+            let remembered =
+              match Hashtbl.find_opt c.hint_failed site with
+              | Some deps ->
+                  List.for_all
+                    (fun (nm, v, k) -> (match peek c nm with Some v' -> v' == v | None -> false) && key_ty v.vty = k)
+                    deps
+              | None -> false
+            in
+            if remembered then plain ()
+            else if hint_bounds_fail c l sg s ret t then plain ()   (* a bound fails on the type it gives *)
+            else if !(c.retries) <= 0 then begin
+              (* the budget is spent: the call is checked with the hint alone, as it was before
+                 there was a second try *)
+              (try unify t ret with Mismatch -> ());
+              plain ()
+            end
+            else (
+              let hinted_try () =
+                (try unify t ret with Mismatch -> ());
+                let r = finish (prefix @ args_check c l st others) in
+                check_known_bounds c l sg s;
+                r
+              in
+              match speculate c hinted_try with
+              | Ok r -> r
+              | Error e -> (
+                  (* what the failed check looked up, with the types it saw: the undoing has put
+                     them back *)
+                  let rec take k = function x :: rest when k > 0 -> x :: take (k - 1) rest | _ -> [] in
+                  let looked = take (!(c.nlookups) - mark) !(c.lookups) in
+                  let deps =
+                    List.filter_map
+                      (fun (v : var) -> match peek c v.vname with Some v' when v' == v -> Some (v.vname, v, key_ty v.vty) | _ -> None)
+                      looked
+                  in
+                  decr c.retries;
+                  match speculate c plain with
+                  | Ok r ->
+                      Hashtbl.replace c.hint_failed site (List.sort_uniq (fun (_, (a : var), _) (_, (b : var), _) -> compare a.vid b.vid) deps);
+                      r
+                  | Error _ -> raise e)))
+    | _ -> finish (args_check c l st all_slots)
+  in
   let convs = add_eff c l eff @ List.concat_map (add_eff c l) poly in
   (* bounds become obligations *)
   List.iter
@@ -1033,7 +1287,6 @@ and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
       List.iter (fun (tr, ta) -> c.obligations <- (t, tr, List.map (subst s) ta, l) :: c.obligations) bs)
     sg.stparams;
   let callee = if is_builtin u then CBuiltin (String.sub u 8 (String.length u - 8), List.map snd s) else CFn (u, List.map snd s) in
-  let ret = ret in
   mk (XCall (callee, targs, convs)) ret l
 
 (* Pick an overload by the head of the first argument's type. *)
@@ -1912,15 +2165,6 @@ and zonk_s (s : tstmt) : tstmt =
   in
   { s with st }
 
-(* Every type in the tree must be known after checking (E0210). *)
-let rec has_tvar t =
-  match repr t with
-  | TVar _ -> true
-  | TArray t -> has_tvar t
-  | TTuple ts | TNamed (_, ts) | TErr ts | TAny (_, ts) -> List.exists has_tvar ts
-  | TFn f -> List.exists (fun (_, t) -> has_tvar t) f.fps || has_tvar f.fret
-  | _ -> false
-
 (* ---------- declarations ---------- *)
 
 let module_name path =
@@ -2212,7 +2456,8 @@ let new_ctx tb (sg : fsig) self : fctx =
   { tb; frames = [ { vars = []; lam = None } ]; tparams = sg.stparams; ret = sg.sret; errs = []; io = false;
     in_try = 0; loops = 0;
     declared = (if sg.sdeclared && (sg.seff.errs <> [] || sg.sexport) then Some sg.seff.errs else None);
-    obligations = []; unsolved = []; moved = []; lent = []; closure_caps = Hashtbl.create 8; fname = sg.sdisplay; self_ty = self; lend_kind = sg.slend }
+    obligations = []; unsolved = []; moved = []; lent = []; closure_caps = Hashtbl.create 8; fname = sg.sdisplay; self_ty = self; lend_kind = sg.slend; retries = ref retry_budget; hint_failed = Hashtbl.create 16;
+    lookups = ref []; nlookups = ref 0 }
 
 let finish_ctx c l =
   List.iter

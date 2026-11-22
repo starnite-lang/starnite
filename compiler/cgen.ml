@@ -477,6 +477,14 @@ let tmp fc t init =
   line fc "%s %s = %s;" (ct fc t) n init;
   n
 
+(* A value for code that is never reached, such as the end of a function whose body always
+   fails. 0 is not an initializer for every type, a struct among them, so it is zeroed. *)
+let dead_value fc (t : ty) : string =
+  let z = fresh fc.st "_z" in
+  line fc "%s %s;" (ct fc t) z;
+  line fc "memset(&%s, 0, sizeof %s);" z z;
+  z
+
 let own fc (x : r) t = if x.owned || not (rc fc t) then x.c else dup_expr fc.st (ts fc t) x.c
 
 let borrow fc (x : r) t =
@@ -800,7 +808,9 @@ let rec expr fc (e : texpr) : r =
        | TErr _ -> line fc "StnError %s = %s;" ev v
        | _ -> line fc "StnError %s = errmake_%s(%s);" ev (mangle at) v; ignore (err_id st at));
       propagate fc ev;
-      { c = "0"; owned = false }
+      (* control does not come back, but the checker gave the expression the type it was used at,
+         and C wants a value of it *)
+      { c = (match repr t with TNever | TUnit -> "0" | _ -> dead_value fc t); owned = false }
   | XComp (body, comps) ->
       let elt = match repr t with TArray et -> et | _ -> assert false in
       let a = fresh st "_t" in
@@ -892,17 +902,41 @@ and construct fc t i (vals : string list) : r =
 
 (* ---------- calls ---------- *)
 
+(* The arguments of a call, as C expressions. A mut place is evaluated where it is written,
+   but its address is taken, and its arrays made unique and its indexes checked, once the
+   other arguments have run: they can share an array or change its length, and C leaves open
+   in which order the arguments of a call are evaluated. With more than one address, each is
+   taken into a variable, in order, so the checks run left to right, as in the interpreter. *)
+and arg_strings fc (items : [ `Addr of (unit -> string) * ty | `Arg of string ] list) : string list =
+  let many = List.length (List.filter (function `Addr _ -> true | `Arg _ -> false) items) > 1 in
+  let rec go = function
+    | [] -> []
+    | `Arg s :: rest -> s :: go rest
+    | `Addr (finish, t) :: rest ->
+        let lv = finish () in
+        if many then begin
+          let p = fresh fc.st "_ap" in
+          line fc "%s* %s = &%s;" (ct fc t) p lv;
+          p :: go rest
+        end else ("&" ^ lv) :: go rest
+  in
+  go items
+
 and args_c fc (params : (mode * ty) list) (targs : targ list) : string list =
-  List.map2
-    (fun (m, pt) ta ->
-      match m with
-      | MMut -> let lv = place_lvalue_of_expr fc ta.a in hold_busy fc ta.a; "&" ^ lv
-      | MTake -> tmp fc ta.a.ty (own fc (expr fc ta.a) ta.a.ty)
-      | MBorrow ->
-          let x = expr fc ta.a in
-          let v = borrow fc x ta.a.ty in
-          v)
-    params targs
+  arg_strings fc
+    (List.map2
+       (fun (m, pt) ta ->
+         match m with
+         | MMut ->
+             let finish = place_deferred_of_expr fc ta.a in
+             hold_busy fc ta.a;
+             `Addr (finish, ts fc ta.a.ty)
+         | MTake -> `Arg (tmp fc ta.a.ty (own fc (expr fc ta.a) ta.a.ty))
+         | MBorrow ->
+             let x = expr fc ta.a in
+             let v = borrow fc x ta.a.ty in
+             `Arg v)
+       params targs)
 
 and call fc (e : texpr) (cl : callee) (targs : targ list) convs : r =
   let st = fc.st in
@@ -1038,16 +1072,17 @@ and call_instance fc (e : texpr) uname tys (sg : fsig) targs convs : r =
     (* every parameter it can lend from is passed by address, so the place outlives
        the call; the pointer is good for the rest of the caller's statement *)
     let avs =
-      List.map2
-        (fun (m, _) ta ->
-          match m with
-          | MMut -> let lv = place_lvalue_of_expr fc ta.a in hold_busy fc ta.a; "&" ^ lv
-          | MTake -> tmp fc ta.a.ty (own fc (expr fc ta.a) ta.a.ty)
-          | MBorrow -> (
-              match to_place fc ta.a with
-              | Some p -> "&" ^ place_lvalue ~write:false fc p
-              | None -> "&" ^ tmp fc ta.a.ty (borrow fc (expr fc ta.a) ta.a.ty)))
-        ps targs
+      arg_strings fc
+        (List.map2
+           (fun (m, _) ta ->
+             match m with
+             | MMut -> let finish = place_deferred_of_expr fc ta.a in hold_busy fc ta.a; `Addr (finish, ts fc ta.a.ty)
+             | MTake -> `Arg (tmp fc ta.a.ty (own fc (expr fc ta.a) ta.a.ty))
+             | MBorrow -> (
+                 match to_place fc ta.a with
+                 | Some p -> `Addr (place_deferred ~write:false fc p, ts fc ta.a.ty)
+                 | None -> `Arg ("&" ^ tmp fc ta.a.ty (borrow fc (expr fc ta.a) ta.a.ty))))
+           ps targs)
     in
     let p = fresh st "_lp" in
     line fc "%s* %s = %s(%s);" (ct fc t) p name (String.concat ", " avs);
@@ -1530,6 +1565,65 @@ and place_lvalue ?(write = true) fc (p : place) : string =
       let t0 = match p.via with Some call -> ts fc call.ty | None -> ts fc p.root.vty in
       go start t0 p.path
 
+(* Like place_lvalue, but only the index expressions are evaluated now. Making each array on
+   the way unique and checking each index are left to the function returned, which emits them
+   when it is called. A call takes the address of a mut place once its other arguments have
+   run, and one of them can share an array or change its length. *)
+and place_deferred ?(write = true) fc (p : place) : unit -> string =
+  let rec go (t : ty) = function
+    | [] -> fun lv -> lv
+    | PField (_, f) :: rest ->
+        let ft = List.assoc f (struct_fields fc.st t) in
+        let k = go ft rest in
+        fun lv -> k (Printf.sprintf "%s.%s" lv (fname f))
+    | PTupleIx i :: rest ->
+        let ft = match repr t with TTuple ts_ -> List.nth ts_ i | _ -> assert false in
+        let k = go ft rest in
+        fun lv -> k (Printf.sprintf "%s.f%d" lv i)
+    | PIndex ix :: rest ->
+        let et = match repr t with TArray et -> et | _ -> assert false in
+        let iv = tmp fc (TInt IInt) (expr fc ix).c in
+        let k = go et rest in
+        fun lv ->
+          if write then line fc "stn_array_make_unique(&%s);" lv;
+          k (Printf.sprintf "((%s*)(%s)->data)[stn_index(%s, stn_len(%s), %s)]" (cty fc.st et) lv iv lv (loc_args ix.l))
+  in
+  match ((if p.via = None then Hashtbl.find_opt fc.cached p.root.vid else None), p.path) with
+  | Some (d, n), PIndex ix :: rest ->
+      let et = match repr (ts fc p.root.vty) with TArray et -> et | _ -> assert false in
+      let iv = tmp fc (TInt IInt) (expr fc ix).c in
+      let k = go et rest in
+      fun () -> k (Printf.sprintf "%s[stn_index(%s, %s, %s)]" d iv n (loc_args ix.l))
+  | _ ->
+      let start = place_root fc p in
+      let t0 = match p.via with Some call -> ts fc call.ty | None -> ts fc p.root.vty in
+      let k = go t0 p.path in
+      fun () -> k start
+
+(* where a place starts: its variable, or the place a lend call lends *)
+and place_root fc (p : place) : string =
+  match p.via with
+  | Some call -> (expr fc call).c
+  | None ->
+  match Hashtbl.find_opt fc.vars p.root.vid with
+  | Some (VDirect n) -> n
+  | Some (VPtr n) -> "(*" ^ n ^ ")"
+  | Some (VCell (n, _)) | Some (VCapCell (n, _)) -> n ^ "->value"
+  | Some (VCap n) -> n
+  | None -> failwith "cgen: unbound place root"
+
+(* a place expression's address, to be taken later: see place_deferred *)
+and place_deferred_of_expr ?(write = true) fc (e : texpr) : unit -> string =
+  match to_place fc e with
+  | Some p ->
+      (match cell_root fc e with
+       | Some (c, l) -> line fc "if (%s->busy) stn_trap(\"shared cell busy\", %s, \"a shared cell was accessed while it was lent out\");" c (loc_args l)
+       | None -> ());
+      place_deferred ~write fc p
+  | None ->
+      let s = tmp fc e.ty (own fc (expr fc e) e.ty) in
+      fun () -> s
+
 (* a place expression as a place: a variable or a lend call, then fields and elements *)
 and to_place fc (e : texpr) : place option =
   match e.e with
@@ -1860,6 +1954,8 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
   let b i = borrow fc (expr fc (arg i).a) (arg i).a.ty in
   let o i = tmp fc (arg i).a.ty (own fc (expr fc (arg i).a) (arg i).a.ty) in
   let m i = place_lvalue_of_expr fc (arg i).a in
+  (* a receiver whose address is taken after the other arguments have run, as for any mut place *)
+  let md i = place_deferred_of_expr fc (arg i).a in
   let unit_ () = { c = "0"; owned = false } in
   let value c = { c; owned = false } in
   let owned c = { c = tmp fc t c; owned = true } in
@@ -1887,8 +1983,9 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       | _ -> value (Printf.sprintf "stn_len(%s)" (b 0)))
   | "len@Str" -> value (Printf.sprintf "(%s)->len" (b 0))
   | "push@Array" ->
-      let lv = m 0 in
+      let fin = md 0 in
       let x = o 1 in
+      let lv = fin () in
       line fc "STN_PUSH(&%s, %s, %s);" lv (cty st (elt ())) x;
       unit_ ()
   | "pop@Array" ->
@@ -1907,22 +2004,25 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       line fc "}";
       { c = res; owned = true }
   | "insert@Array" ->
-      let lv = m 0 in
+      let fin = md 0 in
       let i = tmp fc (TInt IInt) (expr fc (arg 1).a).c in
       let x = o 2 in
+      let lv = fin () in
       line fc "stn_array_insert(&%s, %s, &%s, %s);" lv i x la;
       unit_ ()
   | "remove@Array" ->
-      let lv = m 0 in
+      let fin = md 0 in
       let i = tmp fc (TInt IInt) (expr fc (arg 1).a).c in
+      let lv = fin () in
       let x = fresh st "_x" in
       line fc "%s %s;" (cty st t) x;
       line fc "stn_array_remove(&%s, %s, &%s, %s);" lv i x la;
       { c = x; owned = true }
   | "clear@Array" -> line fc "stn_array_clear(&%s);" (m 0); unit_ ()
   | "extend@Array" ->
-      let lv = m 0 in
+      let fin = md 0 in
       let ys = b 1 in
+      let lv = fin () in
       line fc "stn_array_extend(&%s, %s);" lv ys;
       unit_ ()
   | "filled@Int" ->

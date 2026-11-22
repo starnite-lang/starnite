@@ -1,0 +1,3 @@
+trap: index out of range at tests/run/trap_mut_index_both.stn:8:16
+index 5, length 1
+exit 2

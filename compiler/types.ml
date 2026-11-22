@@ -39,11 +39,37 @@ let poly_eff = { errs = []; io = false; poly = true }
 let counter = ref 0
 let fresh () = incr counter; TVar (ref (Unbound !counter))
 
+(* Speculation: while an attempt is open, every change to a type variable is logged, so
+   the attempt can be undone if it fails. *)
+let trail : (tvar ref * tvar) list ref = ref []
+let speculating = ref 0
+
+let set_var r v =
+  if !speculating > 0 then trail := (r, !r) :: !trail;
+  r := v
+
+let open_speculation () = incr speculating; !trail
+
+(* the attempt held: its changes stay in the log while an enclosing attempt can still fail *)
+let close_speculation () = decr speculating; if !speculating = 0 then trail := []
+
+(* the bindings and compressions logged since [mark], oldest first *)
+let trail_since mark =
+  let rec go l acc =
+    if l == mark then acc else match l with e :: rest -> go rest (e :: acc) | [] -> acc
+  in
+  go !trail []
+
+let undo_speculation mark =
+  let rec go l = if l != mark then match l with (r, old) :: rest -> r := old; go rest | [] -> () in
+  go !trail;
+  trail := mark
+
 let rec repr t =
   match t with
   | TVar ({ contents = Link t' } as r) ->
       let t'' = repr t' in
-      r := Link t'';
+      if t'' != t' then set_var r (Link t'');
       t''
   | _ -> t
 
@@ -123,6 +149,16 @@ let rec occurs r t =
   | TFn f -> List.exists (fun (_, t) -> occurs r t) f.fps || occurs r f.fret
   | _ -> false
 
+(* Like occurs, but also in the error types of a function's effects: an argument is checked against
+   them, though unification leaves them out. *)
+let rec mentions r t =
+  match repr t with
+  | TVar r' -> r == r'
+  | TArray t -> mentions r t
+  | TTuple ts | TNamed (_, ts) | TErr ts | TAny (_, ts) -> List.exists (mentions r) ts
+  | TFn f -> List.exists (fun (_, t) -> mentions r t) f.fps || mentions r f.fret || List.exists (mentions r) f.feff.errs
+  | _ -> false
+
 exception Mismatch
 
 (* Structural equality after zonking; used to compare error types. *)
@@ -170,7 +206,7 @@ let rec unify a b =
     | TNever, _ | _, TNever -> ()
     | TVar r, t | t, TVar r ->
         if occurs r t then raise Mismatch;
-        r := Link t
+        set_var r (Link t)
     | TInt x, TInt y -> if x <> y then raise Mismatch
     | TArray x, TArray y -> unify x y
     | TTuple xs, TTuple ys ->
@@ -188,6 +224,16 @@ let rec unify a b =
         if List.length xs <> List.length ys then raise Mismatch;
         List.iter2 unify xs ys
     | x, y -> if x <> y then raise Mismatch
+
+(* Does the type still hold an unresolved type variable? Every type in the tree must be
+   known after checking (E0210). *)
+let rec has_tvar t =
+  match repr t with
+  | TVar _ -> true
+  | TArray t -> has_tvar t
+  | TTuple ts | TNamed (_, ts) | TErr ts | TAny (_, ts) -> List.exists has_tvar ts
+  | TFn f -> List.exists (fun (_, t) -> has_tvar t) f.fps || has_tvar f.fret
+  | _ -> false
 
 let is_numeric t = match repr t with TInt _ | TFloat | TF32 -> true | _ -> false
 let is_int t = match repr t with TInt _ -> true | _ -> false

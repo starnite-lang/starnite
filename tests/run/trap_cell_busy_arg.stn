@@ -1,0 +1,12 @@
+# A shared cell passed as mut to a function is lent from where that argument is written (section
+# 13.3): an argument written after it that reaches the cell traps, in the interpreter and in C alike.
+fn call_it(f: fn() -> Int) -> Int:
+    f()
+
+fn put(mut xs: Array[Int], n: Int):
+    xs.push(n)
+
+fn main():
+    var v: Array[Int] = [1, 2]
+    put(mut v, call_it(fn(): len(v)))
+    print(f"{v}")

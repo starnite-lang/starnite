@@ -1,0 +1,35 @@
+# fail(...) never returns a value, but the checker gives it the type it is used at, and C wants a
+# value of that type: a function whose body is only a failure, a branch that fails, and a closure
+# that fails, each with a result that is a struct in C (an Option, a tuple).
+type Problem[T] = Bad(value: T)
+
+fn boom(x: Int?) -> Int? ! Problem[Int?]:
+    fail(Bad(x))
+
+fn pick(flag: Bool, x: Int?) -> Int? ! Problem[Int?]:
+    let v: Int? = if flag: fail(Bad(x)) else: x
+    v
+
+fn tup(x: Int?) -> (Int?, Str) ! Problem[Int?]:
+    fail(Bad(x))
+
+fn lam(x: Int?) -> Int? ! Problem[Int?]:
+    let f = fn(): fail(Bad(x))
+    f()
+
+fn main() ! io:
+    match try boom(Some(1)):
+        Ok(v) -> print(f"ok {v}")
+        Err(e) -> print("failed boom")
+    match try pick(false, Some(2)):
+        Ok(v) -> print(f"ok {v}")
+        Err(e) -> print("failed pick")
+    match try pick(true, Some(3)):
+        Ok(v) -> print(f"ok {v}")
+        Err(e) -> print("failed pick")
+    match try tup(Some(4)):
+        Ok(v) -> print("ok")
+        Err(e) -> print("failed tup")
+    match try lam(Some(5)):
+        Ok(v) -> print(f"ok {v}")
+        Err(e) -> print("failed lam")
