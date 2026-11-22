@@ -1224,14 +1224,17 @@ and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
                was undone, and will not now: the retry of a call that contains it comes here again,
                and checking it twice at every level is the doubling. It is checked on its own at
                once. The state is what the failed check looked at: the place, the callee, the
-               expected type, the receiver, and the variables it looked up, with their types,
-               unresolved type variables told apart. It is taken from the check itself, so that a
+               expected type, the receiver, how errors are handled where the call is (inside a try,
+               or in a function that lists its errors), and the variables it looked up, with their
+               types, unresolved type variables told apart. It is taken from the check itself, so that a
                default checked in the caller, in this call or in one inside it, counts. A try that
                is undone can bind such a variable's type one way and the retry another, and then
                the failure says nothing. *)
             let site =
-              Printf.sprintf "%s:%d:%d:%s:%d:%s|%s" l.file l.line l.col u n (key_ty t)
+              Printf.sprintf "%s:%d:%d:%s:%d:%s|%s|%b:%s" l.file l.line l.col u n (key_ty t)
                 (match receiver with Some r -> key_ty r.ty | None -> "")
+                (c.in_try > 0)
+                (match c.declared with None -> "-" | Some decl -> String.concat "," (List.map key_ty decl))
             in
             let remembered =
               match Hashtbl.find_opt c.hint_failed site with
