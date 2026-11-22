@@ -1031,8 +1031,14 @@ and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
      when (match repr ret with
            | TVar r -> (
                match repr t with
-               | TAny _ | TNamed ("Option", _) ->
-                   not (match (receiver, ps) with Some _, (_, _, pt, _) :: _ -> occurs r pt | _ -> false)
+               | TAny _ | TNamed ("Option", _) -> (
+                   match (receiver, ps) with
+                   | Some recv, (_, _, pt, _) :: _ when occurs r pt ->
+                       (* the receiver decides the result only if it fixes it completely: an
+                          empty literal leaves its element type open, and the hint settles it *)
+                       (try unify pt recv.ty with Mismatch -> ());
+                       has_tvar ret
+                   | _ -> true)
                | _ -> true)
            | TNamed _ | TArray _ | TTuple _ -> true
            | _ -> false) ->
@@ -1925,15 +1931,6 @@ and zonk_s (s : tstmt) : tstmt =
     | SLend e -> SLend (zonk_e e)
   in
   { s with st }
-
-(* Every type in the tree must be known after checking (E0210). *)
-let rec has_tvar t =
-  match repr t with
-  | TVar _ -> true
-  | TArray t -> has_tvar t
-  | TTuple ts | TNamed (_, ts) | TErr ts | TAny (_, ts) -> List.exists has_tvar ts
-  | TFn f -> List.exists (fun (_, t) -> has_tvar t) f.fps || has_tvar f.fret
-  | _ -> false
 
 (* ---------- declarations ---------- *)
 

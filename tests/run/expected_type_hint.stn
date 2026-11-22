@@ -1,8 +1,12 @@
 # The expected type is a hint for a generic result: it lets a literal argument take its type from
 # the context. A receiver is typed before the hint is used, so when it decides the result and the
-# value is then boxed or wrapped, the hint is not taken.
+# value is then boxed or wrapped, the hint is not taken; a receiver that leaves the result open,
+# such as an empty literal, does not decide it.
 fn pick[T](a: T, b: T) -> T:
     a
+
+fn choose[T](xs: Array[T], fallback: T) -> T:
+    fallback
 
 fn main() ! io:
     let a: any Show = (Some(5)).or(4)
@@ -15,3 +19,9 @@ fn main() ! io:
     let f: F32? = pick(Some(1.0), None)
     let g: Float? = pick(Some(2.5), None)
     print(f"{f} {g}")
+    # the same through a method call whose receiver is an empty literal
+    let xs = []
+    let h: F32? = xs.choose(Some(1.0))
+    let ys = [3, 4]
+    let i: any Show = ys.choose(5)
+    print(f"{h} {i}")
