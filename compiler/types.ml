@@ -298,7 +298,7 @@ and conv = { cfrom : ty; cfn : string; cto : ty }  (* From[cfrom] for cto, appli
 and callee =
   | CFn of string * ty list              (* global function, type arguments *)
   | CBuiltin of string * ty list
-  | CTrait of string * ty list * string * ty   (* trait, trait args, method, Self *)
+  | CTrait of string * ty list * string * ty * ty list   (* trait, trait args, method, Self, the method's own type arguments *)
   | CClosure of texpr
 
 and targ = { amode : mode; a : texpr }

@@ -21,7 +21,8 @@ test "sort is stable and ordered":
 test "options":
     let a: Int? = Some(3)
     assert a.or(0) == 3
-    assert is_none(None.or(None))
+    let none: Int? = None.or(None)
+    assert is_none(none)
     assert a == Some(3)
 
 test "array value semantics":

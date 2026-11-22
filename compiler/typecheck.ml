@@ -475,7 +475,7 @@ type fctx = {
   mutable loops : int;
   declared : ty list option;        (* declared error list, if any *)
   mutable obligations : (ty * string * ty list * loc) list;
-  mutable unsolved : (ty * loc) list;
+  mutable unsolved : (ty * loc * string) list;   (* types that must be known by the end of the function, and what to say if not *)
   mutable moved : (int * loc) list;        (* variables moved by an explicit take (section 4.2) *)
   mutable lent : (int * loc) list;         (* roots iterated by an enclosing 'for ... in mut' *)
   closure_caps : (int, var list) Hashtbl.t;  (* captures of closures bound to names *)
@@ -548,7 +548,7 @@ type snapshot = {
   sn_frames : (frame * (string * var) list * var list) list;
   sn_ret : ty; sn_errs : ty list; sn_io : bool; sn_in_try : int; sn_loops : int;
   sn_obligations : (ty * string * ty list * loc) list;
-  sn_unsolved : (ty * loc) list;
+  sn_unsolved : (ty * loc * string) list;
   sn_moved : (int * loc) list;
   sn_lent : (int * loc) list;
   sn_lambdas : lambda list;
@@ -851,7 +851,7 @@ let ensure_const : (tables -> string -> unit) ref = ref (fun _ _ -> ())
 let lend_of tb (te : texpr) : bool option =
   match te.e with
   | XCall (CFn (u, _), _, _) -> (match Hashtbl.find_opt tb.fns u with Some sg -> sg.slend | None -> None)
-  | XCall (CTrait (tr, _, m, _), _, _) -> (
+  | XCall (CTrait (tr, _, m, _, _), _, _) -> (
       match Hashtbl.find_opt tb.traits tr with
       | Some t -> (match List.assoc_opt m t.trmethods_ with Some sg -> sg.slend | None -> None)
       | None -> None)
@@ -1103,7 +1103,7 @@ and check_or_infer c (e : Syntax.expr) (expected : ty option) : texpr =
       mk (XTuple tes) (TTuple (List.map (fun t -> t.ty) tes)) l
   | ArrayLit es ->
       let elt = match exp with Some (TArray t) -> t | _ -> fresh () in
-      if es = [] then c.unsolved <- (elt, l) :: c.unsolved;
+      if es = [] then c.unsolved <- (elt, l, "the element type of this empty literal is never settled; add an annotation") :: c.unsolved;
       let tes = List.map (fun e -> check c e elt) es in
       mk (XArray tes) (TArray elt) l
   | Comp (body, comps) ->
@@ -1150,7 +1150,7 @@ and show_expr c (te : texpr) : texpr =
       if find_impl (rtab_of c.tb) ~bounds:c.tparams "Show" [] t = None && (match t with TVar _ -> false | _ -> true) then
         err "E0204" te.l "%s does not implement Show" (show_ty t);
       if (match t with TVar _ -> true | _ -> false) then c.obligations <- (t, "Show", [], te.l) :: c.obligations;
-      mk (XCall (CTrait ("Show", [], "show", te.ty), [ { amode = MBorrow; a = te } ], [])) TStr te.l
+      mk (XCall (CTrait ("Show", [], "show", te.ty, []), [ { amode = MBorrow; a = te } ], [])) TStr te.l
 
 and check_comp c (cp : Syntax.comp) : tcomp =
   let src, elt = check_iter c cp.citer MBorrow in
@@ -1449,6 +1449,12 @@ and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
   (* the budget of retries belongs to one outermost call and the calls nested in it *)
   if !speculating = 0 then c.retries := retry_budget;
   let s, ps, ret, eff = instantiate sg in
+  (* what the call makes of a type parameter is found from its arguments, or from the context of the call
+     (section 5.2); a parameter that nothing settles is for the caller to write *)
+  List.iter
+    (fun (p, v) ->
+      c.unsolved <- (v, l, Printf.sprintf "the type parameter %s of %s is never settled by this call; give the value it returns a type with an annotation" p sg.sdisplay) :: c.unsolved)
+    s;
   let st = { a_tenv = s; a_receiver = receiver; a_params = ps; a_args = args; a_matched = None } in
   let n = List.length ps in
   let all_slots = List.init n Fun.id in
@@ -1858,7 +1864,11 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
 and trait_call c l tn trargs m (sg : fsig) self (receiver : texpr option) args exp : texpr =
   let tr = Hashtbl.find c.tb.traits tn in
   let ta = List.map (fun _ -> fresh ()) tr.trparams in
-  let s = ("Self", self) :: List.combine tr.trparams ta in
+  (* the method's own type parameters, those of its signature that are not the trait's, are as free
+     as those of a function: what the call makes of them is found from its arguments *)
+  let own = List.filter (fun (p, _) -> not (List.mem p tr.trparams)) sg.stparams in
+  let own_vars = List.map (fun (p, _) -> (p, fresh ())) own in
+  let s = (("Self", self) :: List.combine tr.trparams ta) @ own_vars in
   let ps = List.map (fun (md, n, t, d) -> (md, n, subst s t, d)) sg.sparams in
   let ret = subst s sg.sret in
   (* pick the trait arguments from the bound, or from the one impl that fits Self *)
@@ -1885,11 +1895,19 @@ and trait_call c l tn trargs m (sg : fsig) self (receiver : texpr option) args e
            let sb = List.map (fun (p, _) -> (p, try List.assoc p sb with Not_found -> fresh ())) im.itparams in
            List.iter2 (fun a b -> try unify a (subst sb b) with Mismatch -> ()) ta im.itargs_
        | _ -> ()));
+  List.iter
+    (fun (p, v) ->
+      c.unsolved <- (v, l, Printf.sprintf "the type parameter %s of %s is never settled by this call; give the value it returns a type with an annotation" p m) :: c.unsolved)
+    own_vars;
   let targs, poly = check_args c l ~tenv:[] ~receiver ps args in
   c.obligations <- (self, tn, ta, l) :: c.obligations;
+  (* a bound of an own type parameter is an obligation on the type the call made of it *)
+  List.iter2
+    (fun (_, bs) (_, v) -> List.iter (fun (btr, bargs) -> c.obligations <- (v, btr, List.map (subst s) bargs, l) :: c.obligations) bs)
+    own own_vars;
   (* the method's own effects, and those of any function argument whose effects are open *)
   let convs = add_eff c l { sg.seff with errs = List.map (subst s) sg.seff.errs } @ List.concat_map (add_eff c l) poly in
-  mk (XCall (CTrait (tn, ta, m, self), targs, convs)) ret l
+  mk (XCall (CTrait (tn, ta, m, self, List.map snd own_vars), targs, convs)) ret l
 
 and infer_bracket c l (b : Syntax.expr) (args : Syntax.barg list) exp : texpr =
   (* explicit type arguments: parse[Int](text) are handled by the call; here: indexing *)
@@ -2030,7 +2048,7 @@ and infer_binop c l op a b exp : texpr =
                        err "E0204" l "%s does not implement %s, so '%s' is not defined on it" (show_ty t) tr op);
                 c.obligations <- (t, tr, [ tb.ty ], l) :: c.obligations;
                 let convs = add_eff c l sg.seff in
-                mk (XCall (CTrait (tr, [ tb.ty ], String.lowercase_ascii tr, t), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], convs)) t l
+                mk (XCall (CTrait (tr, [ tb.ty ], String.lowercase_ascii tr, t, []), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], convs)) t l
             | None -> err "E0204" l "'%s' is not defined on %s" op (show_ty t))
       end else begin
         let bop = List.assoc op cmp in
@@ -2039,11 +2057,11 @@ and infer_binop c l op a b exp : texpr =
         if prim && (eqop || t <> TUnit) then mk (XBin (bop, ta, tb)) TBool l
         else if eqop then begin
           c.obligations <- (t, "Eq", [], l) :: c.obligations;
-          let call = mk (XCall (CTrait ("Eq", [], "eq", t), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], [])) TBool l in
+          let call = mk (XCall (CTrait ("Eq", [], "eq", t, []), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], [])) TBool l in
           if bop = Eq then call else mk (XNot call) TBool l
         end else begin
           c.obligations <- (t, "Ord", [], l) :: c.obligations;
-          let call = mk (XCall (CTrait ("Ord", [], "cmp", t), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], [])) (TInt IInt) l in
+          let call = mk (XCall (CTrait ("Ord", [], "cmp", t, []), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], [])) (TInt IInt) l in
           mk (XBin (bop, call, mk (XLit (LInt "0")) (TInt IInt) l)) TBool l
         end
       end
@@ -2157,7 +2175,7 @@ and infer_binop_typed c l op (ta : texpr) (b : Syntax.expr) : texpr =
          && not (List.exists (fun im -> im.itrait_ = tr && (let s = ref [] in match_ty (List.map fst im.itparams) s im.ifor_ t)) c.tb.impls) then
         err "E0204" l "%s does not implement %s" (show_ty t) tr;
       c.obligations <- (t, tr, [ tb.ty ], l) :: c.obligations;
-      mk (XCall (CTrait (tr, [ tb.ty ], String.lowercase_ascii tr, t), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], [])) t l)
+      mk (XCall (CTrait (tr, [ tb.ty ], String.lowercase_ascii tr, t, []), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], [])) t l)
 
 (* ---------- patterns ---------- *)
 
@@ -2475,7 +2493,7 @@ let rec zonk_e (te : texpr) : texpr =
         let cl = match cl with
           | CFn (n, ts) -> CFn (n, List.map zonk ts)
           | CBuiltin (n, ts) -> CBuiltin (n, List.map zonk ts)
-          | CTrait (t, ta, m, s) -> CTrait (t, List.map zonk ta, m, zonk s)
+          | CTrait (t, ta, m, s, o) -> CTrait (t, List.map zonk ta, m, zonk s, List.map zonk o)
           | CClosure f -> CClosure (z f) in
         XCall (cl, List.map (fun a -> { a with a = z a.a }) args,
                List.map (fun cv -> { cv with cfrom = zonk cv.cfrom; cto = zonk cv.cto }) convs)
@@ -2907,7 +2925,7 @@ let finish_ctx c l =
       else if find_impl (rtab_of c.tb) ~bounds:c.tparams tr (List.map zonk ta) t = None then
         err "E0204" l "%s does not implement %s" (show_ty t) tr)
     c.obligations;
-  List.iter (fun (t, l) -> if has_tvar t then err "E0210" l "the element type of this empty literal is never settled; add an annotation") c.unsolved
+  List.iter (fun (t, l, msg) -> if has_tvar t then err "E0210" l "%s" msg) (List.rev c.unsolved)
 
 (* E0322 on the syntax, before types: a lend function's body is a block whose every path
    ends with exactly one lend, with nothing after it and no return *)

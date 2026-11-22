@@ -604,7 +604,7 @@ let unsigned_of = function
 let lend_sig fc (e : texpr) : bool option =
   match e.e with
   | XCall (CFn (u, _), _, _) -> (Hashtbl.find fc.st.prog.fns u).fsig.slend
-  | XCall (CTrait (tr, ta, m, self), _, _) -> (
+  | XCall (CTrait (tr, ta, m, self, _), _, _) -> (
       match Typecheck.impl_method_in (Typecheck.rtab_of_prog fc.st.prog) tr (List.map (ts fc) ta) m (ts fc self) with
       | Some (f, _) -> (Hashtbl.find fc.st.prog.fns f).fsig.slend
       | None -> None)
@@ -948,14 +948,15 @@ and call fc (e : texpr) (cl : callee) (targs : targ list) convs : r =
       let tf = Hashtbl.find st.prog.fns uname in
       call_instance fc e uname tys tf.fsig targs convs
   | CBuiltin (name, tys) -> builtin fc e name (List.map (ts fc) tys) targs convs
-  | CTrait (tr, ta, m, self) when (match repr (ts fc self) with TAny _ -> true | _ -> false) ->
+  | CTrait (tr, ta, m, self, _) when (match repr (ts fc self) with TAny _ -> true | _ -> false) ->
       any_call fc e tr (List.map (ts fc) ta) m (ts fc self) targs convs
-  | CTrait (tr, ta, m, self) -> (
+  | CTrait (tr, ta, m, self, own) -> (
       let self = ts fc self and ta = List.map (ts fc) ta in
       match Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) tr ta m self with
       | Some (f, ftys) ->
           let tf = Hashtbl.find st.prog.fns f in
-          call_instance fc e f ftys tf.fsig targs convs
+          (* the impl's own type arguments, then the method's *)
+          call_instance fc e f (ftys @ List.map (ts fc) own) tf.fsig targs convs
       | None -> prim_trait fc e tr m self targs)
   | CClosure f ->
       let fv = borrow fc (expr fc f) f.ty in
