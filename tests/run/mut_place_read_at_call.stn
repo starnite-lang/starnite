@@ -1,6 +1,7 @@
 # A mut place is read when the call starts, after the other arguments are evaluated. The second
 # argument grows the array that the first one points into, so a place taken any earlier would
-# point at freed memory in C.
+# point at freed memory in C. An array is also made unique at that point, not before an argument
+# shares it: writing through an earlier check would change the copy that argument took.
 fn bump(mut xs: Array[Int]) -> Int:
     xs.push(1)
     len(xs)
@@ -8,7 +9,24 @@ fn bump(mut xs: Array[Int]) -> Int:
 fn put(mut a: Int, n: Int):
     a = n
 
+fn snapshot(mut dst: Array[Int], src: Array[Int]) -> Int:
+    dst = src
+    7
+
+fn share(mut dst: Array[Array[Int]], src: Array[Array[Int]]) -> Int:
+    dst = src
+    8
+
 fn main() ! io:
     var xs = [0]
     put(mut xs[0], bump(mut xs))
     print(f"{xs}")
+    var ys = [0]
+    var saved: Array[Int] = []
+    put(mut ys[0], snapshot(mut saved, ys))
+    print(f"{ys} {saved}")
+    # the same for the receiver of a built-in
+    var grid: Array[Array[Int]] = [[1]]
+    var kept: Array[Array[Int]] = []
+    grid[0].push(share(mut kept, grid))
+    print(f"{grid} {kept}")

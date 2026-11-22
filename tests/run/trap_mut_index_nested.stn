@@ -1,0 +1,13 @@
+# With two levels of indexing, the intermediate and the final index are checked in the same order
+# in both backends: after the other arguments, so the marker is printed before the trap.
+fn mark() -> Int ! io:
+    print("mark")
+    0
+
+fn put(mut a: Int, n: Int):
+    a = n
+
+fn main() ! io:
+    var xs = [[0]]
+    put(mut xs[1][0], mark())
+    print("not reached")
