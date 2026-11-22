@@ -52,3 +52,9 @@ fn main() ! io:
     # the form through the type name takes the instantiation of its first argument into account too
     print(boxes.Box.read(boxes.Box(1)))
     print(boxes.Box.read(boxes.Box("x")))
+    # the impls that apply decide the trait's type argument: Reads[Int] for Box[T: Label] does not
+    # apply to a Box[Str], so the result of extract is a Str, and len takes it with no annotation
+    let value = boxes.Box("x").extract()
+    print(f"{len(value)}")
+    let n = boxes.Box(1).extract()
+    print(f"{n + 1}")

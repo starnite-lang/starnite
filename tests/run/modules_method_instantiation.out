@@ -11,4 +11,6 @@ lib tells an int
 the program tells x
 lib reads an int box 1
 the program reads a string box x
+1
+8
 exit 0

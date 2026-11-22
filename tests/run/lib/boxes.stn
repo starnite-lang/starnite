@@ -35,3 +35,14 @@ trait Tells*:
 impl[T: Label] Tells for Box[T]:
     fn tell(self: Box[T]) -> Str:
         f"lib tells {self.item.label()}"
+
+trait Reads*[A]:
+    fn extract(self: Self) -> A
+
+impl[T: Label] Reads[Int] for Box[T]:
+    fn extract(self: Box[T]) -> Int:
+        7
+
+impl Reads[Str] for Box[Str]:
+    fn extract(self: Box[Str]) -> Str:
+        self.item

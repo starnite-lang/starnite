@@ -1836,7 +1836,8 @@ and trait_call c l tn trargs m (sg : fsig) self (receiver : texpr option) args e
              if im.itrait_ <> tn then None
              else
                let sb = ref [] in
-               if match_ty (List.map fst im.itparams) sb im.ifor_ t then Some (im, !sb) else None)
+               (* the impls that apply to Self: of its shape, and with the bounds that trait dispatch asks for *)
+               if match_ty (List.map fst im.itparams) sb im.ifor_ t && impl_bounds_hold c im !sb then Some (im, !sb) else None)
            c.tb.impls
        in
        match fits with
