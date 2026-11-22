@@ -213,8 +213,7 @@ and lend_target env (cl : callee) : (tfn * (string * ty) list) option =
    the place writes into the callee's copy of its mut parameters, which are then
    copied back to the caller's places, as for any mut argument (section 4.2). *)
 and lend_place env (tf, sub) (targs : targ list) : (unit -> value) * (value -> unit) =
-  let places = List.map (fun ta -> if ta.amode = MMut then (let p = place_of_expr env ta.a in hold_busy env ta.a; Some p) else None) targs in
-  let vals = List.map2 (fun ta p -> match p with Some (get, _) -> get () | None -> eval env ta.a) targs places in
+  let places, vals = eval_args env targs in
   let env' = { env with vars = Hashtbl.create 16; sub } in
   List.iter2 (fun v a -> bind env' v a) tf.fparams vals;
   let get, set =
@@ -227,19 +226,33 @@ and lend_place env (tf, sub) (targs : targ list) : (unit -> value) * (value -> u
   in
   (get, fun x -> set x; write_back ())
 
+(* Arguments are evaluated left to right. A mut argument is read from its place, and the
+   shared cell it lives in is busy from that point to the end of the statement (section
+   13.3), as in the C backend: a later argument that reaches the cell traps, an earlier one
+   does not. *)
+and eval_args env (targs : targ list) : (((unit -> value) * (value -> unit)) option list * value list) =
+  let rec go places vals = function
+    | [] -> (List.rev places, List.rev vals)
+    | ta :: rest ->
+        if ta.amode = MMut then begin
+          let (get, _) as p = place_of_expr env ta.a in
+          hold_busy env ta.a;
+          let v = get () in
+          go (Some p :: places) (v :: vals) rest
+        end else begin
+          let v = eval env ta.a in
+          go (None :: places) (v :: vals) rest
+        end
+  in
+  go [] [] targs
+
 and eval_call env (cl : callee) (targs : targ list) convs loc : value =
   match lend_target env cl with
   | Some target -> fst (lend_place env target targs) ()
   | None ->
   apply_convs env convs (fun () ->
-      let places = List.map (fun ta -> if ta.amode = MMut then (let p = place_of_expr env ta.a in hold_busy env ta.a; Some p) else None) targs in
-      let vals =
-        match cl with
-        | CClosure _ -> []
-        | _ -> List.map2 (fun ta p -> match p with Some (get, _) -> get () | None -> eval env ta.a) targs places
-      in
       let fval = match cl with CClosure f -> Some (eval env f) | _ -> None in
-      let vals = match cl with CClosure _ -> List.map2 (fun ta p -> match p with Some (get, _) -> get () | None -> eval env ta.a) targs places | _ -> vals in
+      let places, vals = eval_args env targs in
       let write_back outs =
         let rec go ps os =
           match (ps, os) with

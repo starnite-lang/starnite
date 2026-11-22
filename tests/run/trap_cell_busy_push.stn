@@ -1,0 +1,9 @@
+# The receiver of a built-in such as push is lent like any mut argument (section 13.3): an
+# argument written after it that reaches its cell traps, in the interpreter and in C alike.
+fn call_it(f: fn() -> Int) -> Int:
+    f()
+
+fn main():
+    var v: Array[Int] = [1, 2]
+    v.push(call_it(fn(): len(v)))
+    print(f"{v}")

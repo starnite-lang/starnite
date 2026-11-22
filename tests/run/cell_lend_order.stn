@@ -1,0 +1,24 @@
+# A shared cell passed as mut is lent from the moment that argument is evaluated, until the
+# end of the statement (section 13.3). An argument written before it can still read the cell;
+# one written after it cannot (see trap_cell_busy_push). The interpreter and the C backend
+# evaluate left to right, so they agree on which is which.
+fn call_it(f: fn() -> Int) -> Int:
+    f()
+
+fn put(n: Int, mut xs: Array[Int]):
+    xs.push(n)
+
+fn main() ! io:
+    var v: Array[Int] = [1, 2]
+    # the closure reads v, which the call changes, so v is a shared cell
+    put(call_it(fn(): len(v)), mut v)
+    print(f"{v}")
+    # the receiver of a built-in is a mut argument too: an argument that does not reach v is fine
+    v.push(call_it(fn(): 5))
+    print(f"{v}")
+    # a different cell is not lent
+    var w: Array[Int] = [0]
+    let size = fn(): len(w)
+    v.push(size())
+    w.push(len(v))
+    print(f"{v} {w}")

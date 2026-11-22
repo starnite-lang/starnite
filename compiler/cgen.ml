@@ -1859,7 +1859,9 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
   let arg i = List.nth targs i in
   let b i = borrow fc (expr fc (arg i).a) (arg i).a.ty in
   let o i = tmp fc (arg i).a.ty (own fc (expr fc (arg i).a) (arg i).a.ty) in
-  let m i = place_lvalue_of_expr fc (arg i).a in
+  (* a mut receiver or argument is a long access: its cell is busy from here on, as for the
+     mut argument of any other call *)
+  let m i = let lv = place_lvalue_of_expr fc (arg i).a in hold_busy fc (arg i).a; lv in
   let unit_ () = { c = "0"; owned = false } in
   let value c = { c; owned = false } in
   let owned c = { c = tmp fc t c; owned = true } in

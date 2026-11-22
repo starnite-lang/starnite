@@ -115,9 +115,10 @@ What closed most of the gap:
 
 ## Reading of the specification
 
-Three choices here are interpretations where the draft is silent or in tension:
+Four choices here are interpretations where the draft is silent or in tension:
 
 - When two impls of one trait both fit a type, the first one written whose bounds hold is used, by the checker and by both backends. The draft does not rank them, so a more specific impl does not win over an earlier generic one.
 
 - Section 2.1 makes a line that starts with `-` continue the previous line, but section 5.5's patterns include negative literals. A line starting with `-` therefore starts a new line when it is a match arm, meaning it contains `->` outside brackets. Every other such line continues, as section 2.1 says.
 - Section 13.3 gives the busy flag of a shared cell only for long accesses. This compiler also counts a `for ... in mut` over a cell as a long access, and clears the flag when the statement ends. A closure that reaches the array during the loop traps instead of reading freed memory. A direct use of the array in the loop body is rejected at compile time with E0323.
+- Section 13.3 does not say when the busy flag of a long access starts, relative to the other arguments of the call. Arguments are evaluated left to right, and a shared cell passed as `mut`, including the receiver of a built-in such as `push`, is busy from the moment that argument is evaluated until the statement ends. An argument written before it can read the cell; one written after it traps, in the interpreter and in the C backend alike.
