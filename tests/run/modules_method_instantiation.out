@@ -16,4 +16,6 @@ the program reads a string box x
 lib reads an int box 1
 the program reads a string box x
 1 2
+5 6
+1 30
 exit 0

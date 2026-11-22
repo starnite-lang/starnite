@@ -1710,14 +1710,19 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
       let by_head = List.filter (fun u ->
           let sg = Hashtbl.find c.tb.fns u in
           sg.smodule <> "" && (match sg.sparams with (_, _, t, _) :: _ -> head t = head self_ty | [] -> true)) cands in
-      (* With several functions for this kind of type, those that take the first argument, as a
-         receiver would be taken (its instantiation of the type, and the bounds it fixes), come
-         first; if there are none, the call is a type error against all of them. *)
+      (* With several functions for this kind of type, the call must first be one they accept: the
+         ordinary matching of its arguments to their parameters, by position and by name, with the
+         parameters that have no default all given and nothing left over. Of those, the ones that take
+         the argument of the first parameter, as a receiver would be taken (its instantiation of the
+         type, and the bounds it fixes), come first. If a step leaves none, the call is a type error
+         against the candidates the step began with. *)
+      let matched u = try Some (match_args c l (Hashtbl.find c.tb.fns u).sparams args) with Syntax.Error _ -> None in
+      let accepting = match by_head with _ :: _ :: _ -> List.filter (fun u -> matched u <> None) by_head | _ -> by_head in
+      let accepting = if accepting = [] then by_head else accepting in
       let fitting =
-        match by_head with
+        match accepting with
         | _ :: _ :: _ ->
-            (* the argument of a function's first parameter is the first written one, or else the one
-               named for it; the type of each is found once *)
+            (* the type of each argument is found once *)
             let probed = ref [] in
             let type_of (a : Syntax.arg) =
               match List.assq_opt a.aexpr !probed with
@@ -1726,21 +1731,13 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
             in
             List.filter
               (fun u ->
-                match (Hashtbl.find c.tb.fns u).sparams with
-                | [] -> true
-                | (_, pname, _, dflt) :: _ -> (
-                    let first =
-                      match List.find_opt (fun (a : Syntax.arg) -> a.aname = None) args with
-                      | Some a -> Some a
-                      | None -> List.find_opt (fun (a : Syntax.arg) -> a.aname = Some pname) args
-                    in
-                    match first with
-                    | None -> dflt <> None     (* left to its default, or not given: such a call needs the default *)
-                    | Some a -> (match type_of a with Some t -> fits_receiver c t u | None -> true)))
-              by_head
-        | _ -> by_head
+                match matched u with
+                | Some ((_, _, _, Some a, _) :: _) -> (match type_of a with Some t -> fits_receiver c t u | None -> true)
+                | _ -> true)
+              accepting
+        | _ -> accepting
       in
-      let ok = prefer_owner c.tb self_ty (if fitting = [] then by_head else fitting) in
+      let ok = prefer_owner c.tb self_ty (if fitting = [] then accepting else fitting) in
       (match ok with
        | [] -> err "E0101" l "no function %s for type %s" m tn
        | u :: _ -> call_sig c l u ~receiver:None args exp)
@@ -1749,6 +1746,10 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
       (* a field holding a function is not a method (section 4.7) *)
       let self = repr tb.ty in
       let h = head self in
+      (* whether the other arguments of the call fit the parameters after the receiver *)
+      let takes_args (sg : fsig) =
+        try ignore (match_args c l (match sg.sparams with _ :: rest -> rest | [] -> []) args); true with Syntax.Error _ -> false
+      in
       let fn_cands =
         let by_head =
           List.filter
@@ -1759,9 +1760,11 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
               | [] -> false)
             (method_fns c.tb self m)
         in
-        (* of the functions for this kind of type, those that take this receiver: a function of
-           Box[Int] is not a method of a Box[Str], nor is one whose bound the receiver breaks *)
-        prefer_owner c.tb self (List.filter (fits_receiver c self) by_head)
+        (* of the functions for this kind of type, those that accept the other arguments of the call, by
+           position and by name, and take this receiver: a function of Box[Int] is not a method of a
+           Box[Str], nor is one whose bound the receiver breaks *)
+        let accepting = List.filter (fun u -> takes_args (Hashtbl.find c.tb.fns u)) by_head in
+        prefer_owner c.tb self (List.filter (fits_receiver c self) (if accepting = [] then by_head else accepting))
       in
       (* what the call is a type error against, if nothing takes the receiver: the functions
          for this kind of type, and only after the traits are looked at *)
@@ -1775,17 +1778,18 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
              (method_fns c.tb self m))
       in
       let generic_cands =
-        prefer_owner c.tb self
-          (List.filter
-             (fun u ->
-               let sg = Hashtbl.find c.tb.fns u in
-               (match sg.sparams with
-                | (_, _, t, _) :: _ -> (match repr t with TParam _ -> true | _ -> false)
-                | [] -> false)
-               && fits_receiver c self u)
-             (method_fns c.tb self m))
+        let all =
+          List.filter
+            (fun u ->
+              match (Hashtbl.find c.tb.fns u).sparams with
+              | (_, _, t, _) :: _ -> (match repr t with TParam _ -> true | _ -> false)
+              | [] -> false)
+            (method_fns c.tb self m)
+        in
+        let accepting = List.filter (fun u -> takes_args (Hashtbl.find c.tb.fns u)) all in
+        prefer_owner c.tb self (List.filter (fits_receiver c self) (if accepting = [] then all else accepting))
       in
-      let trait_cands =
+      let trait_all =
         Hashtbl.fold
           (fun tn tr acc ->
             match List.assoc_opt m tr.trmethods_ with
@@ -1806,6 +1810,10 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
                 if has then (tn, sg) :: acc else acc
             | None -> acc)
           c.tb.traits []
+      in
+      (* the methods that accept the other arguments of the call, if any do *)
+      let trait_cands =
+        match List.filter (fun (_, sg) -> takes_args sg) trait_all with [] -> trait_all | accepting -> accepting
       in
       let recv_mode u = match (Hashtbl.find c.tb.fns u).sparams with (m, _, _, _) :: _ -> m | [] -> MBorrow in
       let check_recv mode =

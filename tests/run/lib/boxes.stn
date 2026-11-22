@@ -49,3 +49,9 @@ impl Reads[Str] for Box[Str]:
 
 fn width*(box: Box[Int]) -> Int:
     1
+
+fn inspect*() -> Int:
+    5
+
+fn mark*(b: Box[Int], times: Int) -> Int:
+    times * 10
