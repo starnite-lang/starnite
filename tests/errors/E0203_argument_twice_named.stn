@@ -1,0 +1,5 @@
+# expect: E0203 5:29
+fn scale(x: Int, by: Int = 1) -> Int:
+    x * by
+fn main():
+    print(f"{scale(2, by=3, by=4)}")

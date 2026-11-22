@@ -538,6 +538,12 @@ let contains s sub =
   let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in
   m = 0 || go 0
 
+(* where the first occurrence of [sub] in [s] begins *)
+let index_of s sub =
+  let n = String.length s and m = String.length sub in
+  let rec go i = if i + m > n then None else if String.sub s i m = sub then Some i else go (i + 1) in
+  go 0
+
 (* the first occurrence of [sub] in [s], replaced *)
 let replace_first s sub by =
   let n = String.length s and m = String.length sub in
@@ -666,13 +672,13 @@ let place rng lines = function
 (* One violation of a rule of the language. [in_context] puts it next to a line or a variable of the
    program, and is [None] when the program has none that fits; with the program it gives the lines it
    needs that were there already, which a reduction of the program has to keep for the violation to
-   stay. [own] writes it with a variable of its own, anywhere, so that every kind is exercised whatever
-   the program has. *)
+   stay. [own] writes it with a variable of its own, anywhere, in one of the ways it has, so that every
+   kind is exercised whatever the program has. *)
 type mutation = {
   kind : string;
   expect : expect;
   in_context : Random.State.t -> string array -> (string array * string list) option;
-  own : placement;
+  own : placement list;
 }
 
 let ok a = Some (a, [])
@@ -691,7 +697,7 @@ let mutations : mutation list =
           | Some (i, ind, _, n, t) ->
               ok (insert_after lines i [ at ind (sprintf "let moved_%s = %s(take %s)" n (taker t) n); at ind (sprintf "print(f\"{len(%s)}\")" n) ])
           | None -> None);
-      own = Statements [ "let neg_s: Str = \"x\""; "let neg_t = eat(take neg_s)"; "print(f\"{len(neg_s)}\")" ] };
+      own = [ Statements [ "let neg_s: Str = \"x\""; "let neg_t = eat(take neg_s)"; "print(f\"{len(neg_s)}\")" ] ] };
     { kind = "take in a loop";
       expect = Code "E0302";
       in_context =
@@ -710,7 +716,7 @@ let mutations : mutation list =
               let take = at (indent_of lines.(j + 1)) "let neg_t = eat(take neg_s)" in
               Some (insert_after (insert_after lines j [ take ]) (j - 1) [ at (indent_of lines.(j)) "let neg_s: Str = \"x\"" ], [ String.trim lines.(j) ])
           | None -> None);
-      own = Statements [ "let neg_s: Str = \"x\""; "for neg_i in [1, 2]:"; "    let neg_t = eat(take neg_s)" ] };
+      own = [ Statements [ "let neg_s: Str = \"x\""; "for neg_i in [1, 2]:"; "    let neg_t = eat(take neg_s)" ] ] };
     { kind = "mut marker left out";
       expect = Code "E0304";
       in_context =
@@ -730,7 +736,7 @@ let mutations : mutation list =
               (List.filter (fun (_, _, v, _, t) -> v && t = "Array[Int]") (decls lines))
           in
           one_of rng (!calls @ vars));
-      own = Statements [ "var neg_xs: Array[Int] = [3, 1, 2]"; "sort(neg_xs)" ] };
+      own = [ Statements [ "var neg_xs: Array[Int] = [3, 1, 2]"; "sort(neg_xs)" ] ] };
     { kind = "mut of an immutable";
       expect = Code "E0303";
       in_context =
@@ -743,7 +749,7 @@ let mutations : mutation list =
               in
               ok (insert_after lines i [ at ind use ])
           | None -> None);
-      own = Statements [ "let neg_xs: Array[Int] = [3, 1, 2]"; "sort(mut neg_xs)" ] };
+      own = [ Statements [ "let neg_xs: Array[Int] = [3, 1, 2]"; "sort(mut neg_xs)" ] ] };
     { kind = "assignment to an immutable";
       expect = Code "E0103";
       in_context =
@@ -751,7 +757,7 @@ let mutations : mutation list =
           match pick_decl rng lines (fun v t -> (not v) && simplest t <> None) with
           | Some (i, ind, _, n, t) -> ok (insert_after lines i [ at ind (sprintf "%s = %s" n (Option.get (simplest t))) ])
           | None -> None);
-      own = Statements [ "let neg_n: Int = 1"; "neg_n = 2" ] };
+      own = [ Statements [ "let neg_n: Int = 1"; "neg_n = 2" ] ] };
     { kind = "overlapping mut arguments";
       expect = Code "E0301";
       in_context =
@@ -759,7 +765,7 @@ let mutations : mutation list =
           match pick_decl rng lines (fun v t -> v && t = "Array[Int]") with
           | Some (i, ind, _, n, _) -> ok (insert_after lines i [ at ind (sprintf "two_mut(mut %s, mut %s)" n n) ])
           | None -> None);
-      own = Statements [ "var neg_xs: Array[Int] = [1]"; "two_mut(mut neg_xs, mut neg_xs)" ] };
+      own = [ Statements [ "var neg_xs: Array[Int] = [1]"; "two_mut(mut neg_xs, mut neg_xs)" ] ] };
     { kind = "closure over a mut argument";
       expect = Code "E0305";
       in_context =
@@ -767,7 +773,7 @@ let mutations : mutation list =
           match pick_decl rng lines (fun v t -> v && t = "Array[Int]") with
           | Some (i, ind, _, n, _) -> ok (insert_after lines i [ at ind (sprintf "with_cb(mut %s, fn(): len(%s))" n n) ])
           | None -> None);
-      own = Statements [ "var neg_xs: Array[Int] = [1]"; "with_cb(mut neg_xs, fn(): len(neg_xs))" ] };
+      own = [ Statements [ "var neg_xs: Array[Int] = [1]"; "with_cb(mut neg_xs, fn(): len(neg_xs))" ] ] };
     { kind = "arm of a match left out";
       expect = Code "E0202";
       in_context =
@@ -785,7 +791,7 @@ let mutations : mutation list =
               while !h > 0 && (blank lines.(!h) || indent_of lines.(!h) >= indent_of lines.(i)) do decr h done;
               Some (delete_lines lines i (group_at lines i), [ String.trim lines.(!h) ])
           | None -> None);
-      own = Statements [ "match Some(1):"; "    Some(neg_n) ->"; "        print(\"a\")" ] };
+      own = [ Statements [ "match Some(1):"; "    Some(neg_n) ->"; "        print(\"a\")" ] ] };
     { kind = "unknown name";
       expect = Code "E0101";
       in_context =
@@ -794,15 +800,15 @@ let mutations : mutation list =
           match pick_decl rng lines (fun _ _ -> true) with
           | Some (i, ind, _, n, _) -> ok (insert_after lines i [ at ind (sprintf "print(f\"{%sx}\")" n) ])
           | None -> None);
-      own = Statements [ "print(neg_unknown)" ] };
+      own = [ Statements [ "print(neg_unknown)" ] ] };
     { kind = "too few arguments";
       expect = Code "E0203";
       in_context = (fun _ _ -> None);
-      own = Statements [ "print(f\"{via_any(Sq(1))}\")" ] };
+      own = [ Statements [ "print(f\"{via_any(Sq(1))}\")" ] ] };
     { kind = "argument of another type";
       expect = Code "E0201";
       in_context = (fun _ _ -> None);
-      own = Statements [ "print(f\"{via_any(Sq(1), true)}\")" ] };
+      own = [ Statements [ "print(f\"{via_any(Sq(1), true)}\")" ] ] };
     { kind = "annotation of another type";
       expect = Family "E02";
       in_context =
@@ -815,7 +821,7 @@ let mutations : mutation list =
               | Some l -> ok (with_line lines i l)
               | None -> None)
           | None -> None);
-      own = Statements [ "let neg_n: Str = 1" ] };
+      own = [ Statements [ "let neg_n: Str = 1" ] ] };
     { kind = "result of another type";
       expect = Family "E02";
       in_context =
@@ -825,11 +831,44 @@ let mutations : mutation list =
           match pick rng !found with
           | Some i -> (match replace_first lines.(i) ") -> Int:" ") -> Str:" with Some l -> ok (with_line lines i l) | None -> None)
           | None -> None);
-      own = Items [ "fn neg_f() -> Str:"; "    1"; "" ] };
+      own = [ Items [ "fn neg_f() -> Str:"; "    1"; "" ] ] };
     { kind = "error not listed by an exported function";
       expect = Code "E0501";
       in_context = (fun _ _ -> None);
-      own = Items [ "fn neg_g*(n: Int) -> Int:"; "    must_check(Lim(3), n)"; "" ] } ]
+      own = [ Items [ "fn neg_g*(n: Int) -> Int:"; "    must_check(Lim(3), n)"; "" ] ] };
+    { kind = "field named twice";
+      expect = Code "E0101";
+      in_context =
+        (fun rng lines ->
+          (* a struct of the program, with its first field once more *)
+          let found = ref [] in
+          Array.iteri (fun i l -> if is_prefix "type " l && contains l " = struct(" && ends_with ")" l then found := i :: !found) lines;
+          match pick rng !found with
+          | Some i -> (
+              let l = lines.(i) in
+              match index_of l "struct(" with
+              | Some p -> (
+                  match String.index_from_opt l (p + 7) ':' with
+                  | Some q -> ok (with_line lines i (String.sub l 0 (String.length l - 1) ^ ", " ^ String.sub l (p + 7) (q - p - 7) ^ ": Int)"))
+                  | None -> None)
+              | None -> None)
+          | None -> None);
+      own = [ Items [ "type NegDup = struct(a: Int, b: Int, a: Str)"; "" ]; Items [ "type NegDup = A | B(a: Int, a: Int)"; "" ] ] };
+    { kind = "type parameter named twice";
+      expect = Code "E0101";
+      in_context = (fun _ _ -> None);
+      own =
+        [ Items [ "fn neg_pick[T, T](a: T, b: T) -> T:"; "    a"; "" ];
+          Items [ "type NegPair[A, A] = struct(first: A, second: A)"; "" ];
+          Items [ "trait NegConvert[A, A]:"; "    fn convert(x: Self) -> Int"; "" ];
+          Items [ "type NegBox[T] = struct(item: T)"; "impl[T, T] Show for NegBox[T]:"; "    fn show(b: NegBox[T]) -> Str:"; "        \"box\""; "" ] ] };
+    { kind = "argument given twice";
+      expect = Code "E0203";
+      in_context = (fun _ _ -> None);
+      own =
+        [ Statements [ "print(f\"{via_any(Sq(1), k=1, k=2)}\")" ];
+          Statements [ "print(f\"{via_any(Sq(1), 1, k=2)}\")" ];
+          Statements [ "print(f\"{Sq(side=1, side=2).side}\")" ] ] } ]
 
 (* the code of the first diagnostic that `check --json` wrote *)
 let json_code out =
@@ -1091,7 +1130,7 @@ let mutate case prog =
   let m = List.nth mutations (Random.State.int rng (List.length mutations)) in
   match m.in_context rng lines with
   | Some (a, essential) when Random.State.bool rng -> (m, text_of a, true, essential)
-  | _ -> (m, text_of (place rng lines m.own), false, [])
+  | _ -> (m, text_of (place rng lines (List.nth m.own (Random.State.int rng (List.length m.own)))), false, [])
 
 (* the lines of [b] that [a] does not have *)
 let added_lines a b =

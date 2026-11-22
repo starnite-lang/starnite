@@ -1,0 +1,4 @@
+# expect: E0101 2:40
+type Shape = Dot | Box(w: Int, h: Int, w: Int)
+fn main():
+    print("x")

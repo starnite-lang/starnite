@@ -1272,12 +1272,17 @@ and match_args c l (params : (mode * string * ty * Syntax.expr option) list) (ar
         (m, n, t, a, d))
       params
   in
+  (* a parameter is given once: by position, or by name, and not by two names *)
+  let given = Hashtbl.create 8 in
+  List.iteri (fun i (_, n, _, _) -> if i < List.length positional then Hashtbl.replace given n ()) params;
   List.iter
     (fun a ->
       match a.aname with
-      | Some n when not (List.exists (fun (_, pn, _, _) -> pn = n) params) ->
-          err "E0203" a.aloc "no parameter named '%s'" n
-      | _ -> ())
+      | Some n ->
+          if not (List.exists (fun (_, pn, _, _) -> pn = n) params) then err "E0203" a.aloc "no parameter named '%s'" n;
+          if Hashtbl.mem given n then err "E0203" a.aloc "argument '%s' is given twice" n;
+          Hashtbl.replace given n ()
+      | None -> ())
     named;
   res
 
@@ -2542,7 +2547,29 @@ let module_name path =
   let b = Filename.remove_extension (Filename.basename path) in
   String.map (fun ch -> if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') then ch else '_') b
 
+(* the generic parameters of an item have names of their own *)
+let check_distinct_generics (gs : gparam list) =
+  let seen = Hashtbl.create 4 in
+  List.iter
+    (fun (g : gparam) ->
+      if Hashtbl.mem seen g.gname then err "E0101" g.gloc "type parameter '%s' is already defined" g.gname;
+      Hashtbl.replace seen g.gname ())
+    gs
+
+(* so do the named fields of a struct, and of a variant *)
+let check_distinct_fields what (fs : Syntax.field list) =
+  let seen = Hashtbl.create 4 in
+  List.iter
+    (fun (f : Syntax.field) ->
+      match f.fdname with
+      | Some n ->
+          if Hashtbl.mem seen n then err "E0101" f.fdloc "field '%s' is already defined in %s" n what;
+          Hashtbl.replace seen n ()
+      | None -> ())
+    fs
+
 let tparams_of tb (gs : gparam list) self =
+  check_distinct_generics gs;
   let names = List.map (fun g -> g.gname) gs in
   List.map
     (fun g ->
@@ -2616,6 +2643,7 @@ let declare_trait_names tb modname (items : item list) =
           (* a trait is named by its name alone in the prelude and in the entry module, so
              two with one name would silently replace each other *)
           if Hashtbl.mem tb.traits k then err "E0101" tr.trloc "trait '%s' is already defined" tr.trname;
+          check_distinct_generics tr.trgenerics;
           let ps = List.map (fun g -> g.gname) tr.trgenerics in
           Hashtbl.replace tb.traits k
             { trname_ = k; trparams = ps; trmethods_ = []; trmodule = modname; trexport = tr.trexport }
@@ -2631,6 +2659,7 @@ let declare_type_names tb modname (items : item list) =
           if Hashtbl.mem tb.decls k || List.mem_assoc td.tname prim_names then
             err "E0101" td.tloc "type '%s' is already defined" td.tname;
           if td.tresource then err "E0400" td.tloc "resource types arrive in milestone 4";
+          check_distinct_generics td.tgenerics;
           Hashtbl.replace tb.decls k
             { dname = k; dparams = List.map (fun g -> g.gname) td.tgenerics; dbody = DStruct [];
               dexport = td.texport; dopen = td.topen; dloc = td.tloc; dmodule = modname }
@@ -2652,6 +2681,7 @@ let declare_type_bodies tb modname (items : item list) =
           let body =
             match td.tbody with
             | BStruct fs ->
+                check_distinct_fields ("type " ^ td.tname) fs;
                 note_defaults fs;
                 Hashtbl.replace defaults_table k (List.map (fun f -> f.fddefault) fs);
                 DStruct (conv_fields fs)
@@ -2666,6 +2696,7 @@ let declare_type_bodies tb modname (items : item list) =
                        if Hashtbl.mem tb.variants vk then err "E0101" v.vloc "variant '%s' is already defined" v.vname;
                        Hashtbl.replace tb.variants vk (k, i);
                        let fs = match v.vfields with Some fs -> fs | None -> [] in
+                       check_distinct_fields ("variant " ^ v.vname) fs;
                        note_defaults fs;
                        Hashtbl.replace defaults_table (k ^ "." ^ v.vname) (List.map (fun f -> f.fddefault) fs);
                        { vname_ = v.vname; vfields = conv_fields fs; vnamed = List.for_all (fun f -> f.fdname <> None) fs; vindex = i })

@@ -1,0 +1,4 @@
+# expect: E0101 2:37
+type Point = struct(x: Int, y: Int, x: Int)
+fn main():
+    print("x")

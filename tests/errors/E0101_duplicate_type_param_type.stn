@@ -1,0 +1,4 @@
+# expect: E0101 2:14
+type Pair[A, A] = struct(first: A, second: A)
+fn main():
+    print("x")

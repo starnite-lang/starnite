@@ -1,0 +1,5 @@
+# expect: E0101 2:18
+trait Convert[A, A]:
+    fn convert(x: Self) -> Int
+fn main():
+    print("x")

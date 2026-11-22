@@ -1,0 +1,7 @@
+# expect: E0101 3:9
+type Box[T] = struct(item: T)
+impl[T, T] Show for Box[T]:
+    fn show(b: Box[T]) -> Str:
+        "box"
+fn main():
+    print("x")

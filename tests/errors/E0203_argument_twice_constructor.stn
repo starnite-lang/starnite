@@ -1,0 +1,5 @@
+# expect: E0203 4:29
+type Point = struct(x: Int, y: Int)
+fn main():
+    let p = Point(x=1, y=2, x=3)
+    print(f"{p.x}")
