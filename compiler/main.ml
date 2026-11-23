@@ -206,5 +206,5 @@ let () =
   | Sys_error m -> Printf.eprintf "error: %s\n" m; exit 1
   | Stack_overflow ->
       (* a program nested deeper than the compiler's own recursion can follow *)
-      prerr_endline "error[E0100]: the program is nested too deeply to be compiled";
+      report "E0100" { file; line = 0; col = 0 } "the program is nested too deeply to be compiled";
       exit 1

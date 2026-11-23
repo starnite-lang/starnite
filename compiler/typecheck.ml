@@ -1672,7 +1672,7 @@ and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
       if List.length tys > List.length d.dparams then
         err "E0203" l "%s takes %d type argument(s), found %d" n (List.length d.dparams) (List.length tys);
       (* the type the value will have, as the expected type that the construction starts from *)
-      let padded = tys @ List.init (List.length d.dparams - List.length tys) (fun _ -> fresh ()) in
+      let padded = padded_type_args c exp k tys (List.length d.dparams) in
       construct_struct c l k args (Some (TNamed (k, padded)))
   | Bracket (b, bargs)
     when (match (norm_qual c b).d with
@@ -1684,7 +1684,7 @@ and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
       let d = Hashtbl.find c.tb.decls tn in
       if List.length tys > List.length d.dparams then
         err "E0203" l "%s takes %d type argument(s), found %d" n (List.length d.dparams) (List.length tys);
-      let padded = tys @ List.init (List.length d.dparams - List.length tys) (fun _ -> fresh ()) in
+      let padded = padded_type_args c exp tn tys (List.length d.dparams) in
       construct_variant c l tn idx n args (Some (TNamed (tn, padded)))
   | Field (b, m) -> infer_method c l b m args exp
   | _ ->
@@ -1708,6 +1708,17 @@ and settle_by_the_end c l (what : string) (s : (string * ty) list) =
       c.unsolved <-
         (v, l, Printf.sprintf "the type parameter %s of %s is never settled by this value; give it a type with an annotation" p what) :: c.unsolved)
     s
+
+(* The type arguments a construction starts from when only the first few are written, Pair[Int](1, 2.5):
+   the written ones, then what the expected type says of the rest (an annotation of Pair[Int, F32] settles
+   the second as F32, so the 2.5 is an F32), then fresh variables. *)
+and padded_type_args _c (exp : ty option) key tys n =
+  let from_exp =
+    match Option.map repr exp with
+    | Some (TNamed (k, eargs)) when k = key && List.length eargs = n -> Some eargs
+    | _ -> None
+  in
+  tys @ List.init (n - List.length tys) (fun i -> match from_exp with Some eargs -> List.nth eargs (List.length tys + i) | None -> fresh ())
 
 (* a type argument written in brackets: a type, or a name that the parser could not tell from an expression *)
 and explicit_type_arg c (a : Syntax.barg) : ty =
@@ -2909,6 +2920,23 @@ let declare_items tb modname (items : item list) =
                 let canon names = List.mapi (fun k n -> (n, TParam (Printf.sprintf "#m%d" k))) names in
                 let ts = ("Self", fty) :: List.combine info.trparams targs @ canon own_t in
                 let impl_t t = subst (canon own_i) t in
+                (* a caller checks the bounds the trait states, so the impl may not ask for more of a
+                   type parameter of its method: each bound of the impl's must be one of the trait's *)
+                let own_b (s : fsig) outer = List.filteri (fun i _ -> i >= outer) s.stparams in
+                List.iter2
+                  (fun (pn, ibs) (_, tbs) ->
+                    List.iter
+                      (fun (btr, bargs) ->
+                        let want = List.map impl_t bargs in
+                        let stated (ttr, targs_) =
+                          ttr = btr && List.length targs_ = List.length want
+                          && List.for_all2 ty_equal want (List.map (subst ts) targs_)
+                        in
+                        if not (List.exists stated tbs) then
+                          err "E0204" fd.floc "type parameter '%s' of '%s' has the bound %s in the impl, which trait %s does not state for it"
+                            pn fd.fname btr trn)
+                      ibs)
+                  (own_b sg (List.length tps)) (own_b tsig (List.length info.trparams));
                 (* for messages: the trait's own names for its method's type parameters *)
                 let shown t = show_ty (subst (List.mapi (fun k n -> (Printf.sprintf "#m%d" k, TParam n)) own_t) t) in
                 if List.length sg.sparams <> List.length tsig.sparams then

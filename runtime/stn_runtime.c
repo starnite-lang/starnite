@@ -592,12 +592,15 @@ void stn_runtime_flush_for_error(void) { stn_flush(); }
    ways a program can be wrong, with the status of one, instead of ending in a signal. The handler runs on a
    stack of its own, and only code that is safe in a handler runs in it. A fault anywhere else is a bug, and
    ends the process as it would have. */
-static char* stn_stack_high;
+static uintptr_t stn_stack_high; /* an integer: the address of a local of start-up, taken while it lived */
 static size_t stn_stack_size;
 static void stn_on_fault(int sig, siginfo_t* si, void* ctx) {
     (void)ctx;
-    char* a = (char*)si->si_addr;
-    if (a < stn_stack_high && a + stn_stack_size + 65536 >= stn_stack_high) {
+    /* The addresses are compared as integers, which is defined for any value of si_addr, and the range is
+       written as a difference that cannot wrap: the fault is below the top of the stack, by no more than
+       the stack's size and a page of slack for the frame that faulted. */
+    uintptr_t a = (uintptr_t)si->si_addr;
+    if (a < stn_stack_high && stn_stack_high - a <= (uintptr_t)stn_stack_size + 65536) {
         static const char msg[] = "trap: stack overflow\nthe program recursed deeper than its stack allows\n";
         ssize_t r = write(1, stn_outbuf, stn_outlen);
         r = write(2, msg, sizeof msg - 1);
@@ -610,7 +613,7 @@ static void stn_on_fault(int sig, siginfo_t* si, void* ctx) {
 void stn_runtime_init(void) {
     struct rlimit rl;
     char here;
-    stn_stack_high = &here;
+    stn_stack_high = (uintptr_t)&here;
     stn_stack_size = (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY) ? (size_t)rl.rlim_cur : (size_t)8 << 20;
     size_t alt_size = 64 * 1024;
     void* alt = malloc(alt_size);

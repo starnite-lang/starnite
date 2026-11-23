@@ -44,6 +44,15 @@ for f in "$here"/errors/*.stn; do
     if [ "$want" = "$got" ]; then pass=$((pass + 1)); else note "FAIL errors/$name: expected '$want', got '$got'"; fail=$((fail + 1)); fi
 done
 
+# a program nested deeper than the compiler's own recursion is E0100, with the code in the JSON of --json
+# as well as in the text (the fuzzer reads the code from the JSON)
+deep="$tmp/deep.stn"
+{ printf 'fn main():\n    let x = '; head -c 200000 /dev/zero | tr '\0' '('; printf '1'; head -c 200000 /dev/zero | tr '\0' ')'; printf '\n'; } > "$deep"
+got=$("$starnite" check --json "$deep" 2>&1 | head -1 | sed -n 's/.*"code":"\([^"]*\)".*/\1/p')
+text=$("$starnite" check "$deep" 2>&1 | head -1)
+if [ "$got" = E0100 ] && [ "$text" = 'error[E0100]: the program is nested too deeply to be compiled' ]; then pass=$((pass + 1))
+else note "FAIL a program nested too deeply: json code '$got', text '$text'"; fail=$((fail + 1)); fi
+
 # test blocks, including rejection tests (section 20.2)
 for f in "$here"/unit/*.stn; do
     if (cd "$root" && "$starnite" test "${f#"$root/"}") > "$tmp/unit" 2>&1; then pass=$((pass + 1))
