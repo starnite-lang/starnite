@@ -268,6 +268,18 @@ fault_killed() { crashes killed "in exe"; }
 # a C compiler that fails and says nothing: the build of a program that checked fails, and it is a crash
 fault_cc_fails() { crashes cc-fails "in build"; }
 
+# The compiler may say that a program uses what it does not support yet (the build of valid code, exit 1, in
+# its own words), and that is not a crash. The same words in a C compiler that failed, or in an exception
+# that nothing caught, are not that, and are one.
+unsupported_is_not_a_crash() {
+    out=$(with_fault unsupported --crash --count 40 --seed 1 2>&1); status=$?
+    if [ $status != 0 ] || printf '%s\n' "$out" | grep -q 'the compiler crashed'; then
+        bad "the compiler's own report of what it does not support yet was taken for a crash (exit $status)"; printf '%s\n' "$out" | tail -10
+    else ok "a program that uses what is not supported yet is rejected by the build in the compiler's words, and that is not a crash"; fi
+}
+fault_cc_says_unsupported() { crashes cc-says-unsupported "in build"; }
+fault_exception_unsupported() { crashes exception-unsupported "in build"; }
+
 # not a crash: programs that print what a crash looks like, from the interpreter and from the C build.
 # The words are the program's output, and the compiler did nothing wrong.
 crash_phrase_is_output() {
@@ -330,7 +342,7 @@ STN
 n=0
 pids=""
 names=""
-for check in negative_fuzzing fault_accept_take fault_accept_match fault_wrong_code fault_c_output fault_split reduce_keeping reduce_next_to_a_module reduce_ordinary_module_comment reduce_keeps_a_sibling_module reduce_rejected_next_to_a_module reduce_keeping_a_match reduce_name_taken reduce_without_compiler fault_crash fault_crash_run fault_silent_crash fault_killed fault_cc_fails crash_phrase_is_output; do
+for check in negative_fuzzing fault_accept_take fault_accept_match fault_wrong_code fault_c_output fault_split reduce_keeping reduce_next_to_a_module reduce_ordinary_module_comment reduce_keeps_a_sibling_module reduce_rejected_next_to_a_module reduce_keeping_a_match reduce_name_taken reduce_without_compiler fault_crash fault_crash_run fault_silent_crash fault_killed fault_cc_fails unsupported_is_not_a_crash fault_cc_says_unsupported fault_exception_unsupported crash_phrase_is_output; do
     n=$((n + 1))
     "$check" > "$tmp/result.$n" 2>&1 &
     pids="$pids $!"

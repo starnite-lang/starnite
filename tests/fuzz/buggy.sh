@@ -15,6 +15,9 @@
 #                with nothing printed
 #   killed       the program that the C build makes is killed by SIGKILL, with nothing printed
 #   cc-fails     the C compiler exits 1 and says nothing
+#   unsupported  not a fault: the build says `error: not supported yet: ...` and exits 1, which is not a crash
+#   cc-says-unsupported, exception-unsupported
+#                the same words in a C compiler that failed, and in an uncaught exception: both are crashes
 #   phrase       not a fault: the programs print `Fatal error: exception Not_found` as their output, which is
 #                not a crash of the compiler (the crashes above are written on the standard error, as OCaml does)
 real=${REAL_STARNITE:?REAL_STARNITE names the compiler to run}
@@ -93,5 +96,26 @@ killed)
 cc-fails)
     # the C compiler exits 1 and says nothing
     if [ "$1" = build ]; then exec "$real" --cc "$(command -v false)" "$@"; fi ;;
+unsupported)
+    # not a fault: the compiler says that a program uses what it does not support yet, as it does, and exits 1
+    if [ "$1" = build ]; then
+        for last; do :; done
+        if grep -q '^fn main' "$last"; then echo 'error: not supported yet: a feature of a later milestone' >&2; exit 1; fi
+    fi ;;
+cc-says-unsupported)
+    # the C compiler fails, and the words are in what it says
+    if [ "$1" = build ]; then
+        for last; do :; done
+        if grep -q '^fn main' "$last"; then
+            echo 'cc: error: not supported yet: -fsomething' >&2
+            echo 'error: the C compiler failed (cc -fsomething)' >&2; exit 1
+        fi
+    fi ;;
+exception-unsupported)
+    # an exception that nothing caught, whose message has the words: exit 2, and a fatal error
+    if [ "$1" = build ]; then
+        for last; do :; done
+        if grep -q '^fn main' "$last"; then echo 'Fatal error: exception Failure("not supported yet")' >&2; exit 2; fi
+    fi ;;
 esac
 exec "$real" "$@"

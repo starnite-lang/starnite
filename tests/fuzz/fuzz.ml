@@ -1494,6 +1494,15 @@ type crash = At_check | At_run of string list
    of a few forms that do not begin like this. *)
 let uncaught err = List.exists (is_prefix "Fatal error: exception") (String.split_on_char '\n' err)
 
+(* The compiler's own report that a program uses what a backend does not support yet (`Unsupported`, which exits
+   1 before the C compiler runs): a line that is that report, and nothing of a fatal exception or of a C compiler
+   that failed. The words anywhere else in the output are not it. *)
+let unsupported err =
+  let ls = String.split_on_char '\n' err in
+  List.exists (is_prefix "error: not supported yet: ") ls
+  && (not (uncaught err))
+  && not (List.exists (is_prefix "error: the C compiler failed") ls)
+
 (* A process killed by a signal. A trap is an exit with a status, and so is the C build's stack overflow, so a
    signal is a fault of the compiler or of the runtime, or of the machine (a kill for want of memory); a run
    that the fuzzer ended for taking too long is not here, it is the exception Hang. *)
@@ -1526,7 +1535,7 @@ let crash_of starnite tmp path text =
           match step [ "build"; "-o"; exe ] with
           | exception Hang _ -> Some (At_run [ "build" ], "the build did not end")
           | Signaled s, _, err -> Some (At_run [ "build" ], sprintf "killed by signal %d\n%s" (abs s) err)
-          | Exited c, out, err when c <> 0 && not (contains err "not supported yet") ->
+          | Exited c, out, err when c <> 0 && not (c = 1 && unsupported err) ->
               (* a program that checked is built, or the compiler says it cannot yet (valid code that a backend
                  does not support, which is not a crash); the C compiler failing, with or without a word, is *)
               Some (At_run [ "build" ], err ^ out)
