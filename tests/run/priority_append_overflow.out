@@ -1,0 +1,3 @@
+trap: integer overflow at tests/run/priority_append_overflow.stn:6:27
+the result does not fit its type
+exit 2

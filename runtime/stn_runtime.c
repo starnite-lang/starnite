@@ -12,6 +12,13 @@
 #include <sys/resource.h>
 #define STN_STACK_TRAP 1
 #endif
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <errno.h>
+
+#if defined(__x86_64__) && defined(__SSE2__)
+#include <immintrin.h>
+#endif
 
 int64_t stn_live_objects = 0;
 
@@ -135,10 +142,6 @@ StnStr stn_str_concat_n(int n, StnStr* parts) {
     for (int i = 0; i < n; i++) { memcpy(s->data + at, parts[i]->data, (size_t)parts[i]->len); at += parts[i]->len; }
     s->data[total] = 0;
     return s;
-}
-
-int stn_str_eq(StnStr a, StnStr b) {
-    return a == b || (a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0);
 }
 
 int stn_str_cmp(StnStr a, StnStr b) {
@@ -375,20 +378,198 @@ void stn_array_remove(StnArray** pa, int64_t i, void* out, const char* file, int
     a->len--;
 }
 
-int stn_array_pop(StnArray** pa, void* out) {
-    if ((*pa)->len == 0) return 0;
-    stn_array_make_unique(pa);
-    StnArray* a = *pa;
-    a->len--;
-    memcpy(out, a->data + (size_t)a->len * a->ops->size, a->ops->size);
-    return 1;
-}
-
 void stn_array_clear(StnArray** pa) {
     StnArray* a = *pa;
-    StnArray* b = stn_array_new(a->ops, 4);
-    stn_drop(a, stn_array_release);
-    *pa = b;
+    if (stn_unique(a)) {
+        if (a->ops->drop) {
+            for (int64_t i = 0; i < a->len; i++)
+                a->ops->drop(a->data + (size_t)i * a->ops->size);
+        }
+        a->len = 0;
+    } else {
+        *pa = stn_array_new(a->ops, 4);
+        stn_drop(a, stn_array_release);
+    }
+}
+
+StnArray* stn_array_filled_i64(const StnElemOps* ops, int64_t n, int64_t value,
+                              const char* file, int line, int col) {
+    if (n < 0) stn_trap("index out of range", file, line, col, "negative length");
+    if (n > STN_MAX_ALLOC / (int64_t)sizeof(int64_t)) stn_too_large(file, line, col);
+    StnArray* a = stn_array_new(ops, n > 0 ? n : 1);
+    int64_t* elements = (int64_t*)a->data;
+    for (int64_t i = 0; i < n; i++) elements[i] = value;
+    a->len = n;
+    return a;
+}
+
+void stn_array_reverse_i64(StnArray** pa) {
+    if ((*pa)->len < 2) return;
+    stn_array_make_unique(pa);
+    int64_t* elements = (int64_t*)(*pa)->data;
+    int64_t i = 0, end = (*pa)->len;
+#if defined(__SSE2__)
+    for (; end - i >= 4; i += 2, end -= 2) {
+        __m128i lo = _mm_loadu_si128((const __m128i_u*)(elements + i));
+        __m128i hi = _mm_loadu_si128((const __m128i_u*)(elements + end - 2));
+        _mm_storeu_si128((__m128i_u*)(elements + i), _mm_shuffle_epi32(hi, _MM_SHUFFLE(1, 0, 3, 2)));
+        _mm_storeu_si128((__m128i_u*)(elements + end - 2), _mm_shuffle_epi32(lo, _MM_SHUFFLE(1, 0, 3, 2)));
+    }
+#endif
+    for (; i < --end; i++) {
+        int64_t tmp = elements[i];
+        elements[i] = elements[end];
+        elements[end] = tmp;
+    }
+}
+
+#if defined(__x86_64__) && defined(__SSE2__)
+__attribute__((target("avx512f")))
+static int stn_contains_i64_avx512(const int64_t* elements, int64_t length, int64_t value) {
+    const __m512i needle = _mm512_set1_epi64(value);
+    int64_t i = 0;
+    /* Align the full-width loads so none straddles a cache line. */
+    for (; i < length && ((uintptr_t)(elements + i) & 63u) != 0; i++)
+        if (elements[i] == value) return 1;
+    for (; length - i >= 32; i += 32) {
+        const __mmask8 a = _mm512_cmpeq_epi64_mask(_mm512_load_si512(elements + i), needle);
+        const __mmask8 b = _mm512_cmpeq_epi64_mask(_mm512_load_si512(elements + i + 8), needle);
+        const __mmask8 c = _mm512_cmpeq_epi64_mask(_mm512_load_si512(elements + i + 16), needle);
+        const __mmask8 d = _mm512_cmpeq_epi64_mask(_mm512_load_si512(elements + i + 24), needle);
+        if (a | b | c | d) return 1;
+    }
+    for (; i < length; i++)
+        if (elements[i] == value) return 1;
+    return 0;
+}
+
+__attribute__((target("avx2")))
+static int stn_contains_i64_avx2(const int64_t* elements, int64_t length, int64_t value) {
+    const __m256i needle = _mm256_set1_epi64x(value);
+    int64_t i = 0;
+    for (; length - i >= 16; i += 16) {
+        const __m256i a = _mm256_cmpeq_epi64(_mm256_loadu_si256((const __m256i_u*)(elements + i)), needle);
+        const __m256i b = _mm256_cmpeq_epi64(_mm256_loadu_si256((const __m256i_u*)(elements + i + 4)), needle);
+        const __m256i c = _mm256_cmpeq_epi64(_mm256_loadu_si256((const __m256i_u*)(elements + i + 8)), needle);
+        const __m256i d = _mm256_cmpeq_epi64(_mm256_loadu_si256((const __m256i_u*)(elements + i + 12)), needle);
+        __m256i any = _mm256_or_si256(_mm256_or_si256(a, b), _mm256_or_si256(c, d));
+        if (_mm256_movemask_epi8(any)) return 1;
+    }
+    for (; i < length; i++)
+        if (elements[i] == value) return 1;
+    return 0;
+}
+#endif
+
+int stn_array_contains_i64(const StnArray* a, int64_t value) {
+    const int64_t* elements = (const int64_t*)a->data;
+#if defined(__x86_64__) && defined(__SSE2__)
+    if (a->len >= 64 && __builtin_cpu_supports("avx512f"))
+        return stn_contains_i64_avx512(elements, a->len, value);
+    if (a->len >= 32 && __builtin_cpu_supports("avx2"))
+        return stn_contains_i64_avx2(elements, a->len, value);
+#endif
+    int64_t i = 0;
+    for (; a->len - i >= 32; i += 32) {
+        unsigned found = 0;
+        for (int64_t j = 0; j < 32; j++)
+            found |= (unsigned)(elements[i + j] == value);
+        if (found) return 1;
+    }
+    for (; i < a->len; i++)
+        if (elements[i] == value) return 1;
+    return 0;
+    return 0;
+}
+
+int64_t stn_array_count_true(const StnArray* a) {
+    const uint8_t* values = (const uint8_t*)a->data;
+    int64_t i = 0, count = 0;
+#if defined(__SSE2__)
+    __m128i zero = _mm_setzero_si128();
+    __m128i one = _mm_set1_epi8(1);
+    __m128i total = zero;
+    for (; a->len - i >= 16; i += 16) {
+        __m128i bytes = _mm_loadu_si128((const __m128i_u*)(values + i));
+        __m128i truth = _mm_andnot_si128(_mm_cmpeq_epi8(bytes, zero), one);
+        total = _mm_add_epi64(total, _mm_sad_epu8(truth, zero));
+    }
+    uint64_t halves[2];
+    memcpy(halves, &total, sizeof halves);
+    count = (int64_t)(halves[0] + halves[1]);
+#endif
+    for (; i < a->len; i++) count += values[i] != 0;
+    return count;
+}
+
+int64_t stn_array_sum_i64(const StnArray* a, int64_t sum, const char* file, int line, int col) {
+    const int64_t* values = (const int64_t*)a->data;
+    int64_t n = stn_len(a);
+    #pragma GCC unroll 4
+    for (int64_t i = 0; i < n; i++)
+        sum = stn_add_i64(sum, values[i], file, line, col);
+    return sum;
+}
+
+/* Entry guards prove unique ownership and 0 <= count <= len. */
+int64_t stn_array_sum_popped_i64(StnArray* a, int64_t count, int64_t sum,
+                                const char* file, int line, int col) {
+    const int64_t* values = (const int64_t*)a->data;
+    int64_t n = stn_len(a);
+    int64_t end = n - count;
+    #pragma GCC unroll 4
+    for (int64_t i = n; i > end; i--)
+        sum = stn_add_i64(sum, values[i - 1], file, line, col);
+    a->len = end;
+    return sum;
+}
+
+void stn_array_sort_i64(StnArray** pa) {
+    size_t n = (size_t)(*pa)->len;
+    if (n < 2) return;
+    stn_array_make_unique(pa);
+    int64_t* elements = (int64_t*)(*pa)->data;
+    if (n <= 32) {
+        for (size_t i = 1; i < n; i++) {
+            int64_t value = elements[i];
+            size_t j = i;
+            while (j > 0 && elements[j - 1] > value) {
+                elements[j] = elements[j - 1];
+                j--;
+            }
+            elements[j] = value;
+        }
+        return;
+    }
+
+    /* Skip passes for bytes that are constant across the input. Stable digit
+       passes order negative keys first by flipping the sign bit on the last pass. */
+    uint64_t differing = 0, first = (uint64_t)elements[0];
+    for (size_t i = 1; i < n; i++) differing |= first ^ (uint64_t)elements[i];
+    if (differing == 0) return;
+    int64_t* scratch = malloc(n * sizeof *scratch);
+    if (!scratch) stn_trap("out of memory", "<runtime>", 0, 0, "could not allocate sort buffer");
+    int64_t* src = elements;
+    int64_t* dst = scratch;
+    for (unsigned shift = 0; differing; shift += 8, differing >>= 8) {
+        if ((differing & 255) == 0) continue;
+        size_t offsets[256] = {0};
+        unsigned sign = shift == 56 ? 128 : 0;
+        for (size_t i = 0; i < n; i++) offsets[(((uint64_t)src[i] >> shift) & 255) ^ sign]++;
+        size_t total = 0;
+        for (unsigned bucket = 0; bucket < 256; bucket++) {
+            size_t count = offsets[bucket];
+            offsets[bucket] = total;
+            total += count;
+        }
+        for (size_t i = 0; i < n; i++)
+            dst[offsets[(((uint64_t)src[i] >> shift) & 255) ^ sign]++] = src[i];
+        int64_t* tmp = src;
+        src = dst;
+        dst = tmp;
+    }
+    if (src != elements) memcpy(elements, src, n * sizeof *elements);
+    free(scratch);
 }
 
 StnArray* stn_array_filled(const StnElemOps* ops, int64_t n, const void* elem, const char* file, int line, int col) {
@@ -421,50 +602,133 @@ void stn_print(StnStr s) {
 /* A Str is always valid UTF-8 (section 3.1): each byte that does not start a well-formed
    sequence (no overlong forms, no surrogates, nothing above U+10FFFF) becomes U+FFFD.
    The reference interpreter applies the same rule (Interp.sanitize_utf8). */
-StnStr stn_str_from_bytes(const char* data, int64_t n) {
-    const unsigned char* b = (const unsigned char*)data;
-    char* out = (char*)malloc((size_t)n * 3 + 1);
-    if (!out) { fputs("trap: out of memory\n", stderr); exit(2); }
-    int64_t i = 0, o = 0;
-    while (i < n) {
-        unsigned c = b[i];
-        if (c < 0x80) { out[o++] = (char)c; i++; continue; }
-        int len = 0; uint32_t min = 0, cp = 0;
-        if (c >= 0xC2 && c <= 0xDF) { len = 2; min = 0x80; cp = c & 0x1F; }
-        else if (c >= 0xE0 && c <= 0xEF) { len = 3; min = 0x800; cp = c & 0x0F; }
-        else if (c >= 0xF0 && c <= 0xF4) { len = 4; min = 0x10000; cp = c & 0x07; }
-        int ok = len > 0 && i + len <= n;
-        for (int k = 1; ok && k < len; k++) {
-            if ((b[i + k] & 0xC0) != 0x80) ok = 0;
-            else cp = (cp << 6) | (b[i + k] & 0x3F);
-        }
-        if (ok && (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))) ok = 0;
-        if (ok) { memcpy(out + o, b + i, (size_t)len); o += len; i += len; }
-        else { out[o++] = (char)0xEF; out[o++] = (char)0xBF; out[o++] = (char)0xBD; i++; }
+/* Returns the width of a valid non-ASCII sequence, or zero. The caller has
+   already established that at least one byte is present. */
+static size_t stn_utf8_width(const unsigned char* p, size_t remaining) {
+    unsigned lead = p[0];
+    if (remaining < 2 || lead < 0xC2 || lead > 0xF4) return 0;
+    unsigned second = p[1];
+    if ((second & 0xC0) != 0x80) return 0;
+    if (lead < 0xE0) return 2;
+    if (remaining < 3 || (p[2] & 0xC0) != 0x80) return 0;
+    if (lead < 0xF0) {
+        if ((lead == 0xE0 && second < 0xA0) || (lead == 0xED && second >= 0xA0)) return 0;
+        return 3;
     }
-    StnStr s = stn_str_new(out, o);
-    free(out);
-    return s;
+    if (remaining < 4 || (p[3] & 0xC0) != 0x80) return 0;
+    if ((lead == 0xF0 && second < 0x90) || (lead == 0xF4 && second >= 0x90)) return 0;
+    return 4;
+}
+
+static int stn_utf8_valid(const char* data, size_t n) {
+    const unsigned char* p = (const unsigned char*)data;
+    while (n > 0) {
+        while (n >= sizeof(uint64_t)) {
+            uint64_t block;
+            memcpy(&block, p, sizeof block);
+            if (block & UINT64_C(0x8080808080808080)) break;
+            p += sizeof block;
+            n -= sizeof block;
+        }
+        while (n > 0 && *p < 0x80) {
+            p++;
+            n--;
+        }
+        if (n == 0) return 1;
+        size_t width = stn_utf8_width(p, n);
+        if (width == 0) return 0;
+        p += width;
+        n -= width;
+    }
+    return 1;
+}
+
+static StnStr stn_str_replace_invalid_utf8(const char* data, size_t n) {
+    const unsigned char* bytes = (const unsigned char*)data;
+    if (n > (SIZE_MAX - sizeof(StnStrBuf) - 1) / 3 ||
+        n > INT64_MAX / 3)
+        stn_too_large("<runtime>", 0, 0);
+    char* repaired = malloc(n * 3 + 1);
+    if (!repaired) stn_trap("out of memory", "<runtime>", 0, 0, "could not repair input");
+    size_t written = 0;
+    for (size_t i = 0; i < n;) {
+        if (bytes[i] < 0x80) {
+            repaired[written++] = (char)bytes[i++];
+            continue;
+        }
+        size_t width = stn_utf8_width(bytes + i, n - i);
+        if (width > 0) {
+            memcpy(repaired + written, bytes + i, width);
+            written += width;
+            i += width;
+        } else {
+            memcpy(repaired + written, "\xEF\xBF\xBD", 3);
+            written += 3;
+            i++;
+        }
+    }
+    StnStr result = stn_str_new(repaired, (int64_t)written);
+    free(repaired);
+    return result;
+}
+
+StnStr stn_str_from_bytes(const char* data, int64_t n) {
+    if (stn_utf8_valid(data, (size_t)n)) return stn_str_new(data, n);
+    return stn_str_replace_invalid_utf8(data, (size_t)n);
 }
 
 int stn_read_line(StnStr* out) {
     stn_flush();
-    size_t cap = 128, n = 0;
-    char* buf = (char*)malloc(cap);
-    if (!buf) { fputs("trap: out of memory\n", stderr); exit(2); }
-    int c;
-    while ((c = getchar()) != EOF && c != '\n') {
-        if (n + 1 >= cap) {
-            char* grown = (char*)realloc(buf, cap * 2);
-            if (!grown) { free(buf); fputs("trap: out of memory\n", stderr); exit(2); }
-            buf = grown; cap *= 2;
-        }
-        buf[n++] = (char)c;
+    char* buf = NULL;
+    size_t cap = 0;
+    errno = 0;
+    ssize_t n = getline(&buf, &cap, stdin);
+    if (n < 0) {
+        if (errno == ENOMEM) stn_trap("out of memory", "<runtime>", 0, 0, "could not allocate input buffer");
+        free(buf);
+        return 0;
     }
-    if (c == EOF && n == 0) { free(buf); return 0; }
+    if (n > 0 && buf[n - 1] == '\n') n--;
     *out = stn_str_from_bytes(buf, (int64_t)n);
     free(buf);
     return 1;
+}
+
+StnStr stn_read_all(void) {
+    stn_flush();
+    size_t cap = 65536;
+    struct stat info;
+    if (fstat(fileno(stdin), &info) == 0 && S_ISREG(info.st_mode) &&
+        info.st_size > 0 && info.st_size < 32 * 1024 * 1024) {
+        off_t offset = ftello(stdin);
+        if (offset >= 0 && info.st_size - offset >= (off_t)cap)
+            cap = (size_t)(info.st_size - offset) + 1;
+    }
+
+    StnStr s = (StnStr)stn_alloc(sizeof(StnStrBuf) + cap + 1);
+    size_t len = 0;
+    for (;;) {
+        len += fread(s->data + len, 1, cap - len, stdin);
+        if (feof(stdin)) break;
+        if (ferror(stdin)) stn_trap("input error", "<runtime>", 0, 0, "could not read stdin");
+        if (len == cap) {
+            if (cap > (SIZE_MAX - sizeof(StnStrBuf) - 1) / 2 ||
+                (uint64_t)cap > (uint64_t)STN_MAX_ALLOC / 2)
+                stn_too_large("<runtime>", 0, 0);
+            cap *= 2;
+            StnStr grown = realloc(s, sizeof(StnStrBuf) + cap + 1);
+            if (!grown) stn_trap("out of memory", "<runtime>", 0, 0, "could not grow input buffer");
+            s = grown;
+        }
+    }
+    if (!stn_utf8_valid(s->data, len)) {
+        StnStr text = stn_str_replace_invalid_utf8(s->data, len);
+        STN_STR_DROP(s);
+        return text;
+    }
+    s->len = (int64_t)len;
+    s->data[len] = 0;
+    return s;
 }
 
 int64_t stn_clock_ns(void) {
@@ -493,35 +757,84 @@ StnArray* stn_str_chars(StnStr s, const StnElemOps* ops) {
     return a;
 }
 
+/* Search counted bytes, including embedded NULs. Empty needles are handled by callers. */
+static const char* stn_find_bytes(const char* haystack, size_t n, const char* needle, size_t m) {
+    if (m > n) return NULL;
+#if defined(__SSE2__)
+    if (m <= 16 && m > 1) {
+        const size_t candidates = n - m + 1;
+        const __m128i first = _mm_set1_epi8(needle[0]);
+        const __m128i last = _mm_set1_epi8(needle[m - 1]);
+        size_t i = 0;
+        for (; candidates - i >= 16; i += 16) {
+            const __m128i starts = _mm_loadu_si128((const __m128i_u*)(haystack + i));
+            const __m128i ends = _mm_loadu_si128((const __m128i_u*)(haystack + i + m - 1));
+            unsigned hits = (unsigned)_mm_movemask_epi8(_mm_and_si128(
+                _mm_cmpeq_epi8(starts, first), _mm_cmpeq_epi8(ends, last)));
+            while (hits) {
+                unsigned offset = (unsigned)__builtin_ctz(hits);
+                if (m == 2 || memcmp(haystack + i + offset + 1, needle + 1, m - 2) == 0)
+                    return haystack + i + offset;
+                hits &= hits - 1;
+            }
+        }
+        haystack += i;
+        n -= i;
+    }
+#endif
+    if (m == 1) return memchr(haystack, (unsigned char)*needle, n);
+    const char* end = haystack + (n - m) + 1;
+    while (haystack < end) {
+        const char* hit = memchr(haystack, (unsigned char)*needle, (size_t)(end - haystack));
+        if (!hit || memcmp(hit + 1, needle + 1, m - 1) == 0) return hit;
+        haystack = hit + 1;
+    }
+    return NULL;
+}
+
 StnArray* stn_str_split(StnStr s, StnStr sep, const StnElemOps* ops, const char* file, int line, int col) {
     if (sep->len == 0) stn_trap("invalid argument", file, line, col, "split with an empty separator");
     StnArray* a = stn_array_new(ops, 4);
-    int64_t st = 0, i = 0;
-    while (i <= s->len - sep->len) {
-        if (memcmp(s->data + i, sep->data, (size_t)sep->len) == 0) {
-            StnStr part = stn_str_new(s->data + st, i - st);
-            stn_array_push(&a, &part);
-            i += sep->len; st = i;
-        } else i++;
+    const char* field = s->data;
+    const char* end = s->data + s->len;
+    const char* hit;
+    while ((hit = stn_find_bytes(field, (size_t)(end - field), sep->data, (size_t)sep->len))) {
+        StnStr part = stn_str_new(field, (int64_t)(hit - field));
+        STN_PUSH(&a, StnStr, part);
+        field = hit + sep->len;
     }
-    StnStr last = stn_str_new(s->data + st, s->len - st);
-    stn_array_push(&a, &last);
+    StnStr last = stn_str_new(field, (int64_t)(end - field));
+    STN_PUSH(&a, StnStr, last);
     return a;
 }
 
-StnStr stn_str_join(StnArray* xs, StnStr sep) {
-    int64_t total = 0;
-    StnStr* parts = (StnStr*)xs->data;
-    for (int64_t i = 0; i < xs->len; i++) total += parts[i]->len + (i ? sep->len : 0);
-    StnStr s = (StnStr)stn_alloc(sizeof(StnStrBuf) + (size_t)total + 1);
-    s->len = total;
-    int64_t at = 0;
-    for (int64_t i = 0; i < xs->len; i++) {
-        if (i) { memcpy(s->data + at, sep->data, (size_t)sep->len); at += sep->len; }
-        memcpy(s->data + at, parts[i]->data, (size_t)parts[i]->len); at += parts[i]->len;
+StnStr stn_str_join_parts(const StnStr* parts, int64_t n, StnStr sep) {
+    size_t total = 0;
+    size_t limit = SIZE_MAX - sizeof(StnStrBuf) - 1;
+    if (limit > INT64_MAX) limit = INT64_MAX;
+    for (int64_t i = 0; i < n; i++) {
+        if ((uint64_t)parts[i]->len > limit - total ||
+            (i && (uint64_t)sep->len > limit - total - (size_t)parts[i]->len))
+            stn_too_large("<runtime>", 0, 0);
+        total += (size_t)parts[i]->len + (i ? (size_t)sep->len : 0);
+    }
+    StnStr s = (StnStr)stn_alloc(sizeof(StnStrBuf) + total + 1);
+    s->len = (int64_t)total;
+    size_t at = 0;
+    for (int64_t i = 0; i < n; i++) {
+        if (i) {
+            memcpy(s->data + at, sep->data, (size_t)sep->len);
+            at += (size_t)sep->len;
+        }
+        memcpy(s->data + at, parts[i]->data, (size_t)parts[i]->len);
+        at += (size_t)parts[i]->len;
     }
     s->data[total] = 0;
     return s;
+}
+
+StnStr stn_str_join(StnArray* xs, StnStr sep) {
+    return stn_str_join_parts((const StnStr*)xs->data, xs->len, sep);
 }
 
 static int stn_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
@@ -533,17 +846,8 @@ StnStr stn_str_trim(StnStr s) {
     return stn_str_new(s->data + lo, hi - lo);
 }
 
-uint8_t stn_str_contains(StnStr s, StnStr sub) {
-    if (sub->len == 0) return 1;
-    for (int64_t i = 0; i + sub->len <= s->len; i++)
-        if (memcmp(s->data + i, sub->data, (size_t)sub->len) == 0) return 1;
-    return 0;
-}
-uint8_t stn_str_starts_with(StnStr s, StnStr p) {
-    return p->len <= s->len && memcmp(s->data, p->data, (size_t)p->len) == 0;
-}
-uint8_t stn_str_ends_with(StnStr s, StnStr p) {
-    return p->len <= s->len && memcmp(s->data + s->len - p->len, p->data, (size_t)p->len) == 0;
+uint8_t stn_str_contains_slow(StnStr s, StnStr sub) {
+    return sub->len == 0 || stn_find_bytes(s->data, (size_t)s->len, sub->data, (size_t)sub->len) != NULL;
 }
 StnStr stn_str_repeat(StnStr s, int64_t n, const char* file, int line, int col) {
     if (n < 0) stn_trap("invalid argument", file, line, col, "negative repeat count");
@@ -561,20 +865,66 @@ int stn_parse_int(StnStr s, int64_t* out) {
     int neg = s->data[0] == '-';
     if (s->data[0] == '-' || s->data[0] == '+') i = 1;
     if (i == n) return 1;
-    for (int64_t j = i; j < n; j++) if (s->data[j] < '0' || s->data[j] > '9') return 1;
-    int64_t acc = 0;   /* accumulated negatively, to reach INT64_MIN */
-    for (; i < n; i++) {
-        int d = s->data[i] - '0';
-        if (acc < INT64_MIN / 10 || acc * 10 < INT64_MIN + d) return 2;
-        acc = acc * 10 - d;
+    int64_t acc = 0;
+    if (n - i <= 18) {
+        for (; n - i >= 4; i += 4) {
+            unsigned a = (unsigned char)s->data[i] - (unsigned)'0';
+            unsigned b = (unsigned char)s->data[i+1] - (unsigned)'0';
+            unsigned c = (unsigned char)s->data[i+2] - (unsigned)'0';
+            unsigned d = (unsigned char)s->data[i+3] - (unsigned)'0';
+            if (a > 9 || b > 9 || c > 9 || d > 9) return 1;
+            acc = acc * 10000 - (int64_t)(1000*a + 100*b + 10*c + d);
+        }
+        for (; i < n; i++) {
+            unsigned digit = (unsigned char)s->data[i] - (unsigned)'0';
+            if (digit > 9) return 1;
+            acc = acc * 10 - digit;
+        }
+    } else {
+        for (; i < n; i++) {
+            unsigned digit = (unsigned char)s->data[i] - (unsigned)'0';
+            if (digit > 9) return 1;
+            if (acc < INT64_MIN / 10 || acc * 10 < INT64_MIN + digit) {
+                /* Invalid syntax has priority over a range error. */
+                for (i++; i < n; i++)
+                    if (s->data[i] < '0' || s->data[i] > '9') return 1;
+                return 2;
+            }
+            acc = acc * 10 - digit;
+        }
     }
     if (!neg) { if (acc == INT64_MIN) return 2; acc = -acc; }
     *out = acc;
     return 0;
 }
 
+/* A short plain decimal can be rounded by one binary64 division: both
+   operands are exact integers below 2^53. Exponents and long decimals use strtod. */
+static int stn_parse_short_float(const char* data, int64_t n, double* out) {
+    if (n > 15) return 0;
+    int64_t i = data[0] == '-' || data[0] == '+' ? 1 : 0;
+    uint64_t mantissa = 0, divisor = 1;
+    int digits = 0, has_point = 0;
+    for (; i < n; i++) {
+        unsigned c = (unsigned char)data[i];
+        if (c == '.' && !has_point) {
+            has_point = 1;
+            continue;
+        }
+        if (c - '0' > 9) return 0;
+        mantissa = mantissa * 10 + (c - '0');
+        if (has_point) divisor *= 10;
+        digits++;
+    }
+    if (!digits) return 0;
+    double signed_mantissa = data[0] == '-' ? -(double)mantissa : (double)mantissa;
+    *out = signed_mantissa / (double)divisor;
+    return 1;
+}
+
 int stn_parse_float(StnStr s, double* out) {
     if (s->len == 0) return 1;
+    if (stn_parse_short_float(s->data, s->len, out)) return 0;
     for (int64_t i = 0; i < s->len; i++) {
         char c = s->data[i];
         if (!((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E')) return 1;

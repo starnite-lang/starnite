@@ -709,6 +709,11 @@ and builtin env name (tys : ty list) (vals : value list) loc : value * value lis
       match In_channel.input_line stdin with
       | Some l -> pure (VVariant (1, [| VStr (sanitize_utf8 l) |]))
       | None -> pure (VVariant (0, [||])))
+  | "read_all@", [] ->
+      flush_out ();
+      (match In_channel.input_all stdin with
+       | input -> pure (VStr (sanitize_utf8 input))
+       | exception Sys_error _ -> trap "input error" loc "could not read stdin")
   | "clock_ns@", [] -> pure (VInt (Int64.of_float (Unix.gettimeofday () *. 1e9)))
   | "len@Array", [ VArr a ] -> pure (VInt (Int64.of_int (Array.length a)))
   | "push@Array", [ VArr a; x ] -> (VUnit, [ VArr (Array.append a [| x |]); x ])
@@ -733,6 +738,9 @@ and builtin env name (tys : ty list) (vals : value list) loc : value * value lis
       pure (VArr (Array.make (Int64.to_int n) x))
   | "copy@T", [ x ] -> pure x
   | "unreachable@Str", [ VStr m ] -> trap "unreachable" loc m
+  | "byte_at_or_end@Str", [ VStr s; VInt i ] ->
+      if i < 0L || i >= Int64.of_int (String.length s) then pure (VInt (-1L))
+      else pure (VInt (Int64.of_int (Char.code s.[Int64.to_int i])))
   | "len@Str", [ VStr s ] -> pure (VInt (Int64.of_int (String.length s)))
   | "chars@Str", [ VStr s ] -> pure (VArr (Array.of_list (List.map (fun c -> VChar c) (utf8_chars s))))
   | "split@Str", [ VStr s; VStr sep ] ->

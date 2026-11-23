@@ -1,0 +1,23 @@
+fn borrow_string(a: Array[Str]) -> Str:
+    let x = a[0]
+    x
+
+fn main():
+    var a = [repeat("string", 2), "é"]
+    let original = a
+    let popped = unwrap(a.pop())
+    clear(mut a)
+    a.push("new")
+    print(f"{original} {popped} {a} {borrow_string(original)}")
+    let words = ["ab\0c", "é漢é"]
+    print(f"{contains(words[0], "\0c")} {split(words[1], "é")} {join(["alpha", words[1]], "|")}")
+    var values = [9223372036854775807, -7, -42, 0, 3, -7]
+    for i in 0..40:
+        values.push(i - 20)
+    let snapshot = values
+    sort(mut values)
+    reverse(mut values)
+    print(f"{values[0]} {values[45]} {snapshot[1]} {contains(values, -42)}")
+    print(f"{parse_int("-9223372036854775808")} {parse_int("+9223372036854775807")}")
+    print(f"{try parse_int("999999999999999999999x")} {try parse_int("999999999999999999999")}")
+    print(f"{parse_float("-0.0")} {parse_float(".125")} {parse_float("1e5")} {parse_float("2.2250738585072014e-308")}")

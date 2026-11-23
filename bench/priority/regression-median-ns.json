@@ -1,0 +1,440 @@
+{
+  "0": {
+    "int_arithmetic": {
+      "previous-starnite": 16288070,
+      "starnite": 16098975,
+      "c-reference": 26601556,
+      "c-tuned": 26654068,
+      "rust-reference": 16854262
+    },
+    "float_arithmetic": {
+      "previous-starnite": 24388245,
+      "starnite": 24360425,
+      "c-reference": 24233610,
+      "c-tuned": 24322284,
+      "rust-reference": 24433186
+    },
+    "array_fill": {
+      "previous-starnite": 3532134,
+      "starnite": 3505010,
+      "c-reference": 3839246,
+      "c-tuned": 3822541,
+      "rust-reference": 3522938
+    },
+    "array_push": {
+      "previous-starnite": 1248422,
+      "starnite": 1177343,
+      "c-reference": 1020787,
+      "c-tuned": 1097439,
+      "rust-reference": 1203013
+    },
+    "array_pop": {
+      "previous-starnite": 157997,
+      "starnite": 155995,
+      "c-reference": 171987,
+      "c-tuned": 171620,
+      "rust-reference": 171748
+    },
+    "array_scan": {
+      "previous-starnite": 163076,
+      "starnite": 163602,
+      "c-reference": 182132,
+      "c-tuned": 281371,
+      "rust-reference": 181595
+    },
+    "array_index_read": {
+      "previous-starnite": 1274061,
+      "starnite": 1285402,
+      "c-reference": 1590177,
+      "c-tuned": 1236966,
+      "rust-reference": 1457071
+    },
+    "array_index_write": {
+      "previous-starnite": 946490,
+      "starnite": 973330,
+      "c-reference": 926044,
+      "c-tuned": 919617,
+      "rust-reference": 947910
+    },
+    "array_front_insert_remove": {
+      "previous-starnite": 16819276,
+      "starnite": 16820292,
+      "c-reference": 16614944,
+      "c-tuned": 16730467,
+      "rust-reference": 16663317
+    },
+    "array_reverse": {
+      "previous-starnite": 115880,
+      "starnite": 115808,
+      "c-reference": 175563,
+      "c-tuned": 123576,
+      "rust-reference": 112825
+    },
+    "array_sort": {
+      "previous-starnite": 443692,
+      "starnite": 431644,
+      "c-reference": 4913734,
+      "c-tuned": 418495,
+      "rust-reference": 949440
+    },
+    "array_contains": {
+      "previous-starnite": 2190706,
+      "starnite": 883280,
+      "c-reference": 5261075,
+      "c-tuned": 1494105,
+      "rust-reference": 3505343
+    },
+    "array_owned_slice": {
+      "previous-starnite": 810964,
+      "starnite": 810925,
+      "c-reference": 816512,
+      "c-tuned": 813537,
+      "rust-reference": 821309
+    },
+    "array_extend": {
+      "previous-starnite": 1192315,
+      "starnite": 1193073,
+      "c-reference": 1190134,
+      "c-tuned": 1181434,
+      "rust-reference": 1187900
+    },
+    "array_snapshot_write": {
+      "previous-starnite": 1164457,
+      "starnite": 1162743,
+      "c-reference": 1178523,
+      "c-tuned": 1152377,
+      "rust-reference": 1183496
+    },
+    "str_concat": {
+      "previous-starnite": 1751971,
+      "starnite": 1679861,
+      "c-reference": 3211636,
+      "c-tuned": 1848328,
+      "rust-reference": 4215796
+    },
+    "str_owned_slice": {
+      "previous-starnite": 1426185,
+      "starnite": 1530225,
+      "c-reference": 2412263,
+      "c-tuned": 1688685,
+      "rust-reference": 1848703
+    },
+    "str_contains": {
+      "previous-starnite": 719995,
+      "starnite": 777109,
+      "c-reference": 3160981,
+      "c-tuned": 779822,
+      "rust-reference": 1239533
+    },
+    "str_prefix_suffix_eq": {
+      "previous-starnite": 1568050,
+      "starnite": 804375,
+      "c-reference": 1937626,
+      "c-tuned": 810256,
+      "rust-reference": 1518550
+    },
+    "str_split_owned": {
+      "previous-starnite": 5281326,
+      "starnite": 5071914,
+      "c-reference": 6301477,
+      "c-tuned": 5375621,
+      "rust-reference": 10343602
+    },
+    "str_join": {
+      "previous-starnite": 3155706,
+      "starnite": 3303452,
+      "c-reference": 2937934,
+      "c-tuned": 3382443,
+      "rust-reference": 3262786
+    },
+    "str_chars_owned": {
+      "previous-starnite": 4340254,
+      "starnite": 4462821,
+      "c-reference": 8376633,
+      "c-tuned": 4365189,
+      "rust-reference": 11891819
+    },
+    "str_trim_owned": {
+      "previous-starnite": 2467242,
+      "starnite": 2623760,
+      "c-reference": 3687928,
+      "c-tuned": 2594900,
+      "rust-reference": 4338591
+    },
+    "str_repeat": {
+      "previous-starnite": 2775212,
+      "starnite": 2850142,
+      "c-reference": 3770325,
+      "c-tuned": 2929694,
+      "rust-reference": 4006183
+    },
+    "str_parse_int": {
+      "previous-starnite": 1396976,
+      "starnite": 1396517,
+      "c-reference": 2286950,
+      "c-tuned": 1313475,
+      "rust-reference": 1811955
+    },
+    "str_parse_float": {
+      "previous-starnite": 2806343,
+      "starnite": 2893229,
+      "c-reference": 23378362,
+      "c-tuned": 2813750,
+      "rust-reference": 3391032
+    },
+    "option_result": {
+      "previous-starnite": 717664,
+      "starnite": 775018,
+      "c-reference": 545100,
+      "c-tuned": 539926,
+      "rust-reference": 633426
+    },
+    "tuple_array_scan": {
+      "previous-starnite": 398289,
+      "starnite": 394958,
+      "c-reference": 361809,
+      "c-tuned": 364705,
+      "rust-reference": 346096
+    },
+    "bool_logic_scan": {
+      "previous-starnite": 31305,
+      "starnite": 31125,
+      "c-reference": 278686,
+      "c-tuned": 35517,
+      "rust-reference": 493285
+    },
+    "struct_array_scan": {
+      "previous-starnite": 395782,
+      "starnite": 397638,
+      "c-reference": 356130,
+      "c-tuned": 366650,
+      "rust-reference": 357744
+    },
+    "array_clear_refill": {
+      "previous-starnite": 166630,
+      "starnite": 40627,
+      "c-reference": 111554,
+      "c-tuned": 145321,
+      "rust-reference": 146095
+    }
+  },
+  "4": {
+    "int_arithmetic": {
+      "previous-starnite": 16966050,
+      "starnite": 16659632,
+      "c-reference": 27772393,
+      "c-tuned": 27779687,
+      "rust-reference": 17638026
+    },
+    "float_arithmetic": {
+      "previous-starnite": 25620069,
+      "starnite": 25717199,
+      "c-reference": 25704156,
+      "c-tuned": 25820639,
+      "rust-reference": 26159004
+    },
+    "array_fill": {
+      "previous-starnite": 3837393,
+      "starnite": 3784281,
+      "c-reference": 4118264,
+      "c-tuned": 4057611,
+      "rust-reference": 3848292
+    },
+    "array_push": {
+      "previous-starnite": 1340776,
+      "starnite": 1261051,
+      "c-reference": 1107506,
+      "c-tuned": 1135578,
+      "rust-reference": 1289073
+    },
+    "array_pop": {
+      "previous-starnite": 172807,
+      "starnite": 160080,
+      "c-reference": 175402,
+      "c-tuned": 175808,
+      "rust-reference": 177925
+    },
+    "array_scan": {
+      "previous-starnite": 175285,
+      "starnite": 173500,
+      "c-reference": 186694,
+      "c-tuned": 281829,
+      "rust-reference": 185030
+    },
+    "array_index_read": {
+      "previous-starnite": 1430074,
+      "starnite": 1484877,
+      "c-reference": 1686511,
+      "c-tuned": 1355087,
+      "rust-reference": 1554358
+    },
+    "array_index_write": {
+      "previous-starnite": 1136514,
+      "starnite": 1053320,
+      "c-reference": 1078777,
+      "c-tuned": 965774,
+      "rust-reference": 1027726
+    },
+    "array_front_insert_remove": {
+      "previous-starnite": 17761327,
+      "starnite": 17687252,
+      "c-reference": 18125443,
+      "c-tuned": 17745657,
+      "rust-reference": 17447392
+    },
+    "array_reverse": {
+      "previous-starnite": 116603,
+      "starnite": 116685,
+      "c-reference": 174757,
+      "c-tuned": 121997,
+      "rust-reference": 114267
+    },
+    "array_sort": {
+      "previous-starnite": 444522,
+      "starnite": 454668,
+      "c-reference": 5175561,
+      "c-tuned": 426940,
+      "rust-reference": 1010871
+    },
+    "array_contains": {
+      "previous-starnite": 2269598,
+      "starnite": 924236,
+      "c-reference": 5461490,
+      "c-tuned": 1566384,
+      "rust-reference": 3701280
+    },
+    "array_owned_slice": {
+      "previous-starnite": 896660,
+      "starnite": 827352,
+      "c-reference": 844171,
+      "c-tuned": 833543,
+      "rust-reference": 822894
+    },
+    "array_extend": {
+      "previous-starnite": 1236599,
+      "starnite": 1244258,
+      "c-reference": 1238536,
+      "c-tuned": 1241638,
+      "rust-reference": 1294234
+    },
+    "array_snapshot_write": {
+      "previous-starnite": 1307847,
+      "starnite": 1262808,
+      "c-reference": 1262061,
+      "c-tuned": 1299700,
+      "rust-reference": 1253994
+    },
+    "str_concat": {
+      "previous-starnite": 1856076,
+      "starnite": 1838273,
+      "c-reference": 3318146,
+      "c-tuned": 1997931,
+      "rust-reference": 4315059
+    },
+    "str_owned_slice": {
+      "previous-starnite": 1451712,
+      "starnite": 1566040,
+      "c-reference": 2640840,
+      "c-tuned": 1823581,
+      "rust-reference": 1923879
+    },
+    "str_contains": {
+      "previous-starnite": 732337,
+      "starnite": 790710,
+      "c-reference": 3237657,
+      "c-tuned": 841050,
+      "rust-reference": 1288491
+    },
+    "str_prefix_suffix_eq": {
+      "previous-starnite": 1579671,
+      "starnite": 797747,
+      "c-reference": 2082143,
+      "c-tuned": 806591,
+      "rust-reference": 1611662
+    },
+    "str_split_owned": {
+      "previous-starnite": 5358498,
+      "starnite": 5432346,
+      "c-reference": 6585410,
+      "c-tuned": 5637075,
+      "rust-reference": 10755596
+    },
+    "str_join": {
+      "previous-starnite": 3253185,
+      "starnite": 3448822,
+      "c-reference": 3093958,
+      "c-tuned": 3573810,
+      "rust-reference": 3331981
+    },
+    "str_chars_owned": {
+      "previous-starnite": 4594765,
+      "starnite": 4770616,
+      "c-reference": 9081315,
+      "c-tuned": 4629059,
+      "rust-reference": 12381379
+    },
+    "str_trim_owned": {
+      "previous-starnite": 2500973,
+      "starnite": 2637897,
+      "c-reference": 3801657,
+      "c-tuned": 2663179,
+      "rust-reference": 4486031
+    },
+    "str_repeat": {
+      "previous-starnite": 2913903,
+      "starnite": 2996713,
+      "c-reference": 4045258,
+      "c-tuned": 3073572,
+      "rust-reference": 4282127
+    },
+    "str_parse_int": {
+      "previous-starnite": 1483717,
+      "starnite": 1421401,
+      "c-reference": 2390507,
+      "c-tuned": 1403045,
+      "rust-reference": 1906119
+    },
+    "str_parse_float": {
+      "previous-starnite": 2954108,
+      "starnite": 3149654,
+      "c-reference": 25071566,
+      "c-tuned": 3056891,
+      "rust-reference": 3444023
+    },
+    "option_result": {
+      "previous-starnite": 726007,
+      "starnite": 812843,
+      "c-reference": 604347,
+      "c-tuned": 595474,
+      "rust-reference": 742997
+    },
+    "tuple_array_scan": {
+      "previous-starnite": 390522,
+      "starnite": 420499,
+      "c-reference": 394936,
+      "c-tuned": 363717,
+      "rust-reference": 360612
+    },
+    "bool_logic_scan": {
+      "previous-starnite": 33285,
+      "starnite": 34468,
+      "c-reference": 294254,
+      "c-tuned": 36998,
+      "rust-reference": 487608
+    },
+    "struct_array_scan": {
+      "previous-starnite": 420790,
+      "starnite": 413292,
+      "c-reference": 403443,
+      "c-tuned": 361149,
+      "rust-reference": 391658
+    },
+    "array_clear_refill": {
+      "previous-starnite": 216249,
+      "starnite": 40635,
+      "c-reference": 111639,
+      "c-tuned": 145740,
+      "rust-reference": 146465
+    }
+  }
+}
