@@ -107,22 +107,22 @@ fault_split() { split_fault split; }
 # the same, where the two differ in what a program prints (not in a trap's place, which is left out): the
 # difference is on the standard output, byte for byte
 fault_split_stdout() { split_fault split-stdout; }
-# two programs run alike: the same exit status, which is success or the status of a trap, the same
-# standard output byte for byte, and the same standard error. A shrunk program may end in a trap,
-# whose line on standard error names the file and the place in it; those differ between the two
-# forms, so that part of that line alone is left out.
+# two programs run alike: the same exit status, the same standard output and the same standard
+# error, byte for byte. A shrunk program may end in a trap (status 2). A trap writes one header,
+# `trap: KIND at FILE:LINE:COL`, as the first line of standard error, and then its message. The
+# place differs between the two forms, so it is left out of that first line and of nothing else:
+# the message is compared as it is, whatever it says. Status 2 without that header first is an
+# uncaught exception of the compiler, which begins with a header of its own, and is not alike.
 same_run() {
-    "$starnite" run --interp "$1" > "$tmp/s.out" 2> "$tmp/s.raw"; s1=$?
-    "$starnite" run --interp "$2" > "$tmp/o.out" 2> "$tmp/o.raw"; s2=$?
-    sed 's/^\(trap: .*\) at .*$/\1/' "$tmp/s.raw" > "$tmp/s.err"
-    sed 's/^\(trap: .*\) at .*$/\1/' "$tmp/o.raw" > "$tmp/o.err"
-    # status 2 is also what an uncaught exception of the compiler leaves: it counts only with the
-    # line of a trap on standard error, and never with the words of a crash
+    "$starnite" run --interp "$1" > "$tmp/s.out" 2> "$tmp/s.err"; s1=$?
+    "$starnite" run --interp "$2" > "$tmp/o.out" 2> "$tmp/o.err"; s2=$?
     [ "$s1" = "$s2" ] || return 1
     case $s1 in
         0) ;;
-        2) grep -q '^trap: ' "$tmp/s.raw" && grep -q '^trap: ' "$tmp/o.raw" || return 1
-           if grep -q '^Fatal error: exception' "$tmp/s.raw" "$tmp/o.raw"; then return 1; fi ;;
+        2) for f in s o; do
+               head -n 1 "$tmp/$f.err" | grep -q '^trap: .* at [^ ]*:[0-9]*:[0-9]*$' || return 1
+               sed '1s/ at [^ ]*:[0-9]*:[0-9]*$//' "$tmp/$f.err" > "$tmp/$f.cut" && mv "$tmp/$f.cut" "$tmp/$f.err"
+           done ;;
         *) return 1 ;;
     esac
     cmp -s "$tmp/s.out" "$tmp/o.out" && cmp -s "$tmp/s.err" "$tmp/o.err"
