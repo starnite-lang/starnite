@@ -258,13 +258,65 @@ crashes() {
 }
 fault_crash() { crashes crash "in the check"; }
 fault_crash_run() { crashes crash-run "in run --interp"; }
+# the program that the C build made is killed by a signal and prints nothing: the fuzzer runs it itself
+# and sees how it ended, which the compiler's output does not say
+fault_silent_crash() { crashes silent-crash "in exe"; }
 
+# not a crash: programs that print what a crash looks like, from the interpreter and from the C build.
+# The words are the program's output, and the compiler did nothing wrong.
+crash_phrase_is_output() {
+    out=$(with_fault phrase --crash --count 40 --seed 1 2>&1); status=$?
+    if [ $status != 0 ] || printf '%s\n' "$out" | grep -q 'the compiler crashed'; then
+        bad "a program that prints 'Fatal error: exception' was taken for a crash of the compiler (exit $status)"; printf '%s\n' "$out" | tail -10
+    else ok "a program that prints the words of a crash is not one"; fi
+}
+
+# a program that is not split across a module, with a comment that begins as the header does, is an ordinary
+# file: what it imports is found next to it, and it is reduced there
+reduce_ordinary_module_comment() {
+    proj="$tmp/proj6"; mkdir "$proj"
+    printf '%s\n' 'fn twice*(n: Int) -> Int:' '    n * 2' > "$proj/helpers.stn"
+    cat > "$proj/main.stn" <<'STN'
+# module smoke test: this is not the header of a program split across a module
+import helpers
+
+fn main():
+    var xs: Array[Int] = [3, 1, 2]
+    sort(mut xs)
+    print(f"{helpers.twice(xs[0])}")
+    print("unused")
+STN
+    (cd "$tmp" && with_fault c-output --reduce "$proj/main.stn" > "$tmp/o6.out" 2> "$tmp/o6.err"); status=$?
+    left=$(ls -A "$proj" | tr '\n' ' ')
+    if [ $status != 0 ] || ! grep -q 'sort(mut' "$tmp/o6.out"; then
+        bad "--reduce of a file with a comment that begins like the module header: exit $status"; cat "$tmp/o6.err"
+    elif [ "$left" != "helpers.stn main.stn " ]; then bad "--reduce of a file with a comment like the module header left files: $left"
+    else ok "--reduce of a file with a comment that begins like the module header: it is an ordinary file, and its import is found"; fi
+}
+
+# The checks run together, each as a process of its own. Every one has to end, and to say how: a check that
+# was killed, or that stopped before it printed its result, fails the run, and does not drop out of it.
 n=0
-for check in negative_fuzzing fault_accept_take fault_accept_match fault_wrong_code fault_c_output fault_split reduce_keeping reduce_next_to_a_module reduce_rejected_next_to_a_module reduce_keeping_a_match reduce_name_taken reduce_without_compiler fault_crash fault_crash_run; do
+pids=""
+names=""
+for check in negative_fuzzing fault_accept_take fault_accept_match fault_wrong_code fault_c_output fault_split reduce_keeping reduce_next_to_a_module reduce_ordinary_module_comment reduce_rejected_next_to_a_module reduce_keeping_a_match reduce_name_taken reduce_without_compiler fault_crash fault_crash_run fault_silent_crash crash_phrase_is_output; do
     n=$((n + 1))
     "$check" > "$tmp/result.$n" 2>&1 &
+    pids="$pids $!"
+    names="$names $check"
 done
-wait
+i=1
+for pid in $pids; do
+    wait "$pid"; st=$?
+    name=$(printf '%s\n' $names | sed -n "${i}p")
+    # what a check prints ends with a line of its own: "pass ..." or "FAIL ...", and ends the process well
+    if ! grep -q '^\(pass\|FAIL\) ' "$tmp/result.$i"; then
+        printf 'FAIL %s: it ended with status %s without a result\n' "$name" "$st" >> "$tmp/result.$i"
+    elif [ "$st" != 0 ] && ! grep -q '^FAIL ' "$tmp/result.$i"; then
+        printf 'FAIL %s: it ended with status %s\n' "$name" "$st" >> "$tmp/result.$i"
+    fi
+    i=$((i + 1))
+done
 i=1
 while [ $i -le $n ]; do cat "$tmp/result.$i"; i=$((i + 1)); done > "$tmp/results"
 cat "$tmp/results"

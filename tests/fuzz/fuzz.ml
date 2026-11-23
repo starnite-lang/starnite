@@ -620,7 +620,13 @@ let marker_index lines =
   Array.iteri (fun i l -> if l = generated_marker && !r < 0 then r := i) lines;
   !r
 
-let is_split text = String.length text >= String.length module_header && String.sub text 0 (String.length module_header) = module_header
+(* A text is a program split across a module when its first line is the header, exactly, and the line between
+   the prelude and what is generated comes after it. A file that starts with a comment that begins alike
+   (`# module smoke test`) is an ordinary program: the same test decides how a text is written and where a
+   reduction is tried, so that what it imports is found where it is. *)
+let is_split text =
+  let ls = lines_of text in
+  Array.length ls > 0 && ls.(0) = module_header && marker_index ls > 0
 
 (* a top-level function, type or trait, with a star after its name: the module exports it *)
 let export_decl l =
@@ -1277,29 +1283,37 @@ exception Hang of string
 
 let read_file path = In_channel.with_open_bin path In_channel.input_all
 
-(* Run the compiler on a file, with its output in a temporary file and a time limit. *)
-let run starnite tmp args path : int * string =
-  let out = Filename.concat tmp "out.txt" in
-  let fd = Unix.openfile out [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600 in
+(* How a process ended: with a status, or killed by a signal (an OCaml signal number) *)
+type outcome = Exited of int | Signaled of int
+
+(* Run a command, with its output in temporary files and a time limit. With [separate] the standard error is
+   in a file of its own, so that what a compiler says of itself is not taken for what a program prints; without
+   it both go to one file, in the order they were written, and the last of the three is empty. [what] says what
+   was run, for the report of one that does not end. *)
+let spawn ~separate tmp (argv : string array) what : outcome * string * string =
+  let out = Filename.concat tmp "out.txt" and err = Filename.concat tmp "err.txt" in
+  let open_file p = Unix.openfile p [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600 in
+  let fd = open_file out in
+  let efd = if separate then open_file err else fd in
   (* the compiler runs the program it builds as a child of its own, so each invocation
      gets a process group of its own, and the whole group is killed afterwards *)
-  let argv = Array.of_list ((starnite :: args) @ [ path ]) in
   let pid =
     match Unix.fork () with
     | 0 -> (
         try
           ignore (Unix.setsid ());
           Unix.dup2 fd Unix.stdout;
-          Unix.dup2 fd Unix.stderr;
+          Unix.dup2 efd Unix.stderr;
           (* execvp searches PATH, so STARNITE may name an installed command *)
-          Unix.execvp starnite argv
+          Unix.execvp argv.(0) argv
         with e ->
-          prerr_string (sprintf "fuzz: cannot run %s: %s\n" starnite (Printexc.to_string e));
+          prerr_string (sprintf "fuzz: cannot run %s: %s\n" argv.(0) (Printexc.to_string e));
           flush stderr;
           Unix._exit 127)
     | pid -> pid
   in
   Unix.close fd;
+  if separate then Unix.close efd;
   let kill_group () = try Unix.kill (-pid) Sys.sigkill with Unix.Unix_error _ -> () in
   let deadline = Unix.gettimeofday () +. !time_limit in
   let rec wait () =
@@ -1308,17 +1322,23 @@ let run starnite tmp args path : int * string =
         if Unix.gettimeofday () > deadline then begin
           kill_group ();
           ignore (Unix.waitpid [] pid);
-          raise (Hang (String.concat " " args))
+          raise (Hang what)
         end;
         Unix.sleepf 0.01;
         wait ()
-    | _, Unix.WEXITED c -> c
-    | _, (Unix.WSIGNALED s | Unix.WSTOPPED s) -> 128 + abs s
+    | _, Unix.WEXITED c -> Exited c
+    | _, (Unix.WSIGNALED s | Unix.WSTOPPED s) -> Signaled s
   in
-  let code = wait () in
+  let outcome = wait () in
   (* nothing the invocation started may outlive it and write to the next case's output *)
   kill_group ();
-  (code, read_file out)
+  (outcome, read_file out, if separate then read_file err else "")
+
+(* Run the compiler on a file, with its output in a temporary file and a time limit. *)
+let run starnite tmp args path : int * string =
+  match spawn ~separate:false tmp (Array.of_list ((starnite :: args) @ [ path ])) (String.concat " " args) with
+  | Exited c, out, _ -> (c, out)
+  | Signaled s, out, _ -> (128 + abs s, out)
 
 let tail s n = if String.length s <= n then s else String.sub s (String.length s - n) n
 
@@ -1459,29 +1479,59 @@ let corrupt rng text =
         Bytes.set b q c;
         Bytes.to_string b
 
-(* where a compiler crashed: in the check, or in what builds and runs a program that checks *)
+(* where a compiler crashed: in the check, or in what builds and runs a program that checks. The second is
+   named by what ran: "run --interp", "build" (the compiler and the C compiler), or "exe" (the program it built) *)
 type crash = At_check | At_run of string list
 
-(* what a crash says: an exception that nothing caught, or a C compiler that could not build what the compiler
-   wrote. The place and the status of a trap, which a program may reach, are not it. *)
-let crash_text out =
-  contains out "Fatal error" || contains out "undefined reference" || contains out "In function"
-  || (contains out ".c:" && contains out "error")
+(* A line that OCaml writes when an exception nothing caught ends a process. It is the compiler's own: the
+   programs it builds print on the standard output, and say what went wrong on the standard error in lines
+   of a few forms that do not begin like this. *)
+let uncaught err = List.exists (is_prefix "Fatal error: exception") (String.split_on_char '\n' err)
 
-(* what the compiler does with a program that may be wrong: a crash, or nothing to say *)
+(* what the compiler says when the C compiler could not build what it wrote *)
+let c_build_failed err =
+  contains err "undefined reference" || contains err "In function" || (contains err ".c:" && contains err "error")
+
+(* A process killed by a signal other than the one that ends one that does not end. A trap is an exit with a
+   status, and so is the C build's stack overflow, so a signal is a fault of the compiler or of the runtime. *)
+let died_by_signal = function Signaled s -> s <> Sys.sigkill | Exited _ -> false
+
+(* what the compiler does with a program that may be wrong: a crash, or nothing to say. What it prints and
+   what a program prints are kept apart (the standard output and the standard error of each step), the C build
+   is a step of its own, and the program it makes is run by the fuzzer: a program that prints a line that looks
+   like a crash is not one, a program or a build killed by a signal is, and a build that does not end is. *)
 let crash_of starnite tmp path text =
   write_program path text;
-  match run starnite tmp [ "check"; "--json" ] path with
+  let exe = Filename.concat tmp "crash.exe" in
+  let step args = spawn ~separate:true tmp (Array.of_list ((starnite :: args) @ [ path ])) (String.concat " " args) in
+  match step [ "check"; "--json" ] with
   | exception Hang _ -> Some (At_check, "the check did not end")
-  | code, out when code >= 2 || contains out "Fatal error" -> Some (At_check, out)
-  | 0, _ -> (
-      (* it checks: it must build and run, on both backends, though it may run for ever or trap *)
-      let stage args =
-        match run starnite tmp args path with
+  | Signaled s, _, err -> Some (At_check, sprintf "killed by signal %d\n%s" (abs s) err)
+  | Exited c, out, err when c >= 2 || uncaught err -> Some (At_check, err ^ out)
+  | Exited 0, _, _ -> (
+      (* it checks: it must run, on both backends, though it may run for ever or trap *)
+      let interp =
+        match step [ "run"; "--interp" ] with
         | exception Hang _ -> None
-        | _, out -> if crash_text out then Some (At_run args, out) else None
+        | o, out, err ->
+            if died_by_signal o || uncaught err then Some (At_run [ "run"; "--interp" ], err ^ out) else None
       in
-      match stage [ "run"; "--interp" ] with Some c -> Some c | None -> stage [ "run" ])
+      match interp with
+      | Some c -> Some c
+      | None -> (
+          (try Sys.remove exe with Sys_error _ -> ());
+          match step [ "build"; "-o"; exe ] with
+          | exception Hang _ -> Some (At_run [ "build" ], "the build did not end")
+          | Signaled s, _, err -> Some (At_run [ "build" ], sprintf "killed by signal %d\n%s" (abs s) err)
+          | Exited c, out, err when c >= 2 || uncaught err || c_build_failed err -> Some (At_run [ "build" ], err ^ out)
+          | Exited 0, _, _ -> (
+              match spawn ~separate:true tmp [| exe |] "the program" with
+              | exception Hang _ -> None
+              | o, out, err ->
+                  if died_by_signal o then
+                    Some (At_run [ "exe" ], sprintf "the program was killed by a signal\n%s" (if err = "" then out else err))
+                  else None)
+          | _ -> None))
   | _ -> None
 
 let still_crashes starnite tmp kind text =
@@ -1543,7 +1593,7 @@ let () =
   let tmp = Filename.concat (Filename.get_temp_dir_name ()) (sprintf "starnite-fuzz-%d-%08x" (Unix.getpid ()) (Random.bits ())) in
   Unix.mkdir tmp 0o700;
   let cleanup () =
-    List.iter (fun f -> try Sys.remove (Filename.concat tmp f) with Sys_error _ -> ()) [ "out.txt"; "twin.stn"; "corrupt.stn"; module_name ^ ".stn" ];
+    List.iter (fun f -> try Sys.remove (Filename.concat tmp f) with Sys_error _ -> ()) [ "out.txt"; "err.txt"; "crash.exe"; "twin.stn"; "corrupt.stn"; module_name ^ ".stn" ];
     (* the files this run made, and nothing else: next to the input only the ones it made *)
     (match !candidate_dir with
      | None -> List.iter (fun n -> try Sys.remove (Filename.concat tmp (n ^ ".stn")) with Sys_error _ -> ()) [ "shrink"; "orig" ]

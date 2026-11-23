@@ -11,7 +11,15 @@
 #                the same program in one file does not
 #   crash        the checker dies with an exception that nothing caught, for a program that has a main
 #   crash-run    the interpreter does, for a program that has a main and checks
+#   silent-crash the program that the C build makes of one that has a main is killed by a signal,
+#                with nothing printed
+#   phrase       not a fault: the programs print `Fatal error: exception Not_found` as their output, which is
+#                not a crash of the compiler (the crashes above are written on the standard error, as OCaml does)
 real=${REAL_STARNITE:?REAL_STARNITE names the compiler to run}
+# the file that `build -o FILE` writes, and a way to put a shell script in its place
+exe=; prev=
+for a in "$@"; do if [ "$prev" = -o ]; then exe=$a; fi; prev=$a; done
+replace_program() { printf '#!/bin/sh\n%s\n' "$1" > "$exe"; chmod +x "$exe"; }
 case "${BUGGY:-}" in
 c-output)
     if [ "$1" = run ] && [ "$2" != --interp ]; then
@@ -41,12 +49,35 @@ split)
 crash)
     if [ "$1" = check ]; then
         for last; do :; done
-        if grep -q '^fn main' "$last"; then echo 'Fatal error: exception Not_found'; exit 2; fi
+        if grep -q '^fn main' "$last"; then echo 'Fatal error: exception Not_found' >&2; exit 2; fi
     fi ;;
 crash-run)
     if [ "$1" = run ] && [ "$2" = --interp ]; then
         for last; do :; done
-        if grep -q '^fn main' "$last"; then echo 'Fatal error: exception Not_found'; exit 2; fi
+        if grep -q '^fn main' "$last"; then echo 'Fatal error: exception Not_found' >&2; exit 2; fi
+    fi ;;
+silent-crash)
+    # the program that the C build makes is killed by a signal, with nothing printed
+    if [ "$1" = build ]; then
+        "$real" "$@"; status=$?
+        for last; do :; done
+        if [ $status = 0 ] && grep -q '^fn main' "$last"; then
+            replace_program 'kill -SEGV $$'
+        fi
+        exit $status
+    fi ;;
+phrase)
+    # not a fault: programs that print what a crash looks like, on the standard output, which the
+    # fuzzer must not take for one, from the interpreter and from the C build
+    if [ "$1" = run ] && [ "$2" = --interp ]; then
+        "$real" "$@"; status=$?
+        echo 'Fatal error: exception Not_found'
+        exit $status
+    fi
+    if [ "$1" = build ]; then
+        "$real" "$@"; status=$?
+        if [ $status = 0 ]; then replace_program 'echo "Fatal error: exception Not_found"'; fi
+        exit $status
     fi ;;
 esac
 exec "$real" "$@"
