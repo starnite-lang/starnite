@@ -1,0 +1,24 @@
+# A lend mut call lends its root for its own statement (sections 4.3 and 4.6). A statement inside
+# the body of an `if`, a loop or a match arm is a statement of its own: the condition of the
+# enclosing statement may read the variable, and so may the statements beside it.
+fn slot(mut xs: Array[Int], i: Int) -> lend mut Int:
+    lend mut xs[i]
+
+fn main():
+    var xs = [1, 2, 3]
+    if len(xs) > 0:
+        slot(mut xs, 0) = 9
+        slot(mut xs, 0) += 2
+    var i = 0
+    while i < len(xs):
+        slot(mut xs, i) += i
+        i += 1
+    for k in 0..len(xs):
+        if xs[k] > 3:
+            slot(mut xs, k) = 0
+    match len(xs):
+        3 ->
+            slot(mut xs, 2) = 7
+        _ ->
+            print("other")
+    print(f"{xs}")
