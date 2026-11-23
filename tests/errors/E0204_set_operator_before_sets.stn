@@ -1,0 +1,5 @@
+# expect: E0204 4:15
+fn main():
+    let a = 6
+    let b = a | 1
+    print(f"{b}")

@@ -1,0 +1,116 @@
+# A trait method with type parameters of its own is called like a generic function: the
+# parameters are found from the arguments, on a value of a type, through a bound, with the trait
+# written out, in an impl for a generic type, with bounds of their own, and with a trait that has
+# type parameters as well.
+trait Mapper:
+    fn map_with[U](x: Self, f: fn(Int) -> U) -> U
+    fn pick[A, B](x: Self, a: A, b: B) -> A
+    fn show_with[U: Show](x: Self, extra: U) -> Str
+
+type Box = struct(n: Int)
+
+impl Mapper for Box:
+    fn map_with[U](x: Box, f: fn(Int) -> U) -> U:
+        f(x.n)
+    fn pick[P, Q](x: Box, a: P, b: Q) -> P:
+        a
+    fn show_with[V: Show](x: Box, extra: V) -> Str:
+        f"{x.n} and {extra}"
+
+type Pair = struct(a: Int, b: Str)
+
+impl Show for Pair:
+    fn show(p: Pair) -> Str:
+        f"<{p.a},{p.b}>"
+
+# an impl for a generic type, with a method that has a parameter of its own besides the impl's
+type Wrapper[T] = struct(item: T)
+
+impl[T] Mapper for Wrapper[T]:
+    fn map_with[U](x: Wrapper[T], f: fn(Int) -> U) -> U:
+        f(7)
+    fn pick[A, B](x: Wrapper[T], a: A, b: B) -> A:
+        b_unused(a, b)
+    fn show_with[U: Show](x: Wrapper[T], extra: U) -> Str:
+        f"wrapper {extra}"
+
+fn b_unused[A, B](a: A, b: B) -> A:
+    a
+
+# a trait with a type parameter and a method with another
+trait Conv[A]:
+    fn conv[U](x: Self, a: A, f: fn(A) -> U) -> U
+
+impl Conv[Int] for Box:
+    fn conv[U](x: Box, a: Int, f: fn(Int) -> U) -> U:
+        f(a + x.n)
+
+impl Conv[Str] for Box:
+    fn conv[U](x: Box, a: Str, f: fn(Str) -> U) -> U:
+        f(a + "!")
+
+# an impl for a built-in type, a method whose parameter is an accumulator, and one that returns
+# its parameter with Self
+trait Fold:
+    fn fold_with[A](x: Self, init: A, f: fn(A, Int) -> A) -> A
+    fn tagged[U](x: Self, u: U) -> (Self, U)
+
+impl Fold for Array[Int]:
+    fn fold_with[A](x: Array[Int], init: A, f: fn(A, Int) -> A) -> A:
+        var acc = init
+        for v in x:
+            acc = f(acc, v)
+        acc
+    fn tagged[U](x: Array[Int], u: U) -> (Array[Int], U):
+        (x, u)
+
+# through a bound, with the method's own parameters decided by the caller's arguments
+fn twice[T: Mapper](x: T) -> Int:
+    let a = x.map_with(fn(n: Int): n + 1)
+    let b = x.map_with(fn(n: Int): n * 2)
+    a + b
+
+fn labels[T: Mapper](x: T) -> Str:
+    let s = x.map_with(fn(n: Int): f"n{n}")
+    let t = x.show_with(Pair(1, "p"))
+    s + "/" + t
+
+fn first[T: Mapper](x: T, a: Int, b: Str) -> Int:
+    x.pick(a, b)
+
+fn main():
+    let b = Box(5)
+    # on a value of the type, with the type of the result chosen by the closure
+    print(f"{b.map_with(fn(n: Int): n + 1)}")
+    print(b.map_with(fn(n: Int): f"s{n}"))
+    print(f"{b.map_with(fn(n: Int): n > 3)}")
+    print(f"{b.map_with(fn(n: Int): [n, n * 2])}")
+    # with the trait written out
+    print(f"{Mapper.map_with(b, fn(n: Int): n * 3)}")
+    # a parameter that appears in an argument only
+    print(f"{b.pick(1, "x")}")
+    print(b.pick("kept", 2))
+    # a bound of the method's own parameter
+    print(b.show_with(3))
+    print(b.show_with("text"))
+    print(b.show_with(Pair(2, "q")))
+    # through a bound
+    print(f"{twice(b)}")
+    print(labels(b))
+    print(f"{first(b, 11, "y")}")
+    # an impl for a generic type
+    let w = Wrapper("item")
+    print(f"{w.map_with(fn(n: Int): n + 100)}")
+    print(f"{twice(w)}")
+    print(w.show_with(1.5))
+    print(labels(Wrapper(3)))
+    # an impl for a built-in type
+    let xs = [1, 2, 3, 4]
+    print(f"{xs.fold_with(0, fn(a: Int, v: Int): a + v)}")
+    print(xs.fold_with("", fn(a: Str, v: Int): a + f"{v}"))
+    print(f"{xs.fold_with(true, fn(a: Bool, v: Int): a and v > 0)}")
+    print(f"{xs.tagged("tag")}")
+    print(f"{[9].tagged(2)}")
+    # a trait with a type parameter, the impl chosen by the argument
+    print(f"{b.conv(10, fn(n: Int): n * 2)}")
+    print(b.conv("hi", fn(s: Str): f"<{s}>"))

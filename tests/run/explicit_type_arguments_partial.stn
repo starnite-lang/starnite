@@ -1,0 +1,20 @@
+# Only the first type arguments of a construction written: the others come from the type that is
+# expected, so a literal takes the type the annotation gives it, not the default for its kind.
+type Pair[A, B] = struct(a: A, b: B)
+type Either[A, B] = Left(a: A) | Right(b: B)
+
+fn takes(p: Pair[Int, F32]) -> F32:
+    p.b
+
+fn main():
+    let p: Pair[Int, F32] = Pair[Int](1, 2.5)
+    print(f"{p.a} {p.b}")
+    # as an argument, and as the result of a function
+    print(f"{takes(Pair[Int](2, 0.5))}")
+    let e: Either[Int, F32] = Right[Int](1.5)
+    match e:
+        Left(a) -> print(f"left {a}")
+        Right(b) -> print(f"right {b}")
+    # nothing expected: the literal is a Float, as it always was
+    let q = Pair[Int](3, 1.25)
+    print(f"{q.a} {q.b}")

@@ -206,11 +206,11 @@ and lend_target env (cl : callee) : (tfn * (string * ty) list) option =
     | CFn (name, tys) ->
         let tf = Hashtbl.find env.prog.fns name in
         Some (tf, List.combine (List.map fst tf.fsig.stparams) (List.map (tsub env) tys))
-    | CTrait (tr, ta, m, self) -> (
+    | CTrait (tr, ta, m, self, own) -> (
         match resolve env tr (List.map (tsub env) ta) m (tsub env self) with
         | Some (f, ftys) ->
             let tf = Hashtbl.find env.prog.fns f in
-            Some (tf, List.combine (List.map fst tf.fsig.stparams) ftys)
+            Some (tf, List.combine (List.map fst tf.fsig.stparams) (ftys @ List.map (tsub env) own))
         | None -> None)
     | _ -> None
   in
@@ -286,7 +286,7 @@ and eval_call env (cl : callee) (targs : targ list) convs loc : value =
           let sub = List.combine (List.map fst tf.fsig.stparams) (List.map (tsub env) tys) in
           run (fun () -> invoke env tf sub vals)
       | CBuiltin (name, tys) -> run (fun () -> builtin env name (List.map (tsub env) tys) vals loc)
-      | CTrait (tr, ta, m, self) ->
+      | CTrait (tr, ta, m, self, own) ->
           let self = tsub env self in
           let ta = List.map (tsub env) ta in
           (* a call through a trait value runs the method of the hidden type *)
@@ -298,7 +298,8 @@ and eval_call env (cl : callee) (targs : targ list) convs loc : value =
           (match resolve env tr ta m self with
            | Some (f, ftys) ->
                let tf = Hashtbl.find env.prog.fns f in
-               let sub = List.combine (List.map fst tf.fsig.stparams) ftys in
+               (* the type parameters of the impl, then those of the method *)
+               let sub = List.combine (List.map fst tf.fsig.stparams) (ftys @ List.map (tsub env) own) in
                run (fun () -> invoke env tf sub vals)
            | None -> run (fun () -> (prim_trait env tr m self vals loc, vals)))
       | CClosure _ -> (
@@ -691,7 +692,7 @@ and describe_assert env (e : texpr) : string =
   match e.e with
   | XBin ((Eq | Ne | Lt | Le | Gt | Ge), a, b) ->
       Printf.sprintf "assertion failed: left = %s, right = %s" (show_value env a.ty (eval env a)) (show_value env b.ty (eval env b))
-  | XNot { e = XCall (CTrait ("Eq", _, _, t), [ a; b ], _); _ } | XCall (CTrait ("Eq", _, _, t), [ a; b ], _) ->
+  | XNot { e = XCall (CTrait ("Eq", _, _, t, _), [ a; b ], _); _ } | XCall (CTrait ("Eq", _, _, t, _), [ a; b ], _) ->
       Printf.sprintf "assertion failed: left = %s, right = %s" (show_value env t (eval env a.a)) (show_value env t (eval env b.a))
   | _ -> "assertion failed"
 

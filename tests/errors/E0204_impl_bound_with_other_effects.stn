@@ -1,0 +1,17 @@
+# expect: E0204 16:5
+# A bound whose trait argument is a function keeps the function's effects: the impl asks for the bound with
+# ! Oops where the trait states it with ! pure, so a type that has only the pure impl would reach a method
+# that dispatches through the failing one
+type Oops = Bad(n: Int)
+
+trait Make[F]:
+    fn make(m: Self) -> F
+
+trait Runner:
+    fn run[U: Make[fn(Int) -> Int ! pure]](x: Self, u: U) -> Int
+
+type Box = struct(n: Int)
+
+impl Runner for Box:
+    fn run[U: Make[fn(Int) -> Int ! Oops]](x: Box, u: U) -> Int:
+        x.n

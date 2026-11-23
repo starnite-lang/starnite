@@ -1,0 +1,10 @@
+# expect: E0101 9:17
+# the same for the impl: a method of impl[T] cannot have a type parameter T of its own
+trait Mapper:
+    fn map_with[U](x: Self, f: fn(Int) -> U) -> U
+
+type Wrapper[T] = struct(item: T)
+
+impl[T] Mapper for Wrapper[T]:
+    fn map_with[T](x: Wrapper[T], f: fn(Int) -> T) -> T:
+        f(1)

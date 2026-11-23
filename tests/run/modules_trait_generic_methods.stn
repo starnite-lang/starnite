@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A trait method with type parameters of its own, across modules: called on a type of the other
+# module, implemented for a type of this one, and reached through a bound of the other module's
+# generic function.
+import lib.mappers
+
+type Local = struct(k: Int)
+
+impl mappers.Mapper for Local:
+    fn map_with[U](x: Local, f: fn(Int) -> U) -> U:
+        f(x.k * 100)
+    fn show_with[W: Show](x: Local, extra: W) -> Str:
+        f"local {x.k} {extra}"
+
+fn main() ! io:
+    let b = mappers.Box(5)
+    print(f"{b.map_with(fn(n: Int): n + 1)}")
+    print(b.map_with(fn(n: Int): f"s{n}"))
+    print(b.show_with(true))
+    print(f"{mappers.twice(b)}")
+    let l = Local(2)
+    print(f"{l.map_with(fn(n: Int): n + 1)}")
+    print(f"{len(l.map_with(fn(n: Int): [n, n]))}")
+    print(l.show_with("x"))
+    print(f"{mappers.twice(l)}")

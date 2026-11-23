@@ -1,0 +1,4 @@
+# expect: E0204 4:5
+fn main():
+    print("a")
+    | print("b")

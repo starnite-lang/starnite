@@ -1,0 +1,10 @@
+# expect: E0204 10:17
+trait Shower:
+    fn show_with[U: Show](x: Self, extra: U) -> Str
+type Box = struct(n: Int)
+type Plain = struct(k: Int)
+impl Shower for Box:
+    fn show_with[V: Show](x: Box, extra: V) -> Str:
+        f"{x.n} {extra}"
+fn main():
+    print(Box(1).show_with(Plain(2)))
