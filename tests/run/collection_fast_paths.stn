@@ -41,6 +41,23 @@ fn main():
         if big[i - 1] > big[i]:
             ordered = false
     print(f"{ordered} {big[0]} {big[10000]} {big[19999]}")
+    # a counted loop of single pushes reserves once: a fresh array, one that already holds
+    # elements, and one that shares its buffer with a snapshot
+    var pairs: Array[(Int, Int)] = []
+    for i in 0..3000:
+        pairs.push((i, 3 * i))
+    let before = pairs
+    for i in 0..2000:
+        pairs.push((0 - i, i))
+    print(f"{len(pairs)} {len(before)} {pairs[2999].1} {pairs[4999].0} {before[2999].0}")
+    # a stride index that wraps: stores through it, then reads through it
+    var ring = filled(1000, 0)
+    for i in 0..5000:
+        ring[(i * 7) % 1000] = i
+    var seen = 0
+    for i in 0..5000:
+        seen += ring[(i * 993) % 1000]
+    print(f"{ring[0]} {ring[7]} {ring[999]} {seen}")
     # sum += e stores the checked add in place: the same value, and the same trap
     var total = 9223372036854775800
     let parts = [(1, 2), (3, 1)]

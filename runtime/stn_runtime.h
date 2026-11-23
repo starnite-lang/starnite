@@ -183,6 +183,7 @@ static inline void stn_array_push(StnArray** pa, const void* elem) {
     } else stn_array_push_slow(pa, elem);
 }
 void      stn_array_reserve(StnArray** a, int64_t extra);
+void      stn_array_reserve_hint(StnArray** a, uint64_t extra);
 StnArray* stn_array_slice(StnArray* a, int64_t lo, int64_t hi, const char* file, int line, int col);
 void      stn_array_extend(StnArray** a, StnArray* b);
 void      stn_array_insert(StnArray** a, int64_t i, const void* elem, const char* file, int line, int col);

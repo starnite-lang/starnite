@@ -1784,6 +1784,20 @@ and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) ?pop_array ?i
         | TPVar item, Some code, TInt (IInt | I64) -> affine_array_append fc item code
         | _ -> None
       in
+      (* a body that is one unconditional push onto a plain local array: the count is known *)
+      (match pop_array, index_guard, append, indexed_body with
+       | None, None, None, Some code ->
+           let action = match code.e with
+             | XBlock ([ { st = SExpr call; _ } ], { e = XLit LUnit; _ }) -> call
+             | XBlock ([], call) -> call
+             | _ -> code
+           in
+           (match action.e, single_array_call fc "push@Array" code with
+            | XCall (CBuiltin ("push@Array", _), { a = { e = XVar w; _ }; _ } :: _, _), Some v when w.vid = v.vid ->
+                let array = var_read fc v in
+                line fc "if (%s < %s) stn_array_reserve_hint(&%s, (uint64_t)%s - (uint64_t)%s);" lo hi array hi lo
+            | _ -> ())
+       | _ -> ());
       (match pop_array, index_guard, unique_array, append with
        | None, None, _, Some (v, base) ->
            let array = var_read fc v in
@@ -1850,10 +1864,28 @@ and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) ?pop_array ?i
                  let step = Int64.rem stride modulus in
                  let cutoff = Int64.sub modulus step in
                  let residue = fresh st "_index" in
-                 line fc "int64_t %s = (int64_t)(((uint64_t)%s * UINT64_C(%Ld)) %% UINT64_C(%Ld));"
+                 line fc "uint64_t %s = ((uint64_t)%s * UINT64_C(%Ld)) %% UINT64_C(%Ld);"
                    residue lo stride modulus;
-                 fc.loop_indices <- (index, residue) :: saved_indices;
-                 Printf.sprintf ", %s = %s >= INT64_C(%Ld) ? %s - INT64_C(%Ld) : %s + INT64_C(%Ld)"
+                 fc.loop_indices <- (index, Printf.sprintf "((int64_t)%s)" residue) :: saved_indices;
+                 (* A loop that stores through the index takes the smaller of the two candidates,
+                    unsigned: below the cutoff the subtraction wraps to a huge value, so the sum
+                    wins. That compiles to a conditional move; a wrap mispredicted while stores
+                    are in flight costs far more than the longer chain. A loop that only reads
+                    is bound by that chain instead, and keeps the plain selection. *)
+                 let stores =
+                   match Option.map (fun (b : texpr) -> b.e) indexed_body with
+                   | Some (XBlock (stmts, _)) ->
+                       List.exists (fun (s : tstmt) ->
+                           match s.st with
+                           | SAssign ({ path = PIndex _ :: _; _ }, _) -> true
+                           | _ -> false) stmts
+                   | _ -> false
+                 in
+                 if stores then
+                   Printf.sprintf ", %s = (%s - UINT64_C(%Ld) < %s + UINT64_C(%Ld)) ? %s - UINT64_C(%Ld) : %s + UINT64_C(%Ld)"
+                     residue residue cutoff residue step residue cutoff residue step
+                 else
+                 Printf.sprintf ", %s = %s >= UINT64_C(%Ld) ? %s - UINT64_C(%Ld) : %s + UINT64_C(%Ld)"
                    residue residue cutoff residue cutoff residue step
              | _ -> ""
            in

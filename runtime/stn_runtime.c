@@ -275,6 +275,41 @@ void stn_array_copy_for_write(StnArray** pa) {
     *pa = b;
 }
 
+/* A counted loop that pushes once per turn says how many elements are coming. Growing once to that
+   size saves the copies of doubling and leaves no slack. It is only a hint: it never traps, an
+   array that is shared or small is left alone, and a failed allocation leaves ordinary growth to
+   report it when a push actually needs the room. */
+void stn_array_reserve_hint(StnArray** pa, uint64_t extra) {
+    StnArray* a = *pa;
+    size_t size = a->ops->size;
+    if (!stn_unique(a) || size == 0) return;
+    if (extra > (uint64_t)STN_MAX_ALLOC || (uint64_t)a->len + extra > (uint64_t)STN_MAX_ALLOC) return;
+    int64_t need = a->len + (int64_t)extra;
+    if (need <= a->cap || (uint64_t)need > (uint64_t)STN_MAX_ALLOC / size) return;
+    size_t bytes = sizeof(StnArray) + (size_t)need * size;
+    if (bytes <= (size_t)STN_CLASSES * 16) return;
+#ifndef STN_DEBUG
+    if (a->h.size_class == 0 && sizeof(StnArray) + (size_t)a->cap * size > (size_t)STN_CLASSES * 16) {
+        StnArray* grown = (StnArray*)realloc(a, bytes);
+        if (!grown) return;
+        grown->cap = need;
+        *pa = grown;
+        return;
+    }
+#endif
+    StnArray* b = (StnArray*)malloc(bytes);
+    if (!b) return;
+    memcpy(b, a, sizeof(StnArray) + (size_t)a->len * size);
+    b->h.rc = 1; b->h.flags = 0; b->h.size_class = 0;
+    b->cap = need;
+#ifdef STN_DEBUG
+    stn_live_objects++;
+#endif
+    /* the elements moved; free the old buffer without dropping them */
+    stn_free(a);
+    *pa = b;
+}
+
 void stn_array_reserve(StnArray** pa, int64_t extra) {
     StnArray* a = *pa;
     int64_t need = a->len + extra;
