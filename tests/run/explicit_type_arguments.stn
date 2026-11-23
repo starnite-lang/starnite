@@ -1,0 +1,49 @@
+# Section 5.1: the type arguments of a generic function or type can be written in brackets before
+# the call, `parse[Int](text)`, in place of being inferred. Written for the first of the
+# parameters, the rest are inferred; written, they decide what a literal is; and a call whose
+# parameters nothing else settles needs them.
+type Box[T] = struct(item: T)
+type List[T] = Nil | Cons(head: T, tail: List[T])
+
+fn empty[T]() -> Array[T]:
+    []
+
+fn first[T](xs: Array[T]) -> T?:
+    if len(xs) == 0:
+        None
+    else:
+        Some(xs[0])
+
+fn pair[A, B](a: A, b: B) -> (A, B):
+    (a, b)
+
+fn label[T: Show](x: T) -> Str:
+    f"[{x}]"
+
+fn wrap[T](x: T) -> Box[T]:
+    Box[T](x)
+
+fn length[T](xs: List[T]) -> Int:
+    match xs:
+        Nil -> 0
+        Cons(_, rest) -> 1 + length[T](rest)
+
+fn main():
+    # nothing but the type arguments settles the parameter
+    let e = empty[Int]()
+    let s = empty[Str]()
+    print(f"{len(e)} {len(s)}")
+    # written, and the same as inferred
+    print(f"{first[Int]([4, 5])} {first[Int]([])} {first([6])}")
+    # written, they decide the type of a literal
+    print(f"{pair[Float, Int](1.0, 2)} {pair[I32, Str](7, "x")}")
+    # only the first written
+    print(f"{pair[Str]("k", 3)}")
+    # a bound holds for what is written
+    print(label[Int](3) + label[Bool](true))
+    # a generic type
+    let b = Box[Float](2.5)
+    let nested = Box[Array[Int]]([1, 2])
+    print(f"{b.item} {len(nested.item)} {wrap[Str]("w").item}")
+    let l = Cons[Int](1, Cons(2, Nil))
+    print(f"{length(l)} {length[Int](l)}")

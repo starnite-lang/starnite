@@ -475,7 +475,7 @@ type fctx = {
   mutable loops : int;
   declared : ty list option;        (* declared error list, if any *)
   mutable obligations : (ty * string * ty list * loc) list;
-  mutable unsolved : (ty * loc) list;
+  mutable unsolved : (ty * loc * string) list;   (* types that must be known by the end of the function, and what to say if not *)
   mutable moved : (int * loc) list;        (* variables moved by an explicit take (section 4.2) *)
   mutable lent : (int * loc) list;         (* roots iterated by an enclosing 'for ... in mut' *)
   closure_caps : (int, var list) Hashtbl.t;  (* captures of closures bound to names *)
@@ -548,7 +548,7 @@ type snapshot = {
   sn_frames : (frame * (string * var) list * var list) list;
   sn_ret : ty; sn_errs : ty list; sn_io : bool; sn_in_try : int; sn_loops : int;
   sn_obligations : (ty * string * ty list * loc) list;
-  sn_unsolved : (ty * loc) list;
+  sn_unsolved : (ty * loc * string) list;
   sn_moved : (int * loc) list;
   sn_lent : (int * loc) list;
   sn_lambdas : lambda list;
@@ -851,7 +851,7 @@ let ensure_const : (tables -> string -> unit) ref = ref (fun _ _ -> ())
 let lend_of tb (te : texpr) : bool option =
   match te.e with
   | XCall (CFn (u, _), _, _) -> (match Hashtbl.find_opt tb.fns u with Some sg -> sg.slend | None -> None)
-  | XCall (CTrait (tr, _, m, _), _, _) -> (
+  | XCall (CTrait (tr, _, m, _, _), _, _) -> (
       match Hashtbl.find_opt tb.traits tr with
       | Some t -> (match List.assoc_opt m t.trmethods_ with Some sg -> sg.slend | None -> None)
       | None -> None)
@@ -1068,7 +1068,6 @@ and check_or_infer c (e : Syntax.expr) (expected : ty option) : texpr =
   | Lit (LInt s) -> (
       match exp with
       | Some (TInt k) -> int_fits k s l; mk (XLit (LInt s)) (TInt k) l
-      | Some (TFloat | TF32 as t) -> mk (XLit (LFloat (float_of_string s))) t l
       | _ -> int_fits IInt s l; mk (XLit (LInt s)) (TInt IInt) l)
   | Lit (LFloat f) -> (
       match exp with Some TF32 -> mk (XLit (LFloat f)) TF32 l | _ -> mk (XLit (LFloat f)) TFloat l)
@@ -1103,7 +1102,7 @@ and check_or_infer c (e : Syntax.expr) (expected : ty option) : texpr =
       mk (XTuple tes) (TTuple (List.map (fun t -> t.ty) tes)) l
   | ArrayLit es ->
       let elt = match exp with Some (TArray t) -> t | _ -> fresh () in
-      if es = [] then c.unsolved <- (elt, l) :: c.unsolved;
+      if es = [] then c.unsolved <- (elt, l, "the element type of this empty literal is never settled; add an annotation") :: c.unsolved;
       let tes = List.map (fun e -> check c e elt) es in
       mk (XArray tes) (TArray elt) l
   | Comp (body, comps) ->
@@ -1150,7 +1149,7 @@ and show_expr c (te : texpr) : texpr =
       if find_impl (rtab_of c.tb) ~bounds:c.tparams "Show" [] t = None && (match t with TVar _ -> false | _ -> true) then
         err "E0204" te.l "%s does not implement Show" (show_ty t);
       if (match t with TVar _ -> true | _ -> false) then c.obligations <- (t, "Show", [], te.l) :: c.obligations;
-      mk (XCall (CTrait ("Show", [], "show", te.ty), [ { amode = MBorrow; a = te } ], [])) TStr te.l
+      mk (XCall (CTrait ("Show", [], "show", te.ty, []), [ { amode = MBorrow; a = te } ], [])) TStr te.l
 
 and check_comp c (cp : Syntax.comp) : tcomp =
   let src, elt = check_iter c cp.citer MBorrow in
@@ -1193,6 +1192,8 @@ and infer_name c l n exp : texpr =
                   let sg = Hashtbl.find c.tb.fns u in
                   if sg.slend <> None then
                     err "E0320" l "'%s' lends a place, so it cannot be used as a function value" n;
+                  (* a built-in has no body to make a closure object of, on the interpreter and in C alike *)
+                  if is_builtin u then err "E0201" l "'%s' is built in, so it is called directly; wrap it to use it as a value, as in fn(...): %s(...)" n n;
                   let s, ps, ret, eff = instantiate sg in
                   let ty = TFn { fps = List.map (fun (m, _, t, _) -> (m, t)) ps; fret = ret; feff = eff } in
                   (match exp with Some t -> unify_at l t ty | None -> ());
@@ -1444,11 +1445,24 @@ and check_args c l ~tenv ~(receiver : texpr option) params (args : Syntax.arg li
   let st = { a_tenv = tenv; a_receiver = receiver; a_params = params; a_args = args; a_matched = None } in
   args_finish c l st (args_check c l st (List.init (List.length params) Fun.id))
 
-and call_sig c l (u : string) ~receiver (args : Syntax.arg list) exp : texpr =
+and call_sig c l (u : string) ~receiver ?(explicit = []) (args : Syntax.arg list) exp : texpr =
   let sg = Hashtbl.find c.tb.fns u in
   (* the budget of retries belongs to one outermost call and the calls nested in it *)
   if !speculating = 0 then c.retries := retry_budget;
   let s, ps, ret, eff = instantiate sg in
+  (* explicit type arguments, `first[Int](xs)` (section 5.1), are the first of the function's own *)
+  if explicit <> [] then begin
+    if sg.stparams = [] then err "E0102" l "type arguments after '%s', which is not generic" sg.sdisplay;
+    if List.length explicit > List.length s then
+      err "E0203" l "%s takes %d type argument(s), found %d" sg.sdisplay (List.length s) (List.length explicit);
+    List.iteri (fun i t -> unify_at l (snd (List.nth s i)) t) explicit
+  end;
+  (* what the call makes of a type parameter is found from its arguments, or from the context of the call
+     (section 5.2); a parameter that nothing settles is for the caller to write *)
+  List.iter
+    (fun (p, v) ->
+      c.unsolved <- (v, l, Printf.sprintf "the type parameter %s of %s is never settled by this call; write the type arguments, as in %s[Int](...), or give the value it returns a type" p sg.sdisplay sg.sdisplay) :: c.unsolved)
+    s;
   let st = { a_tenv = s; a_receiver = receiver; a_params = ps; a_args = args; a_matched = None } in
   let n = List.length ps in
   let all_slots = List.init n Fun.id in
@@ -1632,6 +1646,46 @@ and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
       in
       let u = pick_overload c l n cands first in
       call_sig c l u ~receiver:None args exp
+  | Bracket (b, bargs) when (match (norm_qual c b).d with Name n -> lookup c n = None && lookup_fns c n <> [] | _ -> false) ->
+      (* a generic function with its type arguments written: first[Int](xs) *)
+      let n = match (norm_qual c b).d with Name n -> n | _ -> assert false in
+      let tys = List.map (explicit_type_arg c) bargs in
+      let cands = lookup_fns c n in
+      let cands =
+        match List.filter (fun u -> List.length (Hashtbl.find c.tb.fns u).stparams >= List.length tys) cands with [] -> cands | fit -> fit
+      in
+      let first =
+        if List.length cands > 1 then (match args with a :: _ -> Some (infer c a.aexpr) | [] -> None) else None
+      in
+      let u = pick_overload c l n cands first in
+      call_sig c l u ~receiver:None ~explicit:tys args exp
+  | Bracket (b, bargs)
+    when (match (norm_qual c b).d with
+          | Name n -> lookup c n = None && found_opt (find_decl c.tb n) <> None
+          | _ -> false) ->
+      (* a generic type with its type arguments written: Box[Int](5), Cons[Int](1, Nil) *)
+      let n = match (norm_qual c b).d with Name n -> n | _ -> assert false in
+      let tys = List.map (explicit_type_arg c) bargs in
+      let k, _ = Option.get (found_opt (find_decl c.tb n)) in
+      let d = Hashtbl.find c.tb.decls k in
+      if d.dparams = [] then err "E0102" l "type arguments after '%s', which is not generic" n;
+      if List.length tys > List.length d.dparams then
+        err "E0203" l "%s takes %d type argument(s), found %d" n (List.length d.dparams) (List.length tys);
+      (* the type the value will have, as the expected type that the construction starts from *)
+      let padded = padded_type_args c exp k tys (List.length d.dparams) in
+      construct_struct c l k args (Some (TNamed (k, padded)))
+  | Bracket (b, bargs)
+    when (match (norm_qual c b).d with
+          | Name n -> lookup c n = None && found_opt (find_variant c.tb n) <> None
+          | _ -> false) ->
+      let n = match (norm_qual c b).d with Name n -> n | _ -> assert false in
+      let tys = List.map (explicit_type_arg c) bargs in
+      let _, (tn, idx) = Option.get (found_opt (find_variant c.tb n)) in
+      let d = Hashtbl.find c.tb.decls tn in
+      if List.length tys > List.length d.dparams then
+        err "E0203" l "%s takes %d type argument(s), found %d" n (List.length d.dparams) (List.length tys);
+      let padded = padded_type_args c exp tn tys (List.length d.dparams) in
+      construct_variant c l tn idx n args (Some (TNamed (tn, padded)))
   | Field (b, m) -> infer_method c l b m args exp
   | _ ->
       (* call of a function value *)
@@ -1645,11 +1699,40 @@ and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
        | TVar _ -> err "E0201" l "the type of this function value must be known; add an annotation"
        | t -> err "E0201" l "%s is not a function" (show_ty t))
 
+(* The type arguments that a value of a generic type is made with are found from its fields, or from where
+   the value goes, as those of a call are; if nothing settles one by the end of the function, the value needs
+   an annotation: `let x: Int? = None`. *)
+and settle_by_the_end c l (what : string) (s : (string * ty) list) =
+  List.iter
+    (fun (p, v) ->
+      c.unsolved <-
+        (v, l, Printf.sprintf "the type parameter %s of %s is never settled by this value; give it a type with an annotation" p what) :: c.unsolved)
+    s
+
+(* The type arguments a construction starts from when only the first few are written, Pair[Int](1, 2.5):
+   the written ones, then what the expected type says of the rest (an annotation of Pair[Int, F32] settles
+   the second as F32, so the 2.5 is an F32), then fresh variables. *)
+and padded_type_args _c (exp : ty option) key tys n =
+  let from_exp =
+    match Option.map repr exp with
+    | Some (TNamed (k, eargs)) when k = key && List.length eargs = n -> Some eargs
+    | _ -> None
+  in
+  tys @ List.init (n - List.length tys) (fun i -> match from_exp with Some eargs -> List.nth eargs (List.length tys + i) | None -> fresh ())
+
+(* a type argument written in brackets: a type, or a name that the parser could not tell from an expression *)
+and explicit_type_arg c (a : Syntax.barg) : ty =
+  match a with
+  | BType t -> conv_ty c.tb c.tnames c.self_ty t
+  | BExpr { d = Name n; loc } -> conv_ty c.tb c.tnames c.self_ty (TyPath ([ n ], [], loc))
+  | BExpr e -> err "E0201" e.loc "a type argument is a type"
+
 and construct_struct c l n args exp : texpr =
   let d = Hashtbl.find c.tb.decls n in
   match d.dbody with
   | DStruct fs ->
       let s = List.map (fun p -> (p, fresh ())) d.dparams in
+      settle_by_the_end c l n s;
       let ty = TNamed (n, List.map snd s) in
       (match exp with Some t -> (try unify t ty with Mismatch -> ()) | None -> ());
       let defaults = struct_defaults c n in
@@ -1670,6 +1753,7 @@ and construct_variant c l tn idx vn (args : Syntax.arg list) exp : texpr =
       let shown_vn = vn in
       let vn = v.vname_ in
       let s = List.map (fun p -> (p, fresh ())) d.dparams in
+      settle_by_the_end c l shown_vn s;
       let ty = TNamed (tn, List.map snd s) in
       (match exp with
        | Some t -> (try unify t ty with Mismatch -> ())
@@ -1858,7 +1942,11 @@ and infer_method c l (b : Syntax.expr) m (args : Syntax.arg list) exp : texpr =
 and trait_call c l tn trargs m (sg : fsig) self (receiver : texpr option) args exp : texpr =
   let tr = Hashtbl.find c.tb.traits tn in
   let ta = List.map (fun _ -> fresh ()) tr.trparams in
-  let s = ("Self", self) :: List.combine tr.trparams ta in
+  (* the method's own type parameters, those of its signature that are not the trait's, are as free
+     as those of a function: what the call makes of them is found from its arguments *)
+  let own = List.filter (fun (p, _) -> not (List.mem p tr.trparams)) sg.stparams in
+  let own_vars = List.map (fun (p, _) -> (p, fresh ())) own in
+  let s = (("Self", self) :: List.combine tr.trparams ta) @ own_vars in
   let ps = List.map (fun (md, n, t, d) -> (md, n, subst s t, d)) sg.sparams in
   let ret = subst s sg.sret in
   (* pick the trait arguments from the bound, or from the one impl that fits Self *)
@@ -1885,11 +1973,19 @@ and trait_call c l tn trargs m (sg : fsig) self (receiver : texpr option) args e
            let sb = List.map (fun (p, _) -> (p, try List.assoc p sb with Not_found -> fresh ())) im.itparams in
            List.iter2 (fun a b -> try unify a (subst sb b) with Mismatch -> ()) ta im.itargs_
        | _ -> ()));
+  List.iter
+    (fun (p, v) ->
+      c.unsolved <- (v, l, Printf.sprintf "the type parameter %s of %s is never settled by this call; give the value it returns a type with an annotation" p m) :: c.unsolved)
+    own_vars;
   let targs, poly = check_args c l ~tenv:[] ~receiver ps args in
   c.obligations <- (self, tn, ta, l) :: c.obligations;
+  (* a bound of an own type parameter is an obligation on the type the call made of it *)
+  List.iter2
+    (fun (_, bs) (_, v) -> List.iter (fun (btr, bargs) -> c.obligations <- (v, btr, List.map (subst s) bargs, l) :: c.obligations) bs)
+    own own_vars;
   (* the method's own effects, and those of any function argument whose effects are open *)
   let convs = add_eff c l { sg.seff with errs = List.map (subst s) sg.seff.errs } @ List.concat_map (add_eff c l) poly in
-  mk (XCall (CTrait (tn, ta, m, self), targs, convs)) ret l
+  mk (XCall (CTrait (tn, ta, m, self, List.map snd own_vars), targs, convs)) ret l
 
 and infer_bracket c l (b : Syntax.expr) (args : Syntax.barg list) exp : texpr =
   (* explicit type arguments: parse[Int](text) are handled by the call; here: indexing *)
@@ -1902,7 +1998,8 @@ and infer_bracket c l (b : Syntax.expr) (args : Syntax.barg list) exp : texpr =
        | t -> err "E0201" l "%s cannot be sliced" (show_ty t))
   | [ BExpr i ] -> (
       match (norm_qual c b).d with
-      | Name n when lookup c n = None && lookup_fns c n <> [] -> err "E0102" l "explicit type arguments arrive later; '%s' infers them" n
+      | Name n when lookup c n = None && lookup_fns c n <> [] ->
+          err "E0102" l "the type arguments of '%s' belong to a call, as in %s[Int](...)" n n
       | _ ->
           let tb = infer c b in
           match repr tb.ty with
@@ -2030,20 +2127,25 @@ and infer_binop c l op a b exp : texpr =
                        err "E0204" l "%s does not implement %s, so '%s' is not defined on it" (show_ty t) tr op);
                 c.obligations <- (t, tr, [ tb.ty ], l) :: c.obligations;
                 let convs = add_eff c l sg.seff in
-                mk (XCall (CTrait (tr, [ tb.ty ], String.lowercase_ascii tr, t), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], convs)) t l
+                mk (XCall (CTrait (tr, [ tb.ty ], String.lowercase_ascii tr, t, []), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], convs)) t l
             | None -> err "E0204" l "'%s' is not defined on %s" op (show_ty t))
       end else begin
-        let bop = List.assoc op cmp in
+        (* the operators that are left are the comparisons, and the set operators | and &, which arrive with sets *)
+        let bop =
+          match List.assoc_opt op cmp with
+          | Some b -> b
+          | None -> err "E0204" l "'%s' is not defined on %s (the set operators arrive with sets, in milestone 2)" op (show_ty t)
+        in
         unify_at tb.l ta.ty tb.ty;
         let eqop = bop = Eq || bop = Ne in
         if prim && (eqop || t <> TUnit) then mk (XBin (bop, ta, tb)) TBool l
         else if eqop then begin
           c.obligations <- (t, "Eq", [], l) :: c.obligations;
-          let call = mk (XCall (CTrait ("Eq", [], "eq", t), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], [])) TBool l in
+          let call = mk (XCall (CTrait ("Eq", [], "eq", t, []), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], [])) TBool l in
           if bop = Eq then call else mk (XNot call) TBool l
         end else begin
           c.obligations <- (t, "Ord", [], l) :: c.obligations;
-          let call = mk (XCall (CTrait ("Ord", [], "cmp", t), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], [])) (TInt IInt) l in
+          let call = mk (XCall (CTrait ("Ord", [], "cmp", t, []), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], [])) (TInt IInt) l in
           mk (XBin (bop, call, mk (XLit (LInt "0")) (TInt IInt) l)) TBool l
         end
       end
@@ -2157,7 +2259,7 @@ and infer_binop_typed c l op (ta : texpr) (b : Syntax.expr) : texpr =
          && not (List.exists (fun im -> im.itrait_ = tr && (let s = ref [] in match_ty (List.map fst im.itparams) s im.ifor_ t)) c.tb.impls) then
         err "E0204" l "%s does not implement %s" (show_ty t) tr;
       c.obligations <- (t, tr, [ tb.ty ], l) :: c.obligations;
-      mk (XCall (CTrait (tr, [ tb.ty ], String.lowercase_ascii tr, t), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], [])) t l)
+      mk (XCall (CTrait (tr, [ tb.ty ], String.lowercase_ascii tr, t, []), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], [])) t l)
 
 (* ---------- patterns ---------- *)
 
@@ -2475,7 +2577,7 @@ let rec zonk_e (te : texpr) : texpr =
         let cl = match cl with
           | CFn (n, ts) -> CFn (n, List.map zonk ts)
           | CBuiltin (n, ts) -> CBuiltin (n, List.map zonk ts)
-          | CTrait (t, ta, m, s) -> CTrait (t, List.map zonk ta, m, zonk s)
+          | CTrait (t, ta, m, s, o) -> CTrait (t, List.map zonk ta, m, zonk s, List.map zonk o)
           | CClosure f -> CClosure (z f) in
         XCall (cl, List.map (fun a -> { a with a = z a.a }) args,
                List.map (fun cv -> { cv with cfrom = zonk cv.cfrom; cto = zonk cv.cto }) convs)
@@ -2568,9 +2670,18 @@ let check_distinct_fields what (fs : Syntax.field list) =
       | None -> ())
     fs
 
-let tparams_of tb (gs : gparam list) self =
+(* [outer] are the names of the parameters of what encloses the declaration (the trait or the impl of a method),
+   which the bounds may name: fn map[U: Conv[A]](...) in trait Mapper[A] *)
+let tparams_of ?(outer = []) tb (gs : gparam list) self =
   check_distinct_generics gs;
-  let names = List.map (fun g -> g.gname) gs in
+  (* a method's own parameter may not have the name of one of the trait or impl around it: both are the same
+     name in the method's signature, and the one would hide the other *)
+  List.iter
+    (fun (g : gparam) ->
+      if List.mem g.gname outer then
+        err "E0101" g.gloc "type parameter '%s' is already a type parameter of the trait or impl around this method" g.gname)
+    gs;
+  let names = outer @ List.map (fun g -> g.gname) gs in
   List.map
     (fun g ->
       ( g.gname,
@@ -2598,7 +2709,7 @@ let make_sig tb ~modname ~uname (fd : Syntax.fn_def) (extra_tps : (string * (str
     (fun (p : Syntax.param) ->
       match p.pdefault with Some e -> default_modules := (e, modname) :: !default_modules | None -> ())
     fd.fparams;
-  let own = tparams_of tb fd.fgenerics self in
+  let own = tparams_of ~outer:(List.map fst extra_tps) tb fd.fgenerics self in
   let tps = extra_tps @ own in
   let names = List.map fst tps in
   let params =
@@ -2818,6 +2929,23 @@ let declare_items tb modname (items : item list) =
                 let canon names = List.mapi (fun k n -> (n, TParam (Printf.sprintf "#m%d" k))) names in
                 let ts = ("Self", fty) :: List.combine info.trparams targs @ canon own_t in
                 let impl_t t = subst (canon own_i) t in
+                (* a caller checks the bounds the trait states, so the impl may not ask for more of a
+                   type parameter of its method: each bound of the impl's must be one of the trait's *)
+                let own_b (s : fsig) outer = List.filteri (fun i _ -> i >= outer) s.stparams in
+                List.iter2
+                  (fun (pn, ibs) (_, tbs) ->
+                    List.iter
+                      (fun (btr, bargs) ->
+                        let want = List.map impl_t bargs in
+                        let stated (ttr, targs_) =
+                          ttr = btr && List.length targs_ = List.length want
+                          && List.for_all2 ty_equal_eff want (List.map (subst ts) targs_)
+                        in
+                        if not (List.exists stated tbs) then
+                          err "E0204" fd.floc "type parameter '%s' of '%s' has the bound %s in the impl, which trait %s does not state for it"
+                            pn fd.fname btr trn)
+                      ibs)
+                  (own_b sg (List.length tps)) (own_b tsig (List.length info.trparams));
                 (* for messages: the trait's own names for its method's type parameters *)
                 let shown t = show_ty (subst (List.mapi (fun k n -> (Printf.sprintf "#m%d" k, TParam n)) own_t) t) in
                 if List.length sg.sparams <> List.length tsig.sparams then
@@ -2907,7 +3035,7 @@ let finish_ctx c l =
       else if find_impl (rtab_of c.tb) ~bounds:c.tparams tr (List.map zonk ta) t = None then
         err "E0204" l "%s does not implement %s" (show_ty t) tr)
     c.obligations;
-  List.iter (fun (t, l) -> if has_tvar t then err "E0210" l "the element type of this empty literal is never settled; add an annotation") c.unsolved
+  List.iter (fun (t, l, msg) -> if has_tvar t then err "E0210" l "%s" msg) (List.rev c.unsolved)
 
 (* E0322 on the syntax, before types: a lend function's body is a block whose every path
    ends with exactly one lend, with nothing after it and no return *)

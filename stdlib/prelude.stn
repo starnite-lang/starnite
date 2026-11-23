@@ -158,6 +158,12 @@ fn reverse*[T](mut xs: Array[T]):
         i += 1
         j -= 1
 
+# two elements of one array change places: the part of the array that two mut arguments cannot both be
+fn swap*[T](mut xs: Array[T], i: Int, j: Int):
+    let t = xs[i]
+    xs[i] = xs[j]
+    xs[j] = t
+
 fn sort*[T: Ord](mut xs: Array[T]):
     # insertion sort for short arrays, merge sort otherwise; stable
     let n = len(xs)
@@ -198,3 +204,19 @@ fn sort*[T: Ord](mut xs: Array[T]):
         xs[k] = right[j]
         j += 1
         k += 1
+
+# ---- strings, written in Starnite ----
+# the pieces between runs of white space: a space, a tab, a newline or a carriage return
+fn words*(s: Str) -> Array[Str]:
+    var out: Array[Str] = []
+    var cur = ""
+    for c in chars(s):
+        if c == ' ' or c == '\t' or c == '\n' or c == '\r':
+            if len(cur) > 0:
+                out.push(cur)
+                cur = ""
+        else:
+            cur = cur + f"{c}"
+    if len(cur) > 0:
+        out.push(cur)
+    out

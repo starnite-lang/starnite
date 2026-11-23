@@ -1,0 +1,6 @@
+# expect: E0203 5:14
+fn empty[T]() -> Array[T]:
+    []
+fn main():
+    let xs = empty[Int, Str]()
+    print(f"{len(xs)}")

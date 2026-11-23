@@ -1,0 +1,22 @@
+# expect: E0204 17:5
+# an impl may not ask more of a type parameter of its method than the trait does: a caller checks the
+# bounds of the trait, so a Bool would reach an impl that needs an Extra
+trait Extra:
+    fn extra(x: Self) -> Int
+
+impl Extra for Int:
+    fn extra(x: Int) -> Int:
+        x
+
+trait Mapper:
+    fn map[U](x: Self, v: U) -> Int
+
+type Box = struct(n: Int)
+
+impl Mapper for Box:
+    fn map[U: Extra](x: Box, v: U) -> Int:
+        v.extra() + x.n
+
+fn main():
+    let r = Box(1).map(true)
+    print(f"{r}")

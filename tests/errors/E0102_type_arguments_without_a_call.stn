@@ -1,0 +1,9 @@
+# expect: E0102 8:13
+fn first[T](xs: Array[T]) -> T?:
+    if len(xs) == 0:
+        None
+    else:
+        Some(xs[0])
+fn main():
+    let f = first[Int]
+    print("x")

@@ -1,0 +1,10 @@
+# expect: E0210 9:20
+trait Maker:
+    fn make[U](x: Self) -> Array[U]
+type Box = struct(n: Int)
+impl Maker for Box:
+    fn make[U](x: Box) -> Array[U]:
+        []
+fn main():
+    let xs = Box(1).make()
+    print(f"{len(xs)}")

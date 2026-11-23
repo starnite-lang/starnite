@@ -1,0 +1,5 @@
+# expect: E0210 4:13
+type Wrapper[T] = struct(item: T)
+fn main():
+    let w = Wrapper(None)
+    print("w")

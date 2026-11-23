@@ -1,0 +1,13 @@
+# expect: E0204 12:5
+# the same for a bound that has type arguments: the impl names Conv[V], the trait Conv[Int]
+trait Conv[T]:
+    fn conv(x: Self) -> T
+
+trait Mapper:
+    fn map[U: Conv[Int]](x: Self, v: U) -> Int
+
+type Box = struct(n: Int)
+
+impl Mapper for Box:
+    fn map[U: Conv[Str]](x: Box, v: U) -> Int:
+        x.n

@@ -1,0 +1,10 @@
+# A program that recurses without end runs its stack out. That is a trap, like an index out of range
+# or a division by zero: the output so far is written, the report says what happened, and the status
+# is 2, on the interpreter and in C alike.
+fn forever(n: Int) -> Int:
+    1 + forever(n + 1)
+
+fn main():
+    print("start")
+    print(f"{forever(0)}")
+    print("not reached")

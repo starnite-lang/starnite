@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# A trait whose method has a type parameter of its own, for modules_trait_generic_methods.
+trait Mapper*:
+    fn map_with[U](x: Self, f: fn(Int) -> U) -> U
+    fn show_with[U: Show](x: Self, extra: U) -> Str
+
+type Box* = struct(n: Int)
+
+impl Mapper for Box:
+    fn map_with[U](x: Box, f: fn(Int) -> U) -> U:
+        f(x.n)
+    fn show_with[V: Show](x: Box, extra: V) -> Str:
+        f"box {x.n} {extra}"
+
+fn twice*[T: Mapper](x: T) -> Int:
+    x.map_with(fn(n: Int): n + 1) + x.map_with(fn(n: Int): n * 2)

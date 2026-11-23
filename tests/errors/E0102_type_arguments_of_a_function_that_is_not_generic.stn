@@ -1,0 +1,5 @@
+# expect: E0102 5:14
+fn double(x: Int) -> Int:
+    x * 2
+fn main():
+    print(f"{double[Int](4)}")

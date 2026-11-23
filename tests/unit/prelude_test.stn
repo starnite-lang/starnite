@@ -21,7 +21,8 @@ test "sort is stable and ordered":
 test "options":
     let a: Int? = Some(3)
     assert a.or(0) == 3
-    assert is_none(None.or(None))
+    let none: Int? = None.or(None)
+    assert is_none(none)
     assert a == Some(3)
 
 test "array value semantics":
@@ -44,3 +45,16 @@ test "a return ends the test normally":
     if true:
         return
     assert false
+
+test "swap exchanges two elements":
+    var xs = [10, 20, 30]
+    swap(mut xs, 0, 2)
+    assert xs == [30, 20, 10]
+    swap(mut xs, 1, 1)
+    assert xs == [30, 20, 10]
+
+test "words splits at white space":
+    assert words("  the quick\tbrown\n fox ") == ["the", "quick", "brown", "fox"]
+    assert len(words("")) == 0
+    assert len(words(" \t\n")) == 0
+    assert words("one") == ["one"]

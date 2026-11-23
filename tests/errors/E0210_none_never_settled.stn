@@ -1,0 +1,4 @@
+# expect: E0210 3:13
+fn main():
+    let x = None
+    print("x")
