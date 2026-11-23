@@ -122,7 +122,28 @@ What closed most of the gap:
 
 ## Collection and string benchmarks
 
-`bench/priority/run.sh BASE --all` compares 31 collection, string and scalar workloads with the same work in plain C, in C tuned by hand against the runtime, and in Rust with overflow checks on, on each CPU, with checksums compared every round. On the 4-CPU x86-64 host it was last run on, 28 workloads were within 3% of the fastest of the three and the other three within 4.4%, with peak memory level. A few string workloads move by 10 to 25% with where the C compiler places code, so one run is not a verdict. Generated functions are marked hot in optimized builds, which makes GCC compile them 40 to 55% more slowly and keeps loops in rarely taken branches fast.
+`bench/priority/run.sh` compares 31 collection, string and scalar workloads with the same work in plain C (`kernels.c`), in C tuned by hand against the runtime (`kernels-c-tuned.c`), and in Rust with overflow checks on (`bench.rs`). It also builds an earlier Starnite as a baseline, so a change is measured against what came before it.
+
+To run it, check out the baseline next to the repository and build both compilers. The baseline must be able to compile the current `bench.stn` and the tuned C control; `3ae8247` is the first commit on `main` that can, and the runner fails at build time with an older one.
+
+```sh
+git worktree add --detach ../starnite-benchmark-base 3ae8247
+(cd ../starnite-benchmark-base && dune build compiler/main.exe)
+git rev-parse HEAD   # record the commit that is measured next to the results
+dune build compiler/main.exe
+bench/priority/run.sh ../starnite-benchmark-base --all --output /tmp/priority.json
+```
+
+- Without `--all` it runs three workloads (`str_prefix_suffix_eq`, `array_contains`, `array_clear_refill`); `cases.txt` lists all 31.
+- `--cpus 0,1,2,3` picks the logical CPUs (the first four allowed ones by default). Every workload runs on each.
+- It needs `gcc` (or `CC`), `rustc` (or `RUSTC`), `taskset` and `shuf`.
+- Each workload runs 27 rounds per CPU. A round runs the five builds in a random order on the same input, and their checksums must agree; the first two rounds are not counted. A build that exits with an error or prints anything but a time and a checksum stops the run.
+- It prints one line per CPU and workload with the median of each build in milliseconds, and writes every sample in nanoseconds to the `--output` file as JSON.
+- `samples-ns.json` and `regression-median-ns.json` are the samples and medians recorded when the first of this work was measured.
+
+Read a result as Starnite divided by the fastest of the three controls on the same CPU. On the 4-CPU x86-64 host it was last run on, 28 workloads were within 3% of that and the other three within 4.4%, with peak memory level. A few string workloads move by 10 to 25% with where the C compiler places code, and timings shift with what else the machine is doing, so compare builds within one run, never across runs. The AVX-512 results describe that host; other targets take the AVX2 or the portable paths.
+
+Generated functions are marked hot in optimized builds, which makes GCC compile them 40 to 55% more slowly and keeps loops in rarely taken branches fast.
 
 ## Reading of the specification
 
