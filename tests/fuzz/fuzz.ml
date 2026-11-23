@@ -302,11 +302,18 @@ let small g =
   if chance g 0.8 then string_of_int (range g (-5) 6)
   else choice g [| "2147483648"; "4611686018427387904"; "-1099511627776" |]
 
+(* literals for the prefix, suffix and search shapes the compiler lowers to fixed-width loads: lengths
+   around the 1, 2, 4 and 8 byte widths, and bytes of a multi-byte character *)
+let short_lit g =
+  choice g [| {|""|}; {|"a"|}; {|"bc"|}; {|"abc"|}; {|"0123"|}; {|"héllo"|}; {|"  name"|}; {|"  "|}; {|"01234567"|}; {|"012345678"|}; {|"é"|} |]
+
+let four_byte_lit g = choice g [| {|"name"|}; {|"alph"|}; {|"bcde"|}; {|"abé"|}; {|"0123"|}; {|"cdef"|}; {|"f012"|}; {|"é漢"|} |]
+
 let leaf g t =
   match t with
   | "Int" -> small g
   | "Bool" -> choice g [| "true"; "false" |]
-  | "Str" -> choice g [| {|"a"|}; {|"bc"|}; {|""|}; {|"héllo"|}; {|"0123456789abcdef"|} |]
+  | "Str" -> choice g [| {|"a"|}; {|"bc"|}; {|""|}; {|"héllo"|}; {|"0123456789abcdef"|}; {|"  name1042,alpha,tag3126,é漢🙂  "|}; {|"0123456789abcdef0123456789abcdef!"|} |]
   | "Array[Int]" -> choice g [| "no_ints()"; "[1]"; "[3, 1, 2]" |]
   | "Pair" -> {|Pair(0, "p")|}
   | "Shape" -> "Dot"
@@ -354,12 +361,17 @@ let rec expr g t d =
                 let name, ps = choice_l g fns in
                 sprintf "%s(%s)" name (String.concat ", " (List.map e ps))))
     | "Bool" -> (
-        match int g 5 with
+        match int g 10 with
         | 0 -> sprintf "(%s < %s)" (e "Int") (e "Int")
         | 1 -> sprintf "(%s == %s)" (e "Str") (e "Str")
         | 2 -> sprintf "(%s and %s)" (e "Bool") (e "Bool")
         | 3 -> sprintf "(not %s)" (e "Bool")
-        | _ -> sprintf "(%s == %s)" (e "Array[Int]") (e "Array[Int]"))
+        | 4 -> sprintf "(%s == %s)" (e "Array[Int]") (e "Array[Int]")
+        | 5 -> sprintf "starts_with(%s, %s)" (e "Str") (short_lit g)
+        | 6 -> sprintf "ends_with(%s, %s)" (e "Str") (short_lit g)
+        | 7 -> sprintf "contains(%s, %s)" (e "Str") (four_byte_lit g)
+        | 8 -> sprintf "contains(%s, %s)" (e "Str") (short_lit g)
+        | _ -> sprintf "contains(%s, %s)" (e "Array[Int]") (e "Int"))
     | "Str" -> (
         match int g 9 with
         | 0 -> sprintf "(%s + %s)" (e "Str") (e "Str")
@@ -428,7 +440,7 @@ let rec stmts g ind k d = List.concat (List.init k (fun _ -> stmt g ind d))
 
 and stmt g ind d =
   let p = String.make (4 * ind) ' ' in
-  let k = int g 15 in
+  let k = int g 16 in
   let fallback () = [ sprintf "%sprint(%s)" p (leaf g "Str") ] in
   if k <= 1 || d <= 0 then begin
     let t = choice g all_types in
@@ -526,6 +538,44 @@ and stmt g ind d =
             let line = sprintf "%slet %s: any Fig = %s" p t (expr g "any Fig" 2) in
             declare g (t, "any Fig", false);
             [ line; sprintf "%sreplace_fig(mut %s, %s)" p (choice_l g vs) t ])
+    | 15 ->
+        (* a counted loop that appends an affine integer to a local array: the shapes the compiler turns into
+           one reservation and a fill, a bound that is empty or backwards, a base that overflows, an array that is
+           shared when the loop starts, and the shapes beside it that it must leave alone *)
+        let a, decl =
+          match vars_of ~mutable_:true g "Array[Int]" with
+          | vs when vs <> [] && chance g 0.4 -> (choice_l g vs, [])
+          | _ ->
+              let a = fresh g "a" in
+              let line = sprintf "%svar %s: Array[Int] = %s" p a (expr g "Array[Int]" 1) in
+              declare g (a, "Array[Int]", true);
+              (a, [ line ])
+        in
+        let lo = range g (-3) 4 in
+        let hi = if chance g 0.2 then lo - range g 0 3 else lo + range g 0 40 in
+        let base =
+          if chance g 0.15 then choice g [| "9223372036854775800"; "-9223372036854775800"; "9223372036854775807" |]
+          else expr g "Int" 1
+        in
+        let i = fresh g "i" in
+        let loop pp body = [ sprintf "%sfor %s in %d..%d:" pp i lo hi; sprintf "%s    %s" pp body ] in
+        let show = [ sprintf {|%sprint(f"{%s}")|} p a ] in
+        decl
+        @ (match int g 7 with
+           | 0 -> loop p (sprintf "%s.push(%s + %s)" a base i)
+           | 1 -> loop p (sprintf "%s.push(%s + %s)" a i base)
+           | 2 -> loop p (sprintf "%s.push(%s - %s)" a base i)
+           | 3 -> loop p (sprintf "%s.push(%s +%% %s)" a i base)
+           | 4 ->
+               let r = fresh g "r" in
+               (sprintf "%sfor %s in 0..%d:" p r (range g 1 4) :: [ sprintf "%s    clear(mut %s)" p a ])
+               @ loop (p ^ "    ") (sprintf "%s.push(%s + %s)" a i base)
+           | 5 ->
+               let snap = fresh g "s" in
+               (sprintf "%slet %s: Array[Int] = %s" p snap a :: loop p (sprintf "%s.push(%s + %s)" a i base))
+               @ [ sprintf {|%sprint(f"{%s}")|} p snap ]
+           | _ -> loop p (sprintf "%s.push(%s + %s)" a i i))
+        @ show
     | _ -> [ sprintf "%sprint(%s)" p (if chance g 0.5 then sprintf "describe(%s)" (expr g "any Fig" 2) else expr g "Str" 3) ]
 
 let program seed =
