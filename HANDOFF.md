@@ -5,8 +5,8 @@ The `handoff/` directory (bundle and patches) exists only in the local clone and
 
 ## 1. State
 
-- `origin/main` is at `5923c05` (PR #8, squash-merged). PRs #1-#8 are merged, all squash merges. Tests: 201 pass with GCC and with Clang.
-- Two branches, both based on `5923c05`, pushed to `origin`, each with an open PR: [#9](https://github.com/starnite-lang/starnite/pull/9) (`wip/trait-generic-methods`, the compiler fixes; head `a941c28`) and [#10](https://github.com/starnite-lang/starnite/pull/10) (`wip/fuzz-modules`, the fuzzer's module and crash oracles; head `ce2ef79`). #9 is green; #10's first head passed by luck and `15075cd` failed in its crash step on a crash that #9 fixes (see below); each got reviews from `sr-auto` (4, 2 and 1 findings on #9; 3, 3 and 1 on #10), all answered, fixed and resolved. The heads above are the fixes; check CI on them.
+- `origin/main` is at `a4dd831` (PR #9, squash-merged; PRs #1-#9 are merged, all squash merges). Tests: 229 pass with GCC and with Clang on main.
+- One open PR: [#10](https://github.com/starnite-lang/starnite/pull/10) (`wip/fuzz-modules`, the fuzzer's module and crash oracles; head `eff8aa0`, which has main merged in). Clean review, CI green before the merge; `tests/run.sh` 241 pass with GCC and with Clang on the merged head, crash step 0 crashes. Merge it only when the user asks. `wip/trait-generic-methods` (#9) is merged and can be deleted.
 - `claude/spec-draft-0.1` (remote) holds the spec as a branch. **Leave it** until the user says milestone 1 is done, then delete it.
 
 | Branch | Commits | Tests |
@@ -14,7 +14,7 @@ The `handoff/` directory (bundle and patches) exists only in the local clone and
 | `wip/fuzz-modules` | `58fbf3f` Fuzzer: programs split across a module; `50d9f02` the compiler must not crash (§21.2, first oracle); `15075cd`, `8068f5d` and `ce2ef79` review fixes (crash oracle keeps status and streams apart, any nonzero build and any signal count, exact `is_split` and a mode fixed by the reducer, parallel checks waited for) | `tests/fuzz/selftest.sh` 23/23; `--crash --count 300` 0 crashes; `tests/run.sh` not run as a whole on `ce2ef79` |
 | `wip/trait-generic-methods` | `054225b` trait methods with type parameters of their own; `34c98ce` explicit type arguments `first[Int](xs)`; `9ecdf3d` an integer literal is an Int, never a Float; `d7b908b` prelude `swap` and `words`; `643d154` two crashes found by byte mutation; `69a10b1` unsettled constructed generic values are E0210; `9dc70e9` stack overflow is a trap / E0100 ; `a41c81c`, `97e4a2f` and `a941c28` review fixes (impl bounds E0204 and with effects, partial constructor type arguments, integer handler, JSON E0100, method bounds that name the enclosing parameters, a method parameter named like an enclosing one is E0101) | 229 pass with GCC and with Clang |
 
-The two branches conflict only in `README.md` (one paragraph). **Merge #9 first, then #10 is required, not just natural**: #10's CI crash step (`--crash --count 300`, a new random seed each run) finds crashes of main's compiler that #9 fixes. It passed on #10's first head by luck and failed on `15075cd` (seed 687255705, case 687255729: `print("none")| print("a")`, a binary operator with no rule, `Fatal error: exception Not_found`; E0204 on #9). I said so once on PR #10. After #9 merges, **merge `origin/main` into `wip/fuzz-modules`** (one README paragraph conflicts; not a rebase, which would need a force-push) and re-run the checks. Both PRs are squash-merged on request only.
+#9 is merged. #10 had its CI crash step fail once (seed 687255705, `print("none")| print("a")`) on a crash that #9 fixed; with #9 in, that seed gives no crash.
 
 ### Getting the work (the branches are also on origin)
 
