@@ -46,6 +46,21 @@ fn no_ints() -> Array[Int]:
 type Pair = struct(a: Int, b: Str)
 type Shape = Dot | Box(w: Int, h: Int) | Named(name: Str, inner: Array[Int])
 
+fn pair_a(mut p: Pair) -> lend mut Int:
+    lend mut p.a
+
+fn first_of(xs: Array[Int]) -> lend Int:
+    lend xs[0]
+
+fn slot(mut xs: Array[Int], i: Int) -> lend mut Int:
+    lend mut xs[i]
+
+fn either_end(mut xs: Array[Int], front: Bool) -> lend mut Int:
+    if front:
+        lend mut xs[0]
+    else:
+        lend mut xs[len(xs) - 1]
+
 impl Show for Pair:
     fn show(p: Pair) -> Str:
         f"Pair({p.a}, {p.b})"
@@ -441,7 +456,7 @@ let rec stmts g ind k d = List.concat (List.init k (fun _ -> stmt g ind d))
 
 and stmt g ind d =
   let p = String.make (4 * ind) ' ' in
-  let k = int g 16 in
+  let k = int g 17 in
   let fallback () = [ sprintf "%sprint(%s)" p (leaf g "Str") ] in
   if k <= 1 || d <= 0 then begin
     let t = choice g all_types in
@@ -539,6 +554,43 @@ and stmt g ind d =
             let line = sprintf "%slet %s: any Fig = %s" p t (expr g "any Fig" 2) in
             declare g (t, "any Fig", false);
             [ line; sprintf "%sreplace_fig(mut %s, %s)" p (choice_l g vs) t ])
+    | 16 -> (
+        (* projections (section 4.6): a write and a compound write through a lend mut call, on a field and on
+           an element, a read through a lend call, and a function that lends one of two places. An index is
+           bound first: the array is lent for the statement, so it cannot also be read in it (E0323) *)
+        match int g 4 with
+        | 0 -> (
+            match vars_of ~mutable_:true g "Pair" with
+            | [] -> fallback ()
+            | vs ->
+                let v = choice_l g vs in
+                if chance g 0.5 then [ sprintf "%spair_a(mut %s) = %s" p v (small g) ]
+                else [ sprintf "%spair_a(mut %s) += %s" p v (small g) ])
+        | 1 -> (
+            match vars_of ~mutable_:true g "Array[Int]" with
+            | [] -> fallback ()
+            | vs ->
+                let v = choice_l g vs and i = fresh g "v" in
+                [ sprintf "%sif len(%s) > 0:" p v;
+                  sprintf "%s    let %s = len(%s) - 1" p i v;
+                  sprintf "%s    slot(mut %s, %s) = %s" p v i (small g);
+                  sprintf "%s    slot(mut %s, 0) += %s" p v (small g) ])
+        | 2 -> (
+            match vars_of g "Array[Int]" with
+            | [] -> fallback ()
+            | vs ->
+                let v = choice_l g vs in
+                [ sprintf "%sif len(%s) > 0:" p v; sprintf "%s    print(f\"{first_of(%s)}\")" p v ])
+        | _ -> (
+            match vars_of ~mutable_:true g "Array[Int]" with
+            | [] -> fallback ()
+            | vs ->
+                let v = choice_l g vs and n = fresh g "v" in
+                let line = sprintf "%slet %s = %s" p n v in
+                declare g (n, "Array[Int]", false);
+                (* a snapshot taken first keeps its elements when the lend writes *)
+                [ line; sprintf "%sif len(%s) > 0:" p v; sprintf "%s    either_end(mut %s, %b) = %s" p v (chance g 0.5) (small g);
+                  sprintf "%sprint(f\"{%s} {%s}\")" p n v ]))
     | 15 ->
         (* a counted loop that appends an affine integer to a local array: the shapes the compiler turns into
            one reservation and a fill, a bound that is empty or backwards, a base that overflows, an array that is
@@ -1103,6 +1155,29 @@ let mutations : mutation list =
       expect = Code "E0501";
       in_context = (fun _ _ -> None);
       own = [ Items [ "fn neg_g*(n: Int) -> Int:"; "    must_check(Lim(3), n)"; "" ] ] };
+    { kind = "element type never settled";
+      expect = Code "E0210";
+      in_context = (fun _ _ -> None);
+      own = [ Statements [ "let neg_empty = []" ]; Statements [ "let neg_none = None" ] ] };
+    { kind = "type arguments after a function that is not generic";
+      expect = Code "E0102";
+      in_context = (fun _ _ -> None);
+      own = [ Items [ "fn neg_plain(x: Int) -> Int:"; "    x"; ""; "fn neg_plain_call() -> Int:"; "    neg_plain[Int](1)"; "" ] ] };
+    { kind = "too many type arguments";
+      expect = Code "E0203";
+      in_context = (fun _ _ -> None);
+      own = [ Items [ "fn neg_one[T](x: T) -> T:"; "    x"; ""; "fn neg_one_call() -> Int:"; "    neg_one[Int, Str](1)"; "" ] ] };
+    { kind = "explicit type argument that breaks a bound";
+      expect = Code "E0204";
+      in_context = (fun _ _ -> None);
+      own = [ Items [ "type NegPlain = struct(k: Int)"; ""; "fn neg_label[T: Show](x: T) -> Str:"; "    f\"[{x}]\""; "";
+                      "fn neg_label_call() -> Str:"; "    neg_label[NegPlain](NegPlain(1))"; "" ] ] };
+    { kind = "impl that adds a bound to a method";
+      expect = Code "E0204";
+      in_context = (fun _ _ -> None);
+      own = [ Items [ "trait NegExtra:"; "    fn neg_extra(x: Self) -> Int"; ""; "trait NegMapper:"; "    fn neg_map[U](x: Self, v: U) -> Int"; "";
+                      "type NegBox = struct(n: Int)"; ""; "impl NegMapper for NegBox:"; "    fn neg_map[U: NegExtra](x: NegBox, v: U) -> Int:";
+                      "        v.neg_extra() + x.n"; "" ] ] };
     { kind = "field named twice";
       expect = Code "E0101";
       in_context =

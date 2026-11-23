@@ -22,4 +22,4 @@ compile_starnite "$repo" "${STARNITE:-$repo/_build/default/compiler/main.exe}" s
 "$cc" -O3 -std=c11 -DSHARED -fno-strict-aliasing -I"$base/runtime" \
     "$here/kernels-c-tuned.c" "$base/runtime/stn_runtime.c" -lm -o "$out/c-tuned"
 "$rustc" -C opt-level=3 -C overflow-checks=yes "$here/bench.rs" -o "$out/rust-reference"
-python3 "$here/measure.py" "$out" "$@"
+"$here/measure.sh" "$out" "$@"

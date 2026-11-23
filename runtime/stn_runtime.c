@@ -516,7 +516,6 @@ int stn_array_contains_i64(const StnArray* a, int64_t value) {
     for (; i < a->len; i++)
         if (elements[i] == value) return 1;
     return 0;
-    return 0;
 }
 
 int64_t stn_array_count_true(const StnArray* a) {

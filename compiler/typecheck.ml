@@ -903,10 +903,12 @@ let check_lend_exclusivity tb (s : tstmt) =
     (match lend_of tb e with
      | Some true -> (match root_var tb e with Some v -> calls := (v, e) :: !calls | None -> ())
      | _ -> ());
-    List.iter collect (sub_exprs e);
-    List.iter collect_s (block_stmts e)
-  and collect_s st = List.iter collect (stmt_exprs st) in
-  collect_s s;
+    (* the statements of a block inside this one are statements of their own, each checked in its
+       turn: a lend in the body of an `if` does not reach the condition, nor the next statement of
+       that body. What this statement lends still covers them, which [uses] below looks into. *)
+    List.iter collect (sub_exprs e)
+  in
+  List.iter collect (stmt_exprs s);
   (* x += 1 on a lent place reads and writes it through copies of one call, which share
      its source location: count them once *)
   let calls = List.fold_left (fun acc (v, e) -> if List.exists (fun (_, (e' : texpr)) -> e'.l = e.l) acc then acc else acc @ [ (v, e) ]) [] (List.rev !calls) in
