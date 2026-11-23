@@ -1,0 +1,17 @@
+[stringstring, é] é [new] stringstring
+true [, 漢, ] alpha|é漢é
+9223372036854775807 -42 -7 true
+-9223372036854775808 9223372036854775807
+Err(invalid number '999999999999999999999x') Err(number out of range '999999999999999999999')
+-0.0 0.125 100000.0 2.2250738585072014e-308
+98765432 -123456789012345678 12345678
+Err(invalid number '1234567x') Err(invalid number '12345678:') Err(invalid number '/2345678')
+123.125 -7.0 42.0 Err(invalid number '1.2.3') Err(invalid number '-')
+53 f é 漢 0 !
+true -274869727744 286562304 274873347328
+5000 3000 8997 -1999 2999
+4000 4001 4857 22497500
+9223372036854775807
+trap: integer overflow at tests/run/collection_fast_paths.stn:68:5
+the result does not fit its type
+exit 2

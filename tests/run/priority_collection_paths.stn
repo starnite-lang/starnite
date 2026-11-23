@@ -1,0 +1,41 @@
+fn main():
+    var values = filled(128, 1)
+    clear(mut values)
+    # Nonzero and negative bounds, with spare capacity and an existing element.
+    values.push(55)
+    let base = 10
+    for i in -3..2:
+        values.push(base + i)
+    for i in 3..2:
+        values.push(base + i)
+    assert values == [55, 7, 8, 9, 10, 11]
+    let snapshot = values
+    for i in 0..2:
+        values.push(100 + i)
+    assert snapshot == [55, 7, 8, 9, 10, 11]
+    assert values[7] == 101
+
+    var grown: Array[Int] = []
+    let low = -9223372036854775808
+    for i in 0..65:
+        grown.push(low + i)
+    assert not contains(grown, 0)
+    assert contains(grown, -9223372036854775808)
+    assert contains(grown, -9223372036854775808 + 31)
+    assert contains(grown, -9223372036854775808 + 32)
+    assert contains(grown, -9223372036854775808 + 64)
+
+    let text = "abcdef--é🙂"
+    assert starts_with(text, "")
+    assert starts_with(text, "a")
+    assert starts_with(text, "abc")
+    assert starts_with(text, "abcdef")
+    assert not starts_with(text, "abcdeg")
+    assert ends_with(text, "é🙂")
+    assert not ends_with(text, "e🙂")
+    assert not ends_with("x", "too long")
+    assert starts_with(text, "abcdef--é🙂")
+    let pattern = repeat("ab", 10)
+    assert starts_with(pattern, "abababababababababab")
+    assert ends_with(text, repeat("🙂", 1))
+    print("priority paths passed")

@@ -1,0 +1,368 @@
+type Pair = struct(x: Int, y: Int)
+
+fn data(n: Int) -> Array[Int]:
+    var a = filled(n, 0)
+    for i in 0..n:
+        a[i] = (i * 7919 + 17) % 100003
+    a
+
+fn strings(seed: Int) -> Array[Str]:
+    var out: Array[Str] = []
+    for i in 0..128:
+        let d = (i * 7 + seed) % 1000 + 1000
+        out.push(f"  name{d},alpha,tag{(d * 3)},é漢🙂  ")
+    out
+
+fn bench_int_arithmetic(seed: Int) -> (Int, Int):
+    var x = seed
+    let start = clock_ns()
+    for _ in 0..4000000:
+        x = (x * 1664525 + 1013904223) % 2147483647
+    let elapsed = clock_ns() - start
+    (elapsed, x)
+
+fn bench_float_arithmetic(seed: Int) -> (Int, Int):
+    var x = Float(seed)
+    let start = clock_ns()
+    for _ in 0..4000000:
+        x = x * 0.9999999 + 0.000013
+        x = x / 1.0000001
+    let elapsed = clock_ns() - start
+    (elapsed, Int(x * 1000000.0))
+
+fn bench_array_fill(seed: Int) -> (Int, Int):
+    let start = clock_ns()
+    let a = filled(2000000, seed)
+    let elapsed = clock_ns() - start
+    (elapsed, len(a) + a[1000000])
+
+fn bench_array_push(seed: Int) -> (Int, Int):
+    var a: Array[Int] = []
+    let start = clock_ns()
+    for i in 0..500000:
+        a.push(i + seed)
+    let elapsed = clock_ns() - start
+    (elapsed, len(a) + a[250000])
+
+fn bench_array_pop(seed: Int) -> (Int, Int):
+    var a = data(500000)
+    var sum = 0
+    let start = clock_ns()
+    for _ in 0..500000:
+        sum += unwrap(a.pop())
+    let elapsed = clock_ns() - start
+    (elapsed, sum + len(a))
+
+fn bench_array_scan(seed: Int) -> (Int, Int):
+    var a = data(500000)
+    var sum = 0
+    let start = clock_ns()
+    for x in a:
+        sum += x
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_array_index_read(seed: Int) -> (Int, Int):
+    var a = data(500000)
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..1000000:
+        sum += a[(i * 7919) % 500000]
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_array_index_write(seed: Int) -> (Int, Int):
+    var a = data(500000)
+    let start = clock_ns()
+    for i in 0..500000:
+        a[(i * 7919) % 500000] = seed + i
+    let elapsed = clock_ns() - start
+    (elapsed, a[0] + a[333333] + a[499999])
+
+fn bench_array_front_insert_remove(seed: Int) -> (Int, Int):
+    var a = data(16000)
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..5000:
+        a.insert(0, i + seed)
+        sum += a.remove(0)
+    let elapsed = clock_ns() - start
+    (elapsed, sum + a[8192])
+
+fn bench_array_reverse(seed: Int) -> (Int, Int):
+    var a = data(500000)
+    let start = clock_ns()
+    reverse(mut a)
+    let elapsed = clock_ns() - start
+    (elapsed, a[0] + 3 * a[499999])
+
+fn bench_array_sort(seed: Int) -> (Int, Int):
+    var a = filled(50000, 0)
+    var x = seed
+    for i in 0..50000:
+        x = (x * 1664525 + 1013904223) % 2147483647
+        a[i] = x % 100003
+    let start = clock_ns()
+    sort(mut a)
+    let elapsed = clock_ns() - start
+    (elapsed, a[0] + a[25000] + a[49999])
+
+fn bench_array_contains(seed: Int) -> (Int, Int):
+    let a = data(10000)
+    var hits = 0
+    let start = clock_ns()
+    for i in 0..1800:
+        if contains(a, (i * 7919) % 100003):
+            hits += 1
+    let elapsed = clock_ns() - start
+    (elapsed, hits)
+
+fn bench_array_owned_slice(seed: Int) -> (Int, Int):
+    var a = data(500000)
+    let start = clock_ns()
+    let b = a[100000..450000]
+    let elapsed = clock_ns() - start
+    (elapsed, len(b) + b[0] + b[349999])
+
+fn bench_array_extend(seed: Int) -> (Int, Int):
+    var a = data(500000)
+    let b = data(500000)
+    let start = clock_ns()
+    a.extend(b)
+    let elapsed = clock_ns() - start
+    (elapsed, len(a) + a[499999] + a[500000])
+
+fn bench_array_snapshot_write(seed: Int) -> (Int, Int):
+    var a = data(500000)
+    let start = clock_ns()
+    var b = a
+    b[250000] = seed
+    let elapsed = clock_ns() - start
+    (elapsed, a[250000] + 3 * b[250000] + len(b))
+
+fn bench_str_concat(seed: Int) -> (Int, Int):
+    let values = strings(seed)
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..200000:
+        let s = values[i % 128]
+        let out = s + values[(i + 1) % 128]
+        sum += len(out) + byte_at_or_end(out, 0)
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_str_owned_slice(seed: Int) -> (Int, Int):
+    let values = strings(seed)
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..200000:
+        let s = values[i % 128]
+        let out = s[0..12]
+        sum += len(out) + byte_at_or_end(out, 2)
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_str_contains(seed: Int) -> (Int, Int):
+    let values = strings(seed)
+    var sum = 0
+    var needles: Array[Str] = []
+    for s in values:
+        needles.push(s[18..22])
+    let start = clock_ns()
+    for i in 0..200000:
+        if contains(values[i % 128], needles[(i * 7 + 13) % 128]):
+            sum += 1
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_str_prefix_suffix_eq(seed: Int) -> (Int, Int):
+    let values = strings(seed)
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..500000:
+        let s = values[i % 128]
+        if starts_with(s, "  name") and ends_with(s, "  ") and s != values[(i + 1) % 128]:
+            sum += 1
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_str_split_owned(seed: Int) -> (Int, Int):
+    let values = strings(seed)
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..100000:
+        let s = values[i % 128]
+        let pieces = split(s, ",")
+        sum += len(pieces) + len(pieces[1]) + len(pieces[2])
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_str_join(seed: Int) -> (Int, Int):
+    let values = strings(seed)
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..150000:
+        let s = values[i % 128]
+        let out = join([s, values[(i + 1) % 128], "end"], "|")
+        sum += len(out) + byte_at_or_end(out, 0)
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_str_chars_owned(seed: Int) -> (Int, Int):
+    let values = strings(seed)
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..150000:
+        let s = values[i % 128]
+        let cs = chars(s)
+        sum += len(cs) + Int(cs[2])
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_str_trim_owned(seed: Int) -> (Int, Int):
+    let values = strings(seed)
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..200000:
+        let s = values[i % 128]
+        let out = trim(s)
+        sum += len(out) + byte_at_or_end(out, 0)
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_str_repeat(seed: Int) -> (Int, Int):
+    let values = strings(seed)
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..200000:
+        let s = values[i % 128]
+        let out = repeat(s, i % 5 + 1)
+        sum += len(out) + byte_at_or_end(out, 0)
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_str_parse_int(seed: Int) -> (Int, Int):
+    var values: Array[Str] = []
+    for i in 0..128:
+        values.push(f"{i * 777777 + seed}")
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..300000:
+        sum += parse_int(values[i % 128])
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_str_parse_float(seed: Int) -> (Int, Int):
+    var values: Array[Str] = []
+    for i in 0..128:
+        values.push(f"{i + seed}.125")
+    var sum = 0.0
+    let start = clock_ns()
+    for i in 0..300000:
+        sum += parse_float(values[i % 128])
+    let elapsed = clock_ns() - start
+    (elapsed, Int(sum * 8.0))
+
+fn bench_option_result(seed: Int) -> (Int, Int):
+    var options: Array[Int?] = []
+    var results: Array[Result[Int, Int]] = []
+    for i in 0..500000:
+        let v = i + seed
+        let o: Int? = if i % 3 == 0: None else: Some(v)
+        let r: Result[Int, Int] = if i % 3 == 0: Err(v) else: Ok(v)
+        options.push(o)
+        results.push(r)
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..500000:
+        sum += options[i].or(1) + results[i].or(2)
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_tuple_array_scan(seed: Int) -> (Int, Int):
+    var a: Array[(Int, Int)] = []
+    for i in 0..500000:
+        a.push((seed + i, 3 * i))
+    var sum = 0
+    let start = clock_ns()
+    for pair in a:
+        let (x, y) = pair
+        sum += x + y
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_bool_logic_scan(seed: Int) -> (Int, Int):
+    var a: Array[Bool] = []
+    for i in 0..1000000:
+        a.push((i + seed) % 7 < 3)
+    var sum = 0
+    let start = clock_ns()
+    for x in a:
+        if x:
+            sum += 1
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_struct_array_scan(seed: Int) -> (Int, Int):
+    var a: Array[Pair] = []
+    for i in 0..500000:
+        a.push(Pair(seed + i, 3 * i))
+    var sum = 0
+    let start = clock_ns()
+    for pair in a:
+        sum += pair.x + pair.y
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_array_clear_refill(seed: Int) -> (Int, Int):
+    var a: Array[Int] = []
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..2000:
+        clear(mut a)
+        for j in 0..128:
+            a.push(seed + i + j)
+        sum += a[127]
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn dispatch(name: Str, seed: Int) -> (Int, Int):
+    match name:
+        "int_arithmetic" -> bench_int_arithmetic(seed)
+        "float_arithmetic" -> bench_float_arithmetic(seed)
+        "array_fill" -> bench_array_fill(seed)
+        "array_push" -> bench_array_push(seed)
+        "array_pop" -> bench_array_pop(seed)
+        "array_scan" -> bench_array_scan(seed)
+        "array_index_read" -> bench_array_index_read(seed)
+        "array_index_write" -> bench_array_index_write(seed)
+        "array_front_insert_remove" -> bench_array_front_insert_remove(seed)
+        "array_reverse" -> bench_array_reverse(seed)
+        "array_sort" -> bench_array_sort(seed)
+        "array_contains" -> bench_array_contains(seed)
+        "array_owned_slice" -> bench_array_owned_slice(seed)
+        "array_extend" -> bench_array_extend(seed)
+        "array_snapshot_write" -> bench_array_snapshot_write(seed)
+        "str_concat" -> bench_str_concat(seed)
+        "str_owned_slice" -> bench_str_owned_slice(seed)
+        "str_contains" -> bench_str_contains(seed)
+        "str_prefix_suffix_eq" -> bench_str_prefix_suffix_eq(seed)
+        "str_split_owned" -> bench_str_split_owned(seed)
+        "str_join" -> bench_str_join(seed)
+        "str_chars_owned" -> bench_str_chars_owned(seed)
+        "str_trim_owned" -> bench_str_trim_owned(seed)
+        "str_repeat" -> bench_str_repeat(seed)
+        "str_parse_int" -> bench_str_parse_int(seed)
+        "str_parse_float" -> bench_str_parse_float(seed)
+        "option_result" -> bench_option_result(seed)
+        "tuple_array_scan" -> bench_tuple_array_scan(seed)
+        "bool_logic_scan" -> bench_bool_logic_scan(seed)
+        "struct_array_scan" -> bench_struct_array_scan(seed)
+        "array_clear_refill" -> bench_array_clear_refill(seed)
+        _ -> unreachable("unknown benchmark")
+
+fn main():
+    let name = unwrap(read_line())
+    let seed = parse_int(unwrap(read_line()))
+    let (elapsed, checksum) = dispatch(name, seed)
+    print(f"{elapsed} {checksum}")

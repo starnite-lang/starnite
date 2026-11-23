@@ -1,0 +1,4 @@
+before
+trap: input error at tests/run/read_all_failure.stn:6:16
+could not read stdin
+exit 2

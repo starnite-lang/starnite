@@ -355,6 +355,7 @@ and drop_stmt st t e =
   match repr t with
   | TNamed ("__cell", [ ct_ ]) -> Printf.sprintf "stn_drop(%s, release_cell_%s);" e (mangle ct_)
   | TNamed ("__unbusy", _) -> Printf.sprintf "%s->busy = 0;" e
+  | TNamed ("__array_length", _) -> e ^ ";"
   | TStr -> Printf.sprintf "STN_STR_DROP(%s);" e
   | TArray _ -> Printf.sprintf "stn_drop(%s, stn_array_release);" e
   | TFn _ -> Printf.sprintf "stn_closure_drop(%s);" e
@@ -448,6 +449,11 @@ type fc = {
   vars : (int, vinfo) Hashtbl.t;
   self_struct : string option;
   cached : (int, string * string) Hashtbl.t;  (* arrays hoisted for a loop: data and length names *)
+  natural_max : (int, int64) Hashtbl.t;  (* proven nonnegative range variables *)
+  mutable unique_arrays : int list;
+  mutable loop_indices : (texpr * string) list;
+  mutable checked_ranges : (int * int64) list; (* array bounds proved at loop entry *)
+  mutable unchecked_pops : (int * string) list;    (* exclusive arrays with enough elements for this loop *)
   lend : bool option;                          (* compiling a lend function (lend mut when Some true) *)
 }
 
@@ -629,10 +635,41 @@ let unreachable_value fc (e : texpr) =
   repr (ts fc e.ty) = TNever
   || (match (e.e, repr (ts fc e.ty)) with XLit LUnit, TUnit -> false | XLit LUnit, _ -> true | _ -> false)
 
+(* Upper bounds for nonnegative machine integers. Unknown values use the
+   ordinary checked arithmetic path. Check the proof arithmetic as well. *)
+let rec natural_bound fc (e : texpr) =
+  match repr (ts fc e.ty) with
+  | TInt (IInt | I64) ->
+      (match e.e with
+       | XLit (LInt value) ->
+           let n = Values.parse_int_lit value in
+           if n >= 0L then Some n else None
+       | XVar v -> Hashtbl.find_opt fc.natural_max v.vid
+       | XBin ((Add | Mul | Mod as op), a, b) ->
+           (match natural_bound fc a, natural_bound fc b, op with
+            | Some a, Some b, Add when a <= Int64.sub Int64.max_int b -> Some (Int64.add a b)
+            | Some a, Some b, Mul when b = 0L || a <= Int64.div Int64.max_int b -> Some (Int64.mul a b)
+            | Some a, Some _, Mod ->
+                (match b.e with
+                 | XLit (LInt value) ->
+                     let divisor = Values.parse_int_lit value in
+                     if divisor > 0L then Some (min a (Int64.pred divisor)) else None
+                 | _ -> None)
+            | _ -> None)
+       | _ -> None)
+  | _ -> None
+
+let array_index fc v (index : texpr) value len loc =
+  match List.assoc_opt v.vid fc.checked_ranges, natural_bound fc index with
+  | Some limit, Some upper when upper <= limit -> value
+  | _ -> Printf.sprintf "stn_index(%s, %s, %s)" value len (loc_args loc)
+
 let rec expr fc (e : texpr) : r =
   let st = fc.st in
   let t = ts fc e.ty in
-  match e.e with
+  match List.find_opt (fun (index, _) -> index == e) fc.loop_indices with
+  | Some (_, name) -> { c = name; owned = false }
+  | None -> match e.e with
   | XLit l -> lit fc t l
   | XNone -> { c = "0"; owned = false }
   | XFStr ps ->
@@ -658,7 +695,7 @@ let rec expr fc (e : texpr) : r =
   | XIndex ({ e = XVar v; _ }, i) when Hashtbl.mem fc.cached v.vid ->
       let d, n = Hashtbl.find fc.cached v.vid in
       let iv = tmp fc (TInt IInt) (expr fc i).c in
-      { c = Printf.sprintf "%s[stn_index(%s, %s, %s)]" d iv n (loc_args e.l); owned = false }
+      { c = Printf.sprintf "%s[%s]" d (array_index fc v i iv n e.l); owned = false }
   | XIndex (a, i) ->
       let av = borrow fc (expr fc a) a.ty in
       let iv = (expr fc i).c in
@@ -863,9 +900,9 @@ and lit fc t (l : lit) : r =
 and cond fc (e : texpr) : string =
   push fc FStmt;
   let v = (expr fc e).c in
-  let n = tmp fc TBool v in
+  let v = if (List.hd fc.frames).owned = [] then v else tmp fc TBool v in
   pop fc;
-  n
+  v
 
 and discard fc (e : texpr) =
   push fc FStmt;
@@ -946,7 +983,30 @@ and call fc (e : texpr) (cl : callee) (targs : targ list) convs : r =
   | CFn (uname, tys) ->
       let tys = List.map (ts fc) tys in
       let tf = Hashtbl.find st.prog.fns uname in
-      call_instance fc e uname tys tf.fsig targs convs
+      (match tf.fsig.smodule, tf.fsig.sdisplay, tys, targs with
+       | "core", ("sort" | "reverse" as name), [ TInt (IInt | I64) ], [ arg ] ->
+           let lv = place_lvalue_of_expr fc arg.a in
+           line fc "stn_array_%s_i64(&%s);" name lv;
+           { c = "0"; owned = false }
+       | "core", "contains", [ TInt (IInt | I64) ], [ arr; item ] ->
+           let av = borrow fc (expr fc arr.a) arr.a.ty in
+           let iv = tmp fc (ts fc item.a.ty) (expr fc item.a).c in
+           { c = Printf.sprintf "stn_array_contains_i64(%s, %s)" av iv; owned = false }
+       | "core", "or", _, [ sum; fallback ]
+         when not (rc fc sum.a.ty) ->
+           let sum_ty = ts fc sum.a.ty in
+           (match repr sum_ty with
+            | TNamed (("Option" | "Result" as name), _) when layout st sum_ty = LInline ->
+                let success = if name = "Option" then 1 else 0 in
+                let data = List.nth (variants st sum_ty) success |> fst in
+                let sv = tmp fc sum_ty (expr fc sum.a).c in
+                (* The default is evaluated eagerly, even on a success. *)
+                let default = tmp fc t (expr fc fallback.a).c in
+                { c = Printf.sprintf "(%s == %d ? %s : %s)"
+                          (tag_of st sum_ty sv) success (variant_field st sum_ty data 0 sv) default;
+                  owned = false }
+            | _ -> call_instance fc e uname tys tf.fsig targs convs)
+       | _ -> call_instance fc e uname tys tf.fsig targs convs)
   | CBuiltin (name, tys) -> builtin fc e name (List.map (ts fc) tys) targs convs
   | CTrait (tr, ta, m, self, _) when (match repr (ts fc self) with TAny _ -> true | _ -> false) ->
       any_call fc e tr (List.map (ts fc) ta) m (ts fc self) targs convs
@@ -1007,7 +1067,7 @@ and any_vtable st (l : Syntax.loc) (any : ty) (at : ty) : string =
               (* the built-in Show of a primitive, tuple or derived type: formatted by the
                  runtime's own code, as a direct call would *)
               let fc = { st; b = Buffer.create 64; ind = 0; sub = []; frames = []; can_fail = false; ret = TStr; vars = Hashtbl.create 1;
-                         self_struct = None; cached = Hashtbl.create 4; lend = None } in
+                         self_struct = None; cached = Hashtbl.create 4; natural_max = Hashtbl.create 4; unique_arrays = []; loop_indices = []; checked_ranges = []; unchecked_pops = []; lend = None } in
               pr st.helpers "static StnStr %s(StnAnyBox* b) { return %s; }\n" w (show_call fc at (Printf.sprintf "(%s)" recv));
               (m, w)
           | None -> unsupported l "%s cannot be used as %s: its implementation of %s is built in and has no method table" (show_ty at) (show_ty any) tr
@@ -1287,6 +1347,14 @@ and binop fc (e : texpr) op (a : texpr) (b : texpr) : r =
   | Gt, _ -> plain ">"
   | Ge, _ -> plain ">="
   | Add, TStr -> { c = tmp fc TStr (Printf.sprintf "stn_str_concat(%s, %s)" ab bb); owned = true }
+  | Add, TInt (IInt | I64) when natural_bound fc e <> None -> plain "+"
+  | Mul, TInt (IInt | I64) when natural_bound fc e <> None -> plain "*"
+  | Mod, TInt (IInt | I64) when natural_bound fc e <> None ->
+      let uint = match natural_bound fc a, natural_bound fc b with
+        | Some a, Some b when max a b <= 0xffff_ffffL -> "uint32_t"
+        | _ -> "uint64_t"
+      in
+      { c = Printf.sprintf "((int64_t)((%s)(%s) %% (%s)(%s)))" uint ab uint bb; owned = false }
   | (Add | Sub | Mul | Div | Mod), (TInt k) ->
       let f = match op with Add -> "add" | Sub -> "sub" | Mul -> "mul" | Div -> "div" | _ -> "rem" in
       { c = Printf.sprintf "stn_%s_%s(%s, %s, %s)" f (kname k) ab bb la; owned = false }
@@ -1490,7 +1558,7 @@ and closure fc (lam : lambda) : string =
       (String.concat "" (List.map (fun (v, m) -> ", " ^ param_decl st m (ts fc v.vty) (var_name v)) params))
   in
   pr st.protos "%s;\n" header;
-  let fc' = { st; b; ind = 1; sub = fc.sub; frames = []; can_fail = true; ret = ft.fret; vars = Hashtbl.create 16; self_struct = Some name; cached = Hashtbl.create 4; lend = None } in
+  let fc' = { st; b; ind = 1; sub = fc.sub; frames = []; can_fail = true; ret = ft.fret; vars = Hashtbl.create 16; self_struct = Some name; cached = Hashtbl.create 4; natural_max = Hashtbl.create 4; unique_arrays = []; loop_indices = []; checked_ranges = []; unchecked_pops = []; lend = None } in
   List.iter
     (fun (v : var) ->
       if is_cell fc v then Hashtbl.replace fc'.vars v.vid (VCapCell (Printf.sprintf "((%s_t*)self_)->%s" name (cap_field v), ts fc v.vty))
@@ -1561,7 +1629,7 @@ and place_lvalue ?(write = true) fc (p : place) : string =
       (* hoisted for this loop: already unshared, and its data and length are fixed *)
       let et = match repr (ts fc p.root.vty) with TArray et -> et | _ -> assert false in
       let iv = tmp fc (TInt IInt) (expr fc ix).c in
-      go (Printf.sprintf "%s[stn_index(%s, %s, %s)]" d iv n (loc_args ix.l)) et rest
+      go (Printf.sprintf "%s[%s]" d (array_index fc p.root ix iv n ix.l)) et rest
   | _ ->
       let start = root () in
       let t0 = match p.via with Some call -> ts fc call.ty | None -> ts fc p.root.vty in
@@ -1595,7 +1663,7 @@ and place_deferred ?(write = true) fc (p : place) : unit -> string =
       let et = match repr (ts fc p.root.vty) with TArray et -> et | _ -> assert false in
       let iv = tmp fc (TInt IInt) (expr fc ix).c in
       let k = go et rest in
-      fun () -> k (Printf.sprintf "%s[stn_index(%s, %s, %s)]" d iv n (loc_args ix.l))
+      fun () -> k (Printf.sprintf "%s[%s]" d (array_index fc p.root ix iv n ix.l))
   | _ ->
       let start = place_root fc p in
       let t0 = match p.via with Some call -> ts fc call.ty | None -> ts fc p.root.vty in
@@ -1668,7 +1736,7 @@ and hold_busy fc (e : texpr) =
 
 (* ---------- loops ---------- *)
 
-and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) (body : unit -> unit) =
+and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) ?pop_array ?indexed_body (body : unit -> unit) =
   (* [before] runs once the source is evaluated and held, and the loop is about to start: it is
      where the arrays the body uses are hoisted, which must see what the source did to them *)
   let st = fc.st in
@@ -1678,18 +1746,184 @@ and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) (body : unit 
       let lo = tmp fc it (expr fc a).c and hi = tmp fc it (expr fc b).c in
       let i = fresh st "_i" in
       before ();
-      line fc "for (%s %s = %s; %s < %s; %s++) {" (ct fc it) i lo i hi i;
-      fc.ind <- fc.ind + 1;
-      push fc FLoop;
-      let tests, binds = pat_test fc it p i in
-      bind_pattern fc binds;
-      ignore tests;
-      push fc FScope;
-      body ();
-      pop fc;
-      pop fc;
-      fc.ind <- fc.ind - 1;
-      line fc "}"
+      let range_var = match p, natural_bound fc a, natural_bound fc b with
+        | TPVar v, Some _, Some upper when upper > 0L && not v.vmut && not v.vcell ->
+            Some (v.vid, Int64.pred upper)
+        | _ -> None
+      in
+      let emit_loop ?(advance = "") () =
+        if (fc.checked_ranges <> [] && advance = "") || fc.unchecked_pops <> [] then
+          line fc "#pragma GCC unroll 2";
+        line fc "for (%s %s = %s; %s < %s; %s++%s) {" (ct fc it) i lo i hi i advance;
+        fc.ind <- fc.ind + 1;
+        push fc FLoop;
+        let _, binds = pat_test fc it p i in
+        bind_pattern fc binds;
+        push fc FScope;
+        Option.iter (fun (id, max) -> Hashtbl.replace fc.natural_max id max) range_var;
+        body ();
+        Option.iter (fun (id, _) -> Hashtbl.remove fc.natural_max id) range_var;
+        pop fc;
+        pop fc;
+        fc.ind <- fc.ind - 1;
+        line fc "}"
+      in
+      let index_guard = match range_var, indexed_body with
+        | Some (id, upper), Some code ->
+            Hashtbl.replace fc.natural_max id upper;
+            let guard = match guarded_indices fc code with [] -> None | guards -> Some guards in
+            Hashtbl.remove fc.natural_max id;
+            guard
+        | _ -> None
+      in
+      let unique_array = match pop_array, index_guard, indexed_body with
+        | None, None, Some code -> local_push_array fc code
+        | _ -> None
+      in
+      let append = match p, indexed_body, repr it with
+        | TPVar item, Some code, TInt (IInt | I64) -> affine_array_append fc item code
+        | _ -> None
+      in
+      (* a body that is one unconditional push onto a plain local array: the count is known *)
+      (match pop_array, index_guard, append, indexed_body with
+       | None, None, None, Some code ->
+           let action = match code.e with
+             | XBlock ([ { st = SExpr call; _ } ], { e = XLit LUnit; _ }) -> call
+             | XBlock ([], call) -> call
+             | _ -> code
+           in
+           (match action.e, single_array_call fc "push@Array" code with
+            | XCall (CBuiltin ("push@Array", _), { a = { e = XVar w; _ }; _ } :: _, _), Some v when w.vid = v.vid ->
+                let array = var_read fc v in
+                line fc "if (%s < %s) stn_array_reserve_hint(&%s, (uint64_t)%s - (uint64_t)%s);" lo hi array hi lo
+            | _ -> ())
+       | _ -> ());
+      (match pop_array, index_guard, unique_array, append with
+       | None, None, _, Some (v, base) ->
+           let array = var_read fc v in
+           let count = fresh st "_count" and done_ = fresh st "_appended" in
+           let unique = if List.mem v.vid fc.unique_arrays then "" else Printf.sprintf "stn_unique(%s) && " array in
+           line fc "uint8_t %s = 0;" done_;
+           line fc "if (%s < %s && %s(uint64_t)%s - (uint64_t)%s <= (uint64_t)STN_MAX_ALLOC) {"
+             lo hi unique hi lo;
+           fc.ind <- fc.ind + 1;
+           let offset = tmp fc it (expr fc base).c in
+           let limit = fresh st "_limit" and first = fresh st "_first" in
+           line fc "int64_t %s, %s;" first limit;
+           line fc "if (!__builtin_add_overflow(%s, %s, &%s) && !__builtin_add_overflow(%s, %s - 1, &%s)) {"
+             offset lo first offset hi limit;
+           fc.ind <- fc.ind + 1;
+           line fc "int64_t %s = (int64_t)((uint64_t)%s - (uint64_t)%s);" count hi lo;
+           line fc "if ((uint64_t)%s - (uint64_t)%s > (uint64_t)(%s->cap - %s->len)) stn_array_reserve(&%s, (int64_t)((uint64_t)%s - (uint64_t)%s));" hi lo array array array hi lo;
+           let data = fresh st "_data" in
+           line fc "int64_t* %s = ((int64_t*)%s->data) + %s->len;" data array array;
+           line fc "for (int64_t %s = 0; %s < %s; %s++) %s[%s] = %s + %s;"
+             i i count i data i first i;
+           line fc "%s->len += %s;" array count;
+           line fc "%s = 1;" done_;
+           fc.ind <- fc.ind - 1;
+           line fc "}";
+           fc.ind <- fc.ind - 1;
+           line fc "}";
+           line fc "if (!%s) {" done_;
+           fc.ind <- fc.ind + 1;
+           emit_loop ();
+           fc.ind <- fc.ind - 1;
+           line fc "}"
+       | None, None, Some v, _ ->
+           line fc "if (stn_unique(%s)) {" (var_read fc v);
+           fc.ind <- fc.ind + 1;
+           let saved = fc.unique_arrays in
+           fc.unique_arrays <- v.vid :: saved;
+           emit_loop ();
+           fc.unique_arrays <- saved;
+           fc.ind <- fc.ind - 1;
+           line fc "} else {";
+           fc.ind <- fc.ind + 1;
+           emit_loop ();
+           fc.ind <- fc.ind - 1;
+           line fc "}"
+       | None, None, None, _ -> emit_loop ()
+       | None, Some guards, _, _ ->
+           let condition = List.map (fun (_, limit, len, _) ->
+               Printf.sprintf "%s > INT64_C(%Ld)" len limit) guards |> String.concat " && " in
+           line fc "if (%s) {" condition;
+           fc.ind <- fc.ind + 1;
+           let saved = fc.checked_ranges and saved_indices = fc.loop_indices in
+           fc.checked_ranges <- List.map (fun (id, limit, _, _) -> (id, limit)) guards @ saved;
+           let _, _, _, index = List.hd guards in
+           let advance =
+             match range_var, index.e with
+             | Some (id, _),
+               XBin (Mod, { e = XBin (Mul, { e = XVar v; _ }, { e = XLit (LInt stride); _ }); _ },
+                     { e = XLit (LInt modulus); _ }) when v.vid = id ->
+                 (* The range proof bounds the initial product when the loop
+                    executes. Adding a reduced stride modulo m needs one
+                    subtraction or addition, both of which fit by construction. *)
+                 let stride = Values.parse_int_lit stride and modulus = Values.parse_int_lit modulus in
+                 let step = Int64.rem stride modulus in
+                 let cutoff = Int64.sub modulus step in
+                 let residue = fresh st "_index" in
+                 line fc "uint64_t %s = ((uint64_t)%s * UINT64_C(%Ld)) %% UINT64_C(%Ld);"
+                   residue lo stride modulus;
+                 fc.loop_indices <- (index, Printf.sprintf "((int64_t)%s)" residue) :: saved_indices;
+                 (* A loop that stores through the index takes the smaller of the two candidates,
+                    unsigned: below the cutoff the subtraction wraps to a huge value, so the sum
+                    wins. That compiles to a conditional move; a wrap mispredicted while stores
+                    are in flight costs far more than the longer chain. A loop that only reads
+                    is bound by that chain instead, and keeps the plain selection. *)
+                 let stores =
+                   match Option.map (fun (b : texpr) -> b.e) indexed_body with
+                   | Some (XBlock (stmts, _)) ->
+                       List.exists (fun (s : tstmt) ->
+                           match s.st with
+                           | SAssign ({ path = PIndex _ :: _; _ }, _) -> true
+                           | _ -> false) stmts
+                   | _ -> false
+                 in
+                 if stores then
+                   Printf.sprintf ", %s = (%s - UINT64_C(%Ld) < %s + UINT64_C(%Ld)) ? %s - UINT64_C(%Ld) : %s + UINT64_C(%Ld)"
+                     residue residue cutoff residue step residue cutoff residue step
+                 else
+                 Printf.sprintf ", %s = %s >= UINT64_C(%Ld) ? %s - UINT64_C(%Ld) : %s + UINT64_C(%Ld)"
+                   residue residue cutoff residue cutoff residue step
+             | _ -> ""
+           in
+           emit_loop ~advance ();
+           fc.checked_ranges <- saved;
+           fc.loop_indices <- saved_indices;
+           fc.ind <- fc.ind - 1;
+           line fc "} else {";
+           fc.ind <- fc.ind + 1;
+           emit_loop ();
+           fc.ind <- fc.ind - 1;
+           line fc "}"
+       | Some v, _, _, _ ->
+           let array = var_read fc v in
+           line fc "if (%s < %s && stn_unique(%s) && (uint64_t)stn_len(%s) >= (uint64_t)%s - (uint64_t)%s) {"
+             lo hi array array hi lo;
+           fc.ind <- fc.ind + 1;
+           (match Option.bind indexed_body (pop_reduction fc v) with
+            | Some (sum, loc) ->
+                let dst = var_read fc sum in
+                line fc "%s = stn_array_sum_popped_i64(%s, (int64_t)((uint64_t)%s - (uint64_t)%s), %s, %s);"
+                  dst array hi lo dst (loc_args loc)
+            | None ->
+                let remaining = fresh st "_remaining" in
+                line fc "int64_t %s = stn_len(%s);" remaining array;
+                push fc FScope;
+                own_in fc (Printf.sprintf "(%s)->len = %s" array remaining) (TNamed ("__array_length", []));
+                let saved = fc.unchecked_pops in
+                fc.unchecked_pops <- (v.vid, remaining) :: saved;
+                emit_loop ();
+                fc.unchecked_pops <- saved;
+                pop fc);
+           fc.ind <- fc.ind - 1;
+           line fc "} else {";
+           fc.ind <- fc.ind + 1;
+           emit_loop ();
+           fc.ind <- fc.ind - 1;
+           line fc "}")
   | IArray (a, MMut) -> (
       match p with
       | TPVar var ->
@@ -1720,11 +1954,15 @@ and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) (body : unit 
       let av = tmp fc a.ty (own fc (expr fc a) a.ty) in
       own_in fc av a.ty;
       let i = fresh st "_i" in
+      let data = fresh st "_data" and len = fresh st "_length" in
+      line fc "%s const* %s = (%s const*)%s->data; int64_t %s = stn_len(%s);"
+        (ct fc et) data (ct fc et) av len av;
       before ();
-      line fc "for (int64_t %s = 0; %s < stn_len(%s); %s++) {" i i av i;
+      if indexed_body <> None && not (needs_rc st et) then line fc "#pragma GCC unroll 2";
+      line fc "for (int64_t %s = 0; %s < %s; %s++) {" i i len i;
       fc.ind <- fc.ind + 1;
       push fc FLoop;
-      let x = tmp fc et (Printf.sprintf "((%s*)%s->data)[%s]" (cty st et) av i) in
+      let x = tmp fc et (Printf.sprintf "%s[%s]" data i) in
       let _, binds = pat_test fc et p x in
       bind_pattern fc binds;
       push fc FScope;
@@ -1751,10 +1989,14 @@ and with_hoisted fc (body : texpr list) (k : unit -> unit) =
 (* The arrays of [body] that can be hoisted, and whether the body writes each. *)
 and hoist_plan fc (body : texpr list) : (var * bool) list =
   let cands = Hashtbl.create 4 in
-  List.iter (iter_vars (fun (v : var) ->
-      match (repr (ts fc v.vty), Hashtbl.find_opt fc.vars v.vid) with
-      | TArray _, Some (VDirect _ | VPtr _) when not (Hashtbl.mem fc.cached v.vid) -> Hashtbl.replace cands v.vid v
-      | _ -> ())) body;
+  let candidate (v : var) =
+    match (repr (ts fc v.vty), Hashtbl.find_opt fc.vars v.vid) with
+    | TArray _, Some (VDirect _ | VPtr _) when not (Hashtbl.mem fc.cached v.vid) -> Hashtbl.replace cands v.vid v
+    | _ -> ()
+  in
+  List.iter (walk_texpr
+      (fun e -> match e.e with XVar v -> candidate v | _ -> ())
+      (fun (s : tstmt) -> match s.st with SAssign (p, _) when p.via = None -> candidate p.root | _ -> ())) body;
   List.rev (Hashtbl.fold (fun _ (v : var) acc -> match hoistable v body with Some writes -> (v, writes) :: acc | None -> acc) cands [])
 
 (* Make those arrays unshared (if written) and read their data pointer and length. This is
@@ -1782,7 +2024,10 @@ and walk_texpr (fe : texpr -> unit) (fs : tstmt -> unit) (e : texpr) =
     fs s;
     match s.st with
     | SLet (_, e) | SVar (_, e) | SExpr e | SReturn e | SAssert (e, _) | SAssertFails (_, e) | SCheck e -> we e
-    | SAssign (p, e) -> List.iter (function PIndex i -> we i | _ -> ()) p.path; we e
+    | SAssign (p, e) ->
+        Option.iter we p.via;
+        List.iter (function PIndex i -> we i | _ -> ()) p.path;
+        we e
     | SBreak | SContinue -> ()
     | SWhile (c, b) -> we c; we b
     | SFor (_, it, b) -> wit it; we b
@@ -1801,6 +2046,136 @@ and walk_texpr (fe : texpr -> unit) (fs : tstmt -> unit) (e : texpr) =
   | XMatch (s, arms) -> we s; List.iter (fun a -> Option.iter we a.guard; we a.body) arms
   | XLambda lam -> we lam.lbody
   | XComp (b, cs) -> we b; List.iter (fun cp -> wit cp.csrc; Option.iter we cp.ccond) cs
+
+(* Check length once for up to two arrays with bounded subscripts. The
+   fallback retains the per-access trap and its original source location. *)
+and guarded_indices fc body =
+  let guards = ref [] and count = ref 0 in
+  let inspect v (index : texpr) =
+    match index.e, Hashtbl.find_opt fc.cached v.vid, natural_bound fc index with
+    | (XBin (Mod, _, _) | XVar _), Some (_, len), Some limit ->
+        (match List.find_opt (fun (id, _, _, _) -> id = v.vid) !guards with
+         | None when !count < 2 ->
+             incr count;
+             guards := (v.vid, limit, len, index) :: !guards
+         | Some (_, prior, _, _) when limit > prior ->
+             guards := List.map (fun ((id, _, _, _) as old) ->
+                 if id = v.vid then (id, limit, len, index) else old) !guards
+         | _ -> ())
+    | _ -> ()
+  in
+  walk_texpr
+    (fun e -> match e.e with XIndex ({ e = XVar v; _ }, index) -> inspect v index | _ -> ())
+    (fun (s : tstmt) -> match s.st with
+       | SAssign ({ via = None; root; path = PIndex index :: _; _ }, _) -> inspect root index
+       | _ -> ())
+    body;
+  List.rev !guards
+
+(* Push and clear preserve uniqueness on a direct local array of Copy
+   scalars. Indexed reads return scalars and cannot create aliases. *)
+and local_push_array fc body =
+  let candidate = ref None in
+  let allowed = ref [] in
+  let permit receiver = allowed := receiver :: !allowed in
+  walk_texpr (fun e -> match e.e with
+    | XCall (CBuiltin (("push@Array" | "clear@Array"), _),
+             { a = ({ e = XVar v; _ } as receiver); _ } :: _, _)
+      when not v.vcell && not v.vcaptured && v.vkind = VLocal
+           && not (List.mem v.vid fc.unique_arrays)
+           && (match Hashtbl.find_opt fc.vars v.vid with Some (VDirect _) -> true | _ -> false)
+           && (match repr (ts fc v.vty) with TArray (TInt _ | TBool | TFloat | TF32 | TChar) -> true | _ -> false) ->
+        permit receiver;
+        if !candidate = None then candidate := Some v
+    | XIndex (({ e = XVar _; _ } as receiver), _) -> permit receiver
+    | _ -> ()) (fun _ -> ()) body;
+  match !candidate with
+  | None -> None
+  | Some v ->
+      let safe = ref true in
+      walk_texpr (fun e -> match e.e with
+        | XVar w when w.vid = v.vid && not (List.exists ((==) e) !allowed) -> safe := false
+        | _ -> ())
+        (fun (s : tstmt) -> match s.st with
+          | SAssign (p, _) when p.root.vid = v.vid -> safe := false
+          | _ -> ()) body;
+      if !safe then Some v else None
+
+(* A pure sum of popped integers can run entirely over a tight descending
+   range, preserving each checked addition and the final array length. *)
+and pop_reduction fc array body =
+  match repr (ts fc array.vty), body.e with
+  | TArray (TInt (IInt | I64)),
+    XBlock ([ { st = SAssign (place,
+               ({ e = XBin (Add, { e = XVar lhs; _ },
+                 { e = XCall (CFn (callee, _),
+                     [ { a = { e = XCall (CBuiltin ("pop@Array", _),
+                               [ { a = { e = XVar receiver; _ }; _ } ], _); _ }; _ } ], _); _ }); _ } as add)); _ } ],
+             { e = XLit LUnit; _ })
+    when place.via = None && place.path = [] && lhs.vid = place.root.vid && not lhs.vcell
+         && receiver.vid = array.vid
+         && (match repr (ts fc lhs.vty) with TInt (IInt | I64) -> true | _ -> false) ->
+      let signature = (Hashtbl.find fc.st.prog.fns callee).fsig in
+      if signature.smodule = "core" && signature.sdisplay = "unwrap" then Some (lhs, add.l) else None
+  | _ -> None
+
+(* Only one syntactic push or pop, on a direct local array, can execute per iteration.
+   Reject other uses, nested iteration, and closures so neither the identity nor
+   the reference count can change on the specialized path. *)
+and single_array_call fc builtin body =
+  let candidate = ref None and allowed = ref true in
+  walk_texpr (fun e ->
+    match e.e with
+    | XCall (CBuiltin (name, _), { a = ({ e = XVar v; _ } as receiver); _ } :: _, _)
+      when name = builtin && not v.vcell && not v.vcaptured && v.vkind = VLocal
+           && (match Hashtbl.find_opt fc.vars v.vid with Some (VDirect _) -> true | _ -> false) ->
+        (match !candidate with None -> candidate := Some (v, receiver) | Some _ -> allowed := false)
+    | XLambda _ | XComp _ -> allowed := false
+    | _ -> ())
+    (fun (s : tstmt) -> match s.st with SFor _ | SWhile _ | SLocalFn _ -> allowed := false | _ -> ())
+    body;
+  match !candidate with
+  | Some (v, receiver) when !allowed ->
+      walk_texpr (fun e -> match e.e with
+          | XVar w when w.vid = v.vid && e != receiver -> allowed := false
+          | _ -> ())
+        (fun (s : tstmt) -> match s.st with
+          | SAssign (p, _) when p.root.vid = v.vid -> allowed := false
+          | _ -> ()) body;
+      if !allowed then Some v else None
+  | _ -> None
+
+(* With a single push of an affine Int value, the range endpoints prove every
+   addition fits. The fast path uses existing capacity and commits length once. *)
+and affine_array_append fc item body =
+  let action = match body.e with
+    | XBlock ([ { st = SExpr call; _ } ], { e = XLit LUnit; _ }) -> call
+    | XBlock ([], call) -> call
+    | _ -> body
+  in
+  let rec invariant e =
+    match e.e with
+    | XLit (LInt _) -> true
+    | XVar v ->
+        v.vid <> item.vid && not v.vcell
+        && (match Hashtbl.find_opt fc.vars v.vid with Some (VDirect _) -> true | _ -> false)
+    | XBin ((Add | Sub | Mul), a, b) -> invariant a && invariant b
+    | _ -> false
+  in
+  let affine = match action.e with
+    | XCall (CBuiltin ("push@Array", _), [ _; { a = { e = XBin (Add, base, { e = XVar index; _ }); _ }; _ } ], _)
+      when index.vid = item.vid && invariant base -> Some base
+    | XCall (CBuiltin ("push@Array", _), [ _; { a = { e = XBin (Add, { e = XVar index; _ }, base); _ }; _ } ], _)
+      when index.vid = item.vid && invariant base -> Some base
+    | _ -> None
+  in
+  match affine with
+  | Some base ->
+      (match single_array_call fc "push@Array" body with
+       | Some v when (match repr (ts fc v.vty) with TArray (TInt (IInt | I64)) -> true | _ -> false) ->
+           Some (v, base)
+       | _ -> None)
+  | _ -> None
 
 (* Some writes when [v] is used only through elements and len in [body] *)
 and hoistable (v : var) (body : texpr list) : bool option =
@@ -1828,7 +2203,9 @@ and hoistable (v : var) (body : texpr list) : bool option =
       match s.st with
       | SLet (_, e) | SVar (_, e) | SExpr e | SReturn e | SAssert (e, _) | SAssertFails (_, e) | SCheck e -> visit_child e
       | SAssign (p, e) ->
-          if p.root.vid = v.vid then (match p.path with PIndex _ :: _ -> writes := true | _ -> good := false);
+          if p.root.vid = v.vid then
+            (match p.via, p.path with None, PIndex _ :: _ -> writes := true | _ -> good := false);
+          Option.iter visit_child p.via;
           List.iter (function PIndex i -> visit_child i | _ -> ()) p.path;
           visit_child e
       | SBreak | SContinue -> ()
@@ -1855,7 +2232,7 @@ and hoistable (v : var) (body : texpr list) : bool option =
 
 (* ---------- statements ---------- *)
 
-and declare_var fc (v : var) (init : string) =
+and declare_var ?(owned = true) fc (v : var) (init : string) =
   let st = fc.st in
   let n = var_name v in
   let t = ts fc v.vty in
@@ -1869,16 +2246,68 @@ and declare_var fc (v : var) (init : string) =
   end else begin
     line fc "%s %s = %s;" (cty st t) n init;
     Hashtbl.replace fc.vars v.vid (VDirect n);
-    if needs_rc st t then own_in fc n t
+    if owned && needs_rc st t then own_in fc n t
   end
+
+(* The immutable array continues to hold these strings for the entire
+   binding's lifetime. Reading the element does not need a second owner. *)
+and stable_string_source fc (e : texpr) =
+  let immutable v =
+    match Hashtbl.find_opt fc.vars v.vid with
+    | Some (VDirect _) -> not v.vmut && v.vkind <> VParam MMut
+    | _ -> false
+  in
+  match e.e with
+  | XLit (LStr _) -> true
+  | XVar v | XIndex ({ e = XVar v; _ }, _) -> immutable v
+  | _ -> false
+
+and borrows_array_string fc (v : var) (e : texpr) =
+  match repr (ts fc e.ty), e.e with
+  | TStr, XIndex _ when not v.vmut && not v.vcell -> stable_string_source fc e
+  | _ -> false
+
+(* A pure Boolean count is monotone. Its per-element additions can be
+   replaced by one checked add, with the original overflow location. *)
+and array_reduction fc p src body =
+  let target lhs place =
+    place.via = None && place.path = [] && lhs.vid = place.root.vid && not lhs.vcell
+    && (match repr (ts fc lhs.vty) with TInt (IInt | I64) -> true | _ -> false)
+  in
+  match p, src, body.e with
+  | TPVar bit, IArray (array, MBorrow),
+    XBlock ([ { st = SExpr { e = XIf ({ e = XVar tested; _ }, yes, { e = XLit LUnit; _ }); _ }; _ } ],
+             { e = XLit LUnit; _ }) when bit.vid = tested.vid ->
+      (match repr (ts fc array.ty), yes.e with
+       | TArray TBool,
+         XBlock ([ { st = SAssign (place, ({ e = XBin (Add, { e = XVar lhs; _ }, { e = XLit (LInt "1"); _ }); _ } as add)); _ } ],
+                  { e = XLit LUnit; _ })
+         when target lhs place -> Some (`Count, lhs, array, add.l)
+       | _ -> None)
+  | TPVar item, IArray (array, MBorrow),
+    XBlock ([ { st = SAssign (place,
+               ({ e = XBin (Add, { e = XVar lhs; _ }, { e = XVar element; _ }); _ } as add)); _ } ],
+             { e = XLit LUnit; _ })
+    when item.vid = element.vid && target lhs place
+         && (match repr (ts fc array.ty) with TArray (TInt (IInt | I64)) -> true | _ -> false) ->
+      Some (`Sum, lhs, array, add.l)
+  | _ -> None
 
 and stmt fc (s : tstmt) =
   let st = fc.st in
   push fc FStmt;
   (match s.st with
+   | SLet (TPVar v, e) when borrows_array_string fc v e ->
+       let init = tmp fc e.ty (expr fc e).c in
+       let f = List.hd fc.frames in
+       fc.frames <- List.tl fc.frames;
+       emit_drops fc f;
+       declare_var ~owned:false fc v init;
+       fc.frames <- { fk = FStmt; owned = [] } :: fc.frames
    | SLet (TPVar v, e) | SVar (v, e) ->
        let x = expr fc e in
        (* evaluate fully before the statement's temporaries are released *)
+       let x = if not x.owned && rc fc e.ty then { x with c = tmp fc e.ty x.c } else x in
        let init = tmp fc e.ty (own fc x e.ty) in
        (* declared in the enclosing scope, not the statement frame *)
        let f = List.hd fc.frames in
@@ -1898,6 +2327,27 @@ and stmt fc (s : tstmt) =
        let _, binds = pat_test fc e.ty p n in
        bind_pattern fc binds;
        fc.frames <- { fk = FStmt; owned = [] } :: fc.frames
+   | SAssign ({ via = None; path = []; root; _ },
+              ({ e = XBin (Add, { e = XVar lhs; _ }, rhs); ty = TInt (IInt | I64); _ } as e))
+     when lhs.vid = root.vid && not root.vcell
+          && (match Hashtbl.find_opt fc.vars root.vid with Some (VDirect _) -> true | _ -> false)
+          && natural_bound fc e = None
+          && (let rec quiet (x : texpr) =
+                match x.e with
+                | XLit _ | XVar _ -> true
+                | XBin ((Add | Sub | Mul), a, b) -> quiet a && quiet b
+                | XField (b, _, _) | XTupleGet (b, _) -> quiet b
+                | XIndex (a, i) -> quiet a && quiet i
+                | _ -> false
+              in
+              quiet rhs) ->
+       (* `v = v + e` on a plain local, where e writes nothing: the checked add stores straight
+          into v, which compiles to an add and a jump on overflow. e is evaluated first, and it
+          cannot change v, so the value and the trap are the ones the general form gives. *)
+       let x = expr fc rhs in
+       let rv = tmp fc (TInt IInt) (borrow fc x rhs.ty) in
+       let dst = var_read fc root in
+       line fc "if (__builtin_add_overflow(%s, %s, &%s)) stn_overflow(%s);" dst rv dst (loc_args e.l)
    | SAssign (p, e) ->
        let x = expr fc e in
        let nv = tmp fc p.pty (own fc x e.ty) in
@@ -1935,10 +2385,23 @@ and stmt fc (s : tstmt) =
        fc.ind <- fc.ind - 1;
        line fc "}"
    | SFor (p, src, body) ->
-       let plan = hoist_plan fc [ body ] in
-       let added = ref [] in
-       loop_over fc src p ~before:(fun () -> added := emit_hoists fc plan) (fun () -> discard fc body);
-       List.iter (Hashtbl.remove fc.cached) !added
+       (match array_reduction fc p src body with
+        | Some (`Count, lhs, array, loc) ->
+            let av = borrow fc (expr fc array) array.ty in
+            let count = tmp fc (TInt IInt) (Printf.sprintf "stn_array_count_true(%s)" av) in
+            let dst = var_read fc lhs in
+            line fc "%s = stn_add_i64(%s, %s, %s);" dst dst count (loc_args loc)
+        | Some (`Sum, lhs, array, loc) ->
+            let av = tmp fc array.ty (borrow fc (expr fc array) array.ty) in
+            let dst = var_read fc lhs in
+            line fc "%s = stn_array_sum_i64(%s, %s, %s);" dst av dst (loc_args loc)
+        | None ->
+            let plan = hoist_plan fc [ body ] in
+            let added = ref [] in
+            let pop_array = match src with IRange _ -> single_array_call fc "pop@Array" body | _ -> None in
+            loop_over fc src p ~before:(fun () -> added := emit_hoists fc plan) ?pop_array ~indexed_body:body
+              (fun () -> discard fc body);
+            List.iter (Hashtbl.remove fc.cached) !added)
    | SAssert (e, _) ->
        let cv = cond fc e in
        line fc "if (!%s) stn_trap(\"assertion failed\", %s, \"assert\");" cv (loc_args s.sl)
@@ -1995,6 +2458,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       line fc "  %s = %s;" res nv.c;
       line fc "}";
       { c = res; owned = true }
+  | "read_all@" -> owned (Printf.sprintf "stn_read_all(%s)" (loc_args e.l))
   | "clock_ns@" -> value "stn_clock_ns()"
   | "len@Array" -> (
       match (arg 0).a.e with
@@ -2005,13 +2469,21 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       let fin = md 0 in
       let x = o 1 in
       let lv = fin () in
-      line fc "STN_PUSH(&%s, %s, %s);" lv (cty st (elt ())) x;
+      (match (arg 0).a.e with
+       | XVar v when List.mem v.vid fc.unique_arrays ->
+           line fc "STN_PUSH_UNIQUE(&%s, %s, %s);" lv (cty st (elt ())) x
+       | _ -> line fc "STN_PUSH(&%s, %s, %s);" lv (cty st (elt ())) x);
       unit_ ()
   | "pop@Array" ->
       let lv = m 0 in
       let x = fresh st "_x" in
       line fc "%s %s;" (cty st (elt ())) x;
-      let ok = tmp fc TBool (Printf.sprintf "stn_array_pop(&%s, &%s)" lv x) in
+      let ok = fresh st "_ok" in
+      (match (arg 0).a.e with
+       | XVar v when List.mem_assoc v.vid fc.unchecked_pops ->
+           line fc "uint8_t %s = 1; %s = ((%s*)(%s)->data)[--%s];"
+             ok x (cty st (elt ())) lv (List.assoc v.vid fc.unchecked_pops)
+       | _ -> line fc "uint8_t %s; STN_POP(&%s, %s, %s, %s);" ok lv (cty st (elt ())) x ok);
       let res = fresh st "_r" in
       line fc "%s %s;" (ct fc t) res;
       line fc "if (%s) {" ok;
@@ -2037,7 +2509,15 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       line fc "%s %s;" (cty st t) x;
       line fc "stn_array_remove(&%s, %s, &%s, %s);" lv i x la;
       { c = x; owned = true }
-  | "clear@Array" -> line fc "stn_array_clear(&%s);" (m 0); unit_ ()
+  | "clear@Array" ->
+      let slot = fresh st "_slot" in
+      line fc "StnArray** %s = &%s;" slot (m 0);
+      (match (arg 0).a.e with
+       | XVar v when List.mem v.vid fc.unique_arrays -> line fc "(*%s)->len = 0;" slot
+       | _ when not (needs_rc st (elt ())) ->
+           line fc "if (stn_unique(*%s)) (*%s)->len = 0; else stn_array_clear(%s);" slot slot slot
+       | _ -> line fc "stn_array_clear(%s);" slot);
+      unit_ ()
   | "extend@Array" ->
       let fin = md 0 in
       let ys = b 1 in
@@ -2048,7 +2528,18 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       let n = tmp fc (TInt IInt) (expr fc (arg 0).a).c in
       let x = b 1 in
       let xt = tmp fc (elt ()) x in
-      owned (Printf.sprintf "stn_array_filled(%s, %s, &%s, %s)" (elem_ops st (elt ())) n xt la)
+      (match repr (elt ()) with
+       | TInt (IInt | I64) -> owned (Printf.sprintf "stn_array_filled_i64(%s, %s, %s, %s)" (elem_ops st (elt ())) n xt la)
+       | _ -> owned (Printf.sprintf "stn_array_filled(%s, %s, &%s, %s)" (elem_ops st (elt ())) n xt la))
+  | "repeat@Array" ->
+      (* [x; n]: the element is evaluated first and owned while the count runs, which may
+         replace the variable it was read from; the scope drops it once the copies are made *)
+      let xt = o 0 in
+      if rc fc (elt ()) then own_in fc xt (elt ());
+      let n = tmp fc (TInt IInt) (expr fc (arg 1).a).c in
+      (match repr (elt ()) with
+       | TInt (IInt | I64) -> owned (Printf.sprintf "stn_array_filled_i64(%s, %s, %s, %s)" (elem_ops st (elt ())) n xt la)
+       | _ -> owned (Printf.sprintf "stn_array_filled(%s, %s, &%s, %s)" (elem_ops st (elt ())) n xt la))
   | "copy@T" ->
       let x = expr fc (arg 0).a in
       { c = tmp fc t (own fc x t); owned = true }
@@ -2058,13 +2549,65 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       line fc "%s %s;" (ct fc t) res;
       line fc "memset(&%s, 0, sizeof %s);" res res;
       { c = res; owned = false }
+  | "byte_at_or_end@Str" ->
+      let s = b 0 in
+      let i = tmp fc (TInt IInt) (b 1) in
+      value (Printf.sprintf "stn_str_byte_at_or_end(%s, %s)" s i)
   | "chars@Str" -> owned (Printf.sprintf "stn_str_chars(%s, %s)" (b 0) (elem_ops st TChar))
   | "split@Str" -> let s = b 0 in let sep = b 1 in owned (Printf.sprintf "stn_str_split(%s, %s, %s, %s)" s sep (elem_ops st TStr) la)
-  | "join@Array" -> let xs = b 0 in let sep = b 1 in owned (Printf.sprintf "stn_str_join(%s, %s)" xs sep)
+  | "join@Array" -> (
+      match (arg 0).a.e with
+      | XArray parts ->
+          let parts = List.map (fun part ->
+              let value = expr fc part in
+              if not value.owned && stable_string_source fc part then tmp fc TStr value.c
+              else begin
+                let x = tmp fc TStr (own fc value TStr) in
+                own_in fc x TStr;
+                x
+              end) parts in
+          let sep = b 1 in
+          let args = if parts = [] then "NULL" else "(StnStr[]){ " ^ String.concat ", " parts ^ " }" in
+          owned (Printf.sprintf "stn_str_join_parts(%s, %d, %s)" args (List.length parts) sep)
+      | _ ->
+          let xs = b 0 in
+          let sep = b 1 in
+          owned (Printf.sprintf "stn_str_join(%s, %s)" xs sep))
   | "trim@Str" -> owned (Printf.sprintf "stn_str_trim(%s)" (b 0))
   | "contains@Str" -> let s = b 0 in let x = b 1 in value (Printf.sprintf "stn_str_contains(%s, %s)" s x)
-  | "starts_with@Str" -> let s = b 0 in let x = b 1 in value (Printf.sprintf "stn_str_starts_with(%s, %s)" s x)
-  | "ends_with@Str" -> let s = b 0 in let x = b 1 in value (Printf.sprintf "stn_str_ends_with(%s, %s)" s x)
+  | ("starts_with@Str" | "ends_with@Str") ->
+      let prefix = name = "starts_with@Str" in
+      (match (arg 1).a.e with
+       | XLit (LStr literal) ->
+           let s =
+             match (arg 0).a.e with
+             | XVar v when not v.vcell -> var_read fc v
+             | _ -> tmp fc TStr (b 0)
+           in
+           let n = String.length literal in
+           let offset = if prefix then "" else Printf.sprintf " + (%s->len - %d)" s n in
+           let data = Printf.sprintf "(%s->data%s)" s offset in
+           let cmp at width =
+             let bytes = c_string (String.sub literal at width) in
+             if width = 2 || width = 4 || width = 8 then
+               let bits = width * 8 in
+               Printf.sprintf "(stn_load_u%d(%s + %d) == stn_load_u%d(%s))" bits data at bits bytes
+             else Printf.sprintf "(memcmp(%s + %d, %s, %d) == 0)" data at bytes width
+           in
+           (* Two fixed-width, overlapping comparisons avoid a libc call
+              for short literals between the native comparison widths. *)
+           let same =
+             if n <= 1 || n > 16 then cmp 0 n
+             else
+               let width = if n < 4 then 2 else if n < 8 then 4 else 8 in
+               if n = width then cmp 0 width
+               else Printf.sprintf "(%s & %s)" (cmp 0 width) (cmp (n - width) width)
+           in
+           value (Printf.sprintf "(%s->len >= %d && %s)" s n same)
+       | _ ->
+           let s = tmp fc TStr (b 0) in
+           let p = b 1 in
+           value (Printf.sprintf "stn_str_%s(%s, %s)" (if prefix then "starts_with" else "ends_with") s p))
   | "repeat@Str" -> let s = b 0 in let n = tmp fc (TInt IInt) (expr fc (arg 1).a).c in owned (Printf.sprintf "stn_str_repeat(%s, %s, %s)" s n la)
   | "parse_int@Str" | "parse_float@Str" ->
       let s = b 0 in
@@ -2123,8 +2666,11 @@ let compile_instance st cname uname tys =
   in
   pr st.protos "%s;\n" header;
   let b = Buffer.create 4096 in
-  let fc = { st; b; ind = 1; sub; frames = []; can_fail; ret; vars = Hashtbl.create 32; self_struct = None; cached = Hashtbl.create 4; lend = sg.slend } in
-  pr b "%s {\n" header;
+  let fc = { st; b; ind = 1; sub; frames = []; can_fail; ret; vars = Hashtbl.create 32; self_struct = None; cached = Hashtbl.create 4; natural_max = Hashtbl.create 4; unique_arrays = []; loop_indices = []; checked_ranges = []; unchecked_pops = []; lend = sg.slend } in
+  (* A C compiler guesses how often each block runs, and treats the late arms of a long chain of
+     tests as cold: a loop inlined there is then compiled for size, without the conditional moves
+     it would get anywhere else. Every Starnite function is compiled for speed instead. *)
+  pr b "STN_HOT %s {\n" header;
   push fc FFun;
   List.iter
     (fun (v, m, t) ->
@@ -2194,7 +2740,7 @@ let emit_show_error st =
       List.iter
         (fun (k, id, t) ->
           Hashtbl.replace seen k ();
-          let fc = { st; b = Buffer.create 64; ind = 0; sub = []; frames = []; can_fail = false; ret = TStr; vars = Hashtbl.create 1; self_struct = None; cached = Hashtbl.create 4; lend = None } in
+          let fc = { st; b = Buffer.create 64; ind = 0; sub = []; frames = []; can_fail = false; ret = TStr; vars = Hashtbl.create 1; self_struct = None; cached = Hashtbl.create 4; natural_max = Hashtbl.create 4; unique_arrays = []; loop_indices = []; checked_ranges = []; unchecked_pops = []; lend = None } in
           pr b "    case %d: return %s;\n" id (show_call fc t (err_val st t "e")))
         pending;
       loop ()

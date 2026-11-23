@@ -401,6 +401,10 @@ and parse_primary st =
           let cs = parse_comps st in
           expect_op st "]";
           mk (Comp (e, cs)) l
+        end else if accept_op st ";" then begin
+          let n = parse_expr st in
+          expect_op st "]";
+          mk (ArrayRepeat (e, n)) l
         end else begin
           let rest = if accept_op st "," then comma_list st "]" parse_expr else [] in
           expect_op st "]";

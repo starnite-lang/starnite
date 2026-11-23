@@ -1,0 +1,39 @@
+# [x; n] is n copies of x in one allocation, the same as filled(n, x) (section 4.2). Evaluation is left to
+# right: the element once, then the count. The result is an ordinary array.
+type Point = struct(x: Int, y: Int)
+
+fn count() -> Int:
+    print("count")
+    3
+
+fn element() -> Str:
+    print("element")
+    "ab"
+
+fn swap_out(mut xs: Array[Str]) -> Int:
+    xs = [repeat("fresh", 3)]
+    2
+
+fn main():
+    var grid = [0; 5]
+    grid[2] = 7
+    grid.push(9)
+    print(f"{grid} {len(grid)}")
+    let flags = [false; 2]
+    let words = [element(); count()]
+    print(f"{flags} {words}")
+    let rows = [[1, 2]; 2]
+    var copy = rows
+    copy[0].push(3)
+    print(f"{rows} {copy}")
+    let points = [Point(1, 2); 2]
+    let empty: Array[Int] = [0; 0]
+    let floats = [1.5; 2]
+    print(f"{points[1].y} {len(empty)} {floats} {[1 + 1; 1 + 2]}")
+    # the element is held while the count runs, even when the count replaces its variable
+    var s = [repeat("old", 3)]
+    let r = [s; swap_out(mut s)]
+    print(f"{r} {s}")
+    let n = 0 - 1
+    let bad = [0; n]
+    print(f"{len(bad)}")

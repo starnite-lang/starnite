@@ -7,6 +7,9 @@
 #include <stddef.h>
 #include <string.h>
 #include <stdatomic.h>
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 
 /* ---- object header (section 11.1) ---- */
 typedef struct stn_header {
@@ -70,9 +73,54 @@ StnStr stn_str_new(const char* data, int64_t len);
 StnStr stn_str_from_bytes(const char* data, int64_t len);   /* makes the bytes valid UTF-8 */
 StnStr stn_str_concat(StnStr a, StnStr b);
 StnStr stn_str_concat_n(int n, StnStr* parts);   /* borrows parts */
-int    stn_str_eq(StnStr a, StnStr b);
+/* Fixed-size comparisons may start at unaligned byte offsets. */
+static inline uint16_t stn_load_u16(const char* p) {
+    uint16_t value;
+    memcpy(&value, p, sizeof value);
+    return value;
+}
+
+static inline uint32_t stn_load_u32(const char* p) {
+    uint32_t value;
+    memcpy(&value, p, sizeof value);
+    return value;
+}
+
+static inline uint64_t stn_load_u64(const char* p) {
+    uint64_t value;
+    memcpy(&value, p, sizeof value);
+    return value;
+}
+
+static inline __attribute__((always_inline)) int stn_str_eq(StnStr a, StnStr b) {
+    if (a == b) return 1;
+    if (a->len != b->len) return 0;
+    size_t n = (size_t)a->len;
+#if defined(__SSE2__)
+    if (n >= 16 && n <= 48) {
+        __m128i first = _mm_cmpeq_epi8(
+            _mm_loadu_si128((const __m128i_u*)a->data),
+            _mm_loadu_si128((const __m128i_u*)b->data));
+        if ((unsigned)_mm_movemask_epi8(first) != 0xffffu) return 0;
+        __m128i last = _mm_cmpeq_epi8(
+            _mm_loadu_si128((const __m128i_u*)(a->data + n - 16)),
+            _mm_loadu_si128((const __m128i_u*)(b->data + n - 16)));
+        if (n > 32) {
+            __m128i middle = _mm_cmpeq_epi8(
+                _mm_loadu_si128((const __m128i_u*)(a->data + 16)),
+                _mm_loadu_si128((const __m128i_u*)(b->data + 16)));
+            last = _mm_and_si128(last, middle);
+        }
+        return (unsigned)_mm_movemask_epi8(last) == 0xffffu;
+    }
+#endif
+    return memcmp(a->data, b->data, n) == 0;
+}
 int    stn_str_cmp(StnStr a, StnStr b);
 StnStr stn_str_slice(StnStr s, int64_t lo, int64_t hi, const char* file, int line, int col);
+static inline int64_t stn_str_byte_at_or_end(StnStr s, int64_t i) {
+    return (uint64_t)i < (uint64_t)s->len ? (unsigned char)s->data[i] : -1;
+}
 #define STN_STR_DUP(s) (stn_dup(s), (s))
 #define STN_STR_DROP(s) stn_drop((s), stn_str_release)
 
@@ -117,6 +165,15 @@ void      stn_array_push_slow(StnArray** a, const void* elem);
         else { T stn_pv_ = (v); stn_array_push_slow((pa), &stn_pv_); }               \
     } while (0)
 
+/* Used only while the compiler's loop guard proves exclusive ownership. */
+#define STN_PUSH_UNIQUE(pa, T, v) do {                                            \
+        StnArray** stn_slot_ = (pa);                                              \
+        StnArray* stn_array_ = *stn_slot_;                                        \
+        if (__builtin_expect(stn_array_->len < stn_array_->cap, 1))                \
+            ((T*)stn_array_->data)[stn_array_->len++] = (v);                        \
+        else { T stn_value_ = (v); stn_array_push_slow(stn_slot_, &stn_value_); }   \
+    } while (0)
+
 /* takes the element; constant time on average, since capacity doubles */
 static inline void stn_array_push(StnArray** pa, const void* elem) {
     StnArray* a = *pa;
@@ -126,12 +183,29 @@ static inline void stn_array_push(StnArray** pa, const void* elem) {
     } else stn_array_push_slow(pa, elem);
 }
 void      stn_array_reserve(StnArray** a, int64_t extra);
+void      stn_array_reserve_hint(StnArray** a, uint64_t extra);
 StnArray* stn_array_slice(StnArray* a, int64_t lo, int64_t hi, const char* file, int line, int col);
 void      stn_array_extend(StnArray** a, StnArray* b);
 void      stn_array_insert(StnArray** a, int64_t i, const void* elem, const char* file, int line, int col);
 void      stn_array_remove(StnArray** a, int64_t i, void* out, const char* file, int line, int col);
-int       stn_array_pop(StnArray** a, void* out);
+#define STN_POP(pa, T, out, ok) do {                           \
+        StnArray** stn_slot_ = (pa);                           \
+        (ok) = (*stn_slot_)->len != 0;                        \
+        if (ok) {                                            \
+            stn_array_make_unique(stn_slot_);                \
+            StnArray* stn_pop_ = *stn_slot_;                   \
+            (out) = ((T*)stn_pop_->data)[--stn_pop_->len];     \
+        }                                                    \
+    } while (0)
 void      stn_array_clear(StnArray** a);
+void      stn_array_sort_i64(StnArray** a);
+void      stn_array_reverse_i64(StnArray** a);
+int       stn_array_contains_i64(const StnArray* a, int64_t value);
+int64_t   stn_array_count_true(const StnArray* a);
+int64_t   stn_array_sum_popped_i64(StnArray* a, int64_t count, int64_t sum,
+                                  const char* file, int line, int col);
+int64_t   stn_array_sum_i64(const StnArray* a, int64_t initial, const char* file, int line, int col);
+StnArray* stn_array_filled_i64(const StnElemOps* ops, int64_t n, int64_t value, const char* file, int line, int col);
 StnArray* stn_array_filled(const StnElemOps* ops, int64_t n, const void* elem, const char* file, int line, int col);
 
 _Noreturn void stn_index_trap(int64_t i, int64_t len, const char* file, int line, int col);
@@ -179,18 +253,64 @@ static inline StnError stn_error_dup(StnError e) { if (e.box) stn_dup(e.box); re
 /* ---- console and the rest of the built-ins ---- */
 void    stn_print(StnStr s);
 int     stn_read_line(StnStr* out);
+StnStr  stn_read_all(const char* file, int line, int col);
 int64_t stn_clock_ns(void);
 StnArray* stn_str_chars(StnStr s, const StnElemOps* char_ops);
 StnArray* stn_str_split(StnStr s, StnStr sep, const StnElemOps* str_ops, const char* file, int line, int col);
+StnStr  stn_str_join_parts(const StnStr* parts, int64_t n, StnStr sep);
 StnStr  stn_str_join(StnArray* xs, StnStr sep);
 StnStr  stn_str_trim(StnStr s);
-uint8_t stn_str_contains(StnStr s, StnStr sub);
-uint8_t stn_str_starts_with(StnStr s, StnStr p);
-uint8_t stn_str_ends_with(StnStr s, StnStr p);
+uint8_t stn_str_contains_slow(StnStr s, StnStr sub);
+static inline uint8_t stn_str_contains(StnStr s, StnStr sub) {
+#if defined(__SSE2__)
+    /* A four-byte needle can be verified without a memcmp call. Scan a
+       final overlapping vector so both loads stay inside the string. */
+    if (sub->len == 4 && s->len >= 19 && s->len <= 64) {
+        uint32_t needle;
+        memcpy(&needle, sub->data, sizeof needle);
+        __m128i first = _mm_set1_epi8(sub->data[0]);
+        __m128i last = _mm_set1_epi8(sub->data[3]);
+        size_t limit = (size_t)s->len - 19;
+        size_t i = 0;
+        for (;;) {
+            const char* start = s->data + i;
+            __m128i lo = _mm_loadu_si128((const __m128i_u*)start);
+            __m128i hi = _mm_loadu_si128((const __m128i_u*)(start + 3));
+            unsigned mask = (unsigned)_mm_movemask_epi8(
+                _mm_and_si128(_mm_cmpeq_epi8(lo, first), _mm_cmpeq_epi8(hi, last)));
+            while (mask != 0) {
+                unsigned offset = (unsigned)__builtin_ctz(mask);
+                uint32_t candidate;
+                memcpy(&candidate, start + offset, sizeof candidate);
+                if (candidate == needle) return 1;
+                mask &= mask - 1;
+            }
+            if (i == limit) return 0;
+            i = i + 16 < limit ? i + 16 : limit;
+        }
+    }
+#endif
+    return stn_str_contains_slow(s, sub);
+}
+static inline uint8_t stn_str_starts_with(StnStr s, StnStr p) {
+    return p->len <= s->len && memcmp(s->data, p->data, (size_t)p->len) == 0;
+}
+static inline uint8_t stn_str_ends_with(StnStr s, StnStr p) {
+    return p->len <= s->len && memcmp(s->data + (s->len - p->len), p->data, (size_t)p->len) == 0;
+}
 StnStr  stn_str_repeat(StnStr s, int64_t n, const char* file, int line, int col);
 int     stn_parse_int(StnStr s, int64_t* out);   /* 0 ok, 1 invalid, 2 out of range */
 int     stn_parse_float(StnStr s, double* out);  /* 0 ok, 1 invalid */
 void    stn_check_char(int64_t c, const char* file, int line, int col);
+
+/* Generated functions are compiled for speed wherever they end up being inlined. Only an optimized
+   release build asks for it: Clang honours the attribute even at -O0, which makes a debug build
+   several times slower to compile. */
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__OPTIMIZE__) && !defined(STN_DEBUG)
+#  define STN_HOT __attribute__((hot))
+#else
+#  define STN_HOT
+#endif
 
 /* ---- integer arithmetic that traps (section 17.1) ---- */
 #define STN_ARITH(T, N)                                                                      \

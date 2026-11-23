@@ -107,6 +107,32 @@ fault_split() { split_fault split; }
 # the same, where the two differ in what a program prints (not in a trap's place, which is left out): the
 # difference is on the standard output, byte for byte
 fault_split_stdout() { split_fault split-stdout; }
+# two programs run alike: the same exit status, the same standard output and the same standard
+# error, byte for byte. A shrunk program may end in a trap (status 2). A trap writes one header,
+# `trap: KIND at FILE:LINE:COL` (or `trap: stack overflow`, which has no place), as the first line
+# of standard error, and then its message. The
+# place differs between the two forms, so it is left out of that first line and of nothing else:
+# the message is compared as it is, whatever it says. Status 2 without that header first is an
+# uncaught exception of the compiler, which begins with a header of its own, and is not alike.
+same_run() {
+    "$starnite" run --interp "$1" > "$tmp/s.out" 2> "$tmp/s.err"; s1=$?
+    "$starnite" run --interp "$2" > "$tmp/o.out" 2> "$tmp/o.err"; s2=$?
+    [ "$s1" = "$s2" ] || return 1
+    case $s1 in
+        0) ;;
+        2) for f in s o; do
+               first=$(head -n 1 "$tmp/$f.err")
+               # a stack overflow has no place, and is compared as it is
+               [ "$first" = 'trap: stack overflow' ] && continue
+               # the place is the last `:LINE:COL` of the line; the path before it may hold spaces
+               printf '%s\n' "$first" | grep -q '^trap: .* at ..*:[0-9][0-9]*:[0-9][0-9]*$' || return 1
+               # the kind of a trap holds no ` at `, so the first one on the line begins the place
+               sed '1s/ at .*$//' "$tmp/$f.err" > "$tmp/$f.cut" && mv "$tmp/$f.cut" "$tmp/$f.err"
+           done ;;
+        *) return 1 ;;
+    esac
+    cmp -s "$tmp/s.out" "$tmp/o.out" && cmp -s "$tmp/s.err" "$tmp/o.err"
+}
 split_fault() {
     fault=$1
     seed=
@@ -121,7 +147,7 @@ split_fault() {
         bad "fault $fault: the fuzzer did not report a difference (seed $seed)"; printf '%s\n' "$out" | tail -10
     elif [ ! -f "$m" ] || [ "$(head -1 "$m")" != '# module' ]; then bad "fault $fault: the shrunk program is not split (seed $seed)"
     elif [ "$(lines "$m")" -gt 40 ]; then bad "fault $fault: the shrunk program has $(lines "$m") lines"
-    elif ! "$starnite" run --interp "$d/case$seed.min.split/main.stn" > "$tmp/s.out" 2>&1 || ! "$starnite" run --interp "$m" > "$tmp/o.out" 2>&1 || ! cmp -s "$tmp/s.out" "$tmp/o.out"; then
+    elif ! same_run "$d/case$seed.min.split/main.stn" "$m"; then
         bad "fault $fault: the real compiler does not run the shrunk program alike in two files and in one"
     else ok "fault $fault: $(lines "$d/case$seed.stn") lines shrunk to $(lines "$m")"; fi
 }

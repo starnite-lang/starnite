@@ -1,0 +1,7 @@
+# A failed read of standard input traps at the call site, with the same exit status and message
+# in the interpreter and in both C builds (sections 11.5 and 21.2). The runner redirects
+# standard input from a directory for programs that have a matching .stdin-dir marker file.
+fn main():
+    print("before")
+    let text = read_all()
+    print(text)

@@ -18,9 +18,12 @@ capture() { "$@" > "$tmp/out" 2>&1; echo "exit $?" >> "$tmp/out"; cat "$tmp/out"
 for f in "$here"/run/*.stn; do
     name=$(basename "$f" .stn)
     rel=${f#"$root/"}
-    (cd "$root" && capture "$starnite" run --interp "$rel") > "$tmp/interp"
-    (cd "$root" && capture "$starnite" run "$rel") > "$tmp/debug"
-    (cd "$root" && capture "$starnite" run --release "$rel") > "$tmp/release"
+    # a .stdin-dir marker makes standard input a directory, so reading it fails
+    input=/dev/null
+    if [ -f "$here/run/$name.stdin-dir" ]; then input=$here; fi
+    (cd "$root" && capture "$starnite" run --interp "$rel" < "$input") > "$tmp/interp"
+    (cd "$root" && capture "$starnite" run "$rel" < "$input") > "$tmp/debug"
+    (cd "$root" && capture "$starnite" run --release "$rel" < "$input") > "$tmp/release"
     golden="$here/run/$name.out"
     if [ "${UPDATE:-}" = 1 ]; then cp "$tmp/interp" "$golden"; fi
     ok=1

@@ -39,6 +39,7 @@ trait IndexMut*[K, V]:
 # ---- console ----
 fn print*(s: Str) ! io
 fn read_line*() -> Str? ! io
+fn read_all*() -> Str ! io
 fn clock_ns*() -> Int ! io
 
 # ---- arrays ----
@@ -55,6 +56,8 @@ fn unreachable*[T](msg: Str) -> T
 
 # ---- strings ----
 fn len*(s: Str) -> Int
+# Byte offset into the UTF-8 representation. EOF and invalid offsets yield -1.
+fn byte_at_or_end*(s: Str, i: Int) -> Int
 fn chars*(s: Str) -> Array[Char]
 fn split*(s: Str, sep: Str) -> Array[Str]
 fn join*(xs: Array[Str], sep: Str) -> Str
