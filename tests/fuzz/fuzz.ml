@@ -11,10 +11,17 @@
    Negative fuzzing: a program that agrees gets one mutation with a known violation of a
    rule of the language, and the checker must reject it with the code of that rule.
 
+   Half of the programs are split across a module (see [render]), and then also run as the
+   one file that their text is.
+
+   The compiler does not crash: with --crash, the bytes of each program are changed with
+   no regard for what it says, and whatever the compiler says of the result, it must say.
+
    A failing program is shrunk, by taking out statements and items and simplifying what
    is left, while it still fails the same way.
 
      dune exec tests/fuzz/fuzz.exe -- [--count N] [--seed S] [--keep DIR] [--shrink]
+     dune exec tests/fuzz/fuzz.exe -- --crash [--count N] [--seed S] [--keep DIR] [--shrink]
      dune exec tests/fuzz/fuzz.exe -- --reduce FILE [--keeping TEXT | --rejected CODE]
 
    tests/fuzz/selftest.sh checks the fuzzer itself, with the compilers of buggy.sh.
@@ -247,6 +254,27 @@ fn with_cb(mut xs: Array[Int], f: fn() -> Int):
     xs.push(f())
 |}
 
+(* The text of a program is one file, with a comment line between the prelude and what is generated.
+   When its first line is [module_header] the program is written as two files: a module with the
+   prelude, all of it exported, and a main that imports it and writes each name of the module with
+   the module's name before it (see [render]). The text is also the one-file program that the two
+   stand for, and the two must do the same. *)
+let generated_marker = "# generated"
+let module_header = "# module"
+
+(* A type of the program itself that implements a trait of the prelude, after main: when the prelude is in a
+   module, the impl of a trait of one module for a type of another. *)
+let local_block =
+  {|type Local = struct(k: Int)
+
+impl Fig for Local:
+    fn area(f: Local) -> Int:
+        f.k *% 3
+    fn label(f: Local) -> Str:
+        f"loc{f.k}"
+    fn scale(f: Local, k: Int) -> Int:
+        f.k +% k|}
+
 (* ---------- the generator ---------- *)
 
 type gen = {
@@ -285,7 +313,7 @@ let leaf g t =
   | "Int?" -> "no_int()"
   | "any Show" -> choice g [| "Pair(0, \"p\")"; "7"; "true"; "Dot" |]
   | "Array[any Show]" -> "no_shows()"
-  | "any Fig" -> choice g [| "Sq(1)"; "Rc(2, 3)"; "Tri(4)" |]
+  | "any Fig" -> choice g [| "Sq(1)"; "Rc(2, 3)"; "Tri(4)"; "Local(5)" |]
   | "Array[any Fig]" -> "no_figs()"
   | "(any Fig)?" -> "no_fig()"
   | "any Chk" -> choice g [| "Lim(3)"; {|Soft("s")|} |]
@@ -366,7 +394,7 @@ let rec expr g t d =
         e (choice g [| "Int"; "Str"; "Bool"; "Pair"; "Shape"; "Array[Int]"; "Int?" |])
     | "Array[any Show]" -> if chance g 0.7 then sprintf "shows_from(%s)" (e "Array[Int]") else "no_shows()"
     | "any Fig" -> (
-        match int g 11 with
+        match int g 12 with
         | 0 -> sprintf "Sq(%s)" (e "Int")
         | 1 -> sprintf "Rc(%s, %s)" (e "Int") (e "Int")
         | 2 -> sprintf "Tag(%s, %s)" (e "Str") (e "Array[Int]")
@@ -377,6 +405,7 @@ let rec expr g t d =
         | 7 -> sprintf "Many(%s, %s)" (e "Array[any Fig]") (e "Str")
         | 8 -> sprintf "first_fig(%s)" (e "Array[any Fig]")
         | 9 -> sprintf "(%s).or(%s)" (e "(any Fig)?") (e "any Fig")
+        | 10 -> sprintf "Local(%s)" (e "Int")
         | _ -> leaf g t)
     | "Array[any Fig]" -> (
         match int g 3 with
@@ -516,7 +545,10 @@ let program seed =
         @ [ sprintf "    (%s)" ret; "" ])
   in
   let main = stmts g 1 (range g 3 12) 3 in
-  String.concat "\n" ((prelude :: List.concat fns) @ ("fn main():" :: main) @ [ {|    print("end")|} ]) ^ "\n"
+  let text = String.concat "\n" ((prelude :: generated_marker :: List.concat fns) @ ("fn main():" :: main) @ [ {|    print("end")|}; ""; local_block ]) ^ "\n" in
+  (* half of the programs are split across a module: see [render]. The generator's own random numbers are
+     not used for it, so that a seed gives the same statements either way. *)
+  if Random.State.bool (Random.State.make [| seed; 0x6d6f64 |]) then module_header ^ "\n" ^ text else text
 
 (* ---------- text helpers ---------- *)
 
@@ -568,6 +600,169 @@ let group_at lines i =
 
 let delete_lines lines i j = Array.append (Array.sub lines 0 i) (Array.sub lines j (Array.length lines - j))
 
+(* ---------- programs in more than one file ---------- *)
+
+let is_ident_start c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c = '_'
+let is_ident_char c = is_ident_start c || (c >= '0' && c <= '9')
+
+let split_str sep s =
+  let m = String.length sep in
+  let rec go from acc =
+    match index_of (String.sub s from (String.length s - from)) sep with
+    | Some i -> go (from + i + m) (String.sub s from i :: acc)
+    | None -> List.rev (String.sub s from (String.length s - from) :: acc)
+  in
+  go 0 []
+
+(* the line of the comment between the prelude and what is generated *)
+let marker_index lines =
+  let r = ref (-1) in
+  Array.iteri (fun i l -> if l = generated_marker && !r < 0 then r := i) lines;
+  !r
+
+(* [single_file] is set by a reduction of a file that is not split: its candidates are written in that mode
+   whatever they look like (they can come to look split, when what is before the header is taken out), so
+   that a module that is next to the input is never written over.
+
+   A text is a program split across a module when its first line is the header, exactly, and the line between
+   the prelude and what is generated comes after it. A file that starts with a comment that begins alike
+   (`# module smoke test`) is an ordinary program: the same test decides how a text is written and where a
+   reduction is tried, so that what it imports is found where it is. *)
+let single_file = ref false
+
+let is_split text =
+  let ls = lines_of text in
+  (not !single_file) && Array.length ls > 0 && ls.(0) = module_header && marker_index ls > 0
+
+(* a top-level function, type or trait, with a star after its name: the module exports it *)
+let export_decl l =
+  match List.find_opt (fun k -> is_prefix k l) [ "fn "; "type "; "trait " ] with
+  | None -> l
+  | Some k ->
+      let j = ref (String.length k) in
+      while !j < String.length l && is_ident_char l.[!j] do incr j done;
+      String.sub l 0 !j ^ "*" ^ String.sub l !j (String.length l - !j)
+
+(* the names a module has at its top level: functions, types, traits, and the variants of its data
+   types, as the pieces of `A | B(x: Int) | C` after the equals sign *)
+let top_names lines =
+  let names = ref [] in
+  let add s = if s <> "" && not (List.mem s !names) then names := s :: !names in
+  let ident_at l j =
+    let k = ref j in
+    while !k < String.length l && is_ident_char l.[!k] do incr k done;
+    String.sub l j (!k - j)
+  in
+  Array.iter
+    (fun l ->
+      List.iter
+        (fun kw ->
+          if is_prefix kw l then begin
+            add (ident_at l (String.length kw));
+            if kw = "type " then
+              match index_of l " = " with
+              | Some p ->
+                  List.iter
+                    (fun piece ->
+                      let piece = String.trim piece in
+                      if piece <> "" && piece.[0] >= 'A' && piece.[0] <= 'Z' then add (ident_at piece 0))
+                    (split_str " | " (String.sub l (p + 3) (String.length l - p - 3)))
+              | None -> ()
+          end)
+        [ "fn "; "type "; "trait " ])
+    lines;
+  !names
+
+(* [text] with each of [names] that is not a member (after a dot) written with [modname] and a dot before it.
+   String and character literals and comments are left as they are; the interpolations of an f-string are
+   code, and may have string literals in them. *)
+let qualify names modname text =
+  let n = String.length text in
+  let b = Buffer.create (n + (n / 8)) in
+  let i = ref 0 in
+  let copy () = Buffer.add_char b text.[!i]; incr i in
+  let copy_literal q =
+    copy ();
+    while !i < n && text.[!i] <> q do
+      if text.[!i] = '\\' && !i + 1 < n then copy ();
+      copy ()
+    done;
+    if !i < n then copy ()
+  in
+  let after_dot () =
+    let len = Buffer.length b in
+    len >= 1 && Buffer.nth b (len - 1) = '.' && not (len >= 2 && Buffer.nth b (len - 2) = '.')
+  in
+  let rec code ~in_interpolation =
+    let depth = ref 0 and fin = ref false in
+    while (not !fin) && !i < n do
+      let c = text.[!i] in
+      if c = '"' || c = '\'' then copy_literal c
+      else if c = '#' && not in_interpolation then (while !i < n && text.[!i] <> '\n' do copy () done)
+      else if c = '{' then (incr depth; copy ())
+      else if c = '}' then (if in_interpolation && !depth = 0 then fin := true else (decr depth; copy ()))
+      else if is_ident_start c then begin
+        let st = !i in
+        while !i < n && is_ident_char text.[!i] do incr i done;
+        let s = String.sub text st (!i - st) in
+        if s = "f" && !i < n && text.[!i] = '"' then (Buffer.add_string b s; fstring ())
+        else if (not (after_dot ())) && List.mem s names then (Buffer.add_string b modname; Buffer.add_char b '.'; Buffer.add_string b s)
+        else Buffer.add_string b s
+      end
+      else if c >= '0' && c <= '9' then (while !i < n && is_ident_char text.[!i] do copy () done)
+      else copy ()
+    done
+  and fstring () =
+    copy ();
+    while !i < n && text.[!i] <> '"' do
+      if text.[!i] = '\\' && !i + 1 < n then (copy (); copy ())
+      else if text.[!i] = '{' then begin
+        copy ();
+        code ~in_interpolation:true;
+        if !i < n then copy ()
+      end
+      else copy ()
+    done;
+    if !i < n then copy ()
+  in
+  code ~in_interpolation:false;
+  Buffer.contents b
+
+let module_name = "fuzzlib"
+
+(* the files a text stands for: its main, and the module that main imports, if it has one *)
+type files = { main : string; lib : string option }
+
+let render text =
+  let lines = lines_of text in
+  let k = marker_index lines in
+  if is_split text && k > 0 then begin
+    let lib_lines = Array.sub lines 1 (k - 1) in
+    let rest = Array.sub lines (k + 1) (Array.length lines - k - 1) in
+    { main = "import " ^ module_name ^ "\n\n" ^ qualify (top_names lib_lines) module_name (text_of rest);
+      lib = Some (text_of (Array.map export_decl lib_lines)) }
+  end
+  else { main = text; lib = None }
+
+(* write a program: [path] is its main, and the module, if it has one, goes next to it *)
+let write_program path text =
+  let f = render text in
+  Out_channel.with_open_bin path (fun oc -> output_string oc f.main);
+  match f.lib with
+  | Some lib -> Out_channel.with_open_bin (Filename.concat (Filename.dirname path) (module_name ^ ".stn")) (fun oc -> output_string oc lib)
+  | None -> ()
+
+(* what a run printed, with the places of traps left out: the places of a program in two files are not
+   those of the same program in one *)
+let without_places out =
+  String.concat "\n"
+    (List.map
+       (fun l ->
+         if is_prefix "trap: " l then
+           match index_of l " at " with Some p -> String.sub l 0 p | None -> l
+         else l)
+       (String.split_on_char '\n' out))
+
 (* ---------- negative fuzzing (section 21.2) ---------- *)
 
 (* A well-typed program with one mutation that has a known violation must be rejected, with the
@@ -605,21 +800,27 @@ let ends_with suf s =
   let n = String.length s and m = String.length suf in
   n >= m && String.sub s (n - m) m = suf
 
-(* the generated part of the program starts after the prelude, which is the same in every program *)
-let generated_from () = Array.length (lines_of prelude)
+(* the generated part of the program starts after the comment that follows the prelude, which is the same
+   in every program. Mutations leave the comment where it is. *)
+let generated_from lines =
+  let k = marker_index lines in
+  if k < 0 then Array.length lines else k + 1
 
-(* a violation in lines of its own goes before the last print of main, a function of its own before main *)
-let before_end lines news =
+(* the last print of main: what comes after it is not part of main *)
+let end_of_main lines =
   let r = ref (Array.length lines - 1) in
   Array.iteri (fun i l -> if l = {|    print("end")|} then r := i) lines;
-  insert_after lines (!r - 1) news
+  !r
+
+(* a violation in lines of its own goes before the last print of main, a function of its own before main *)
+let before_end lines news = insert_after lines (end_of_main lines - 1) news
 
 let before_main lines news = insert_after lines (main_index lines - 1) news
 
 (* the declarations `let|var NAME: TYPE = ...` of the generated part of the program, at any depth: a
    statement put right after one, with its indentation, is in the scope of the name *)
 let decls lines =
-  let first = generated_from () in
+  let first = generated_from lines in
   let r = ref [] in
   Array.iteri (fun i l -> if i >= first then match decl_of l with Some (ind, v, n, t) -> r := (i, ind, v, n, t) :: !r | None -> ()) lines;
   List.rev !r
@@ -628,12 +829,13 @@ let decls lines =
    with its indentation, goes in the same block. A header, an arm (with its body on the same line or
    not), and the result that ends a function are not among them. *)
 let statement_lines lines =
-  let first = generated_from () in
+  let first = generated_from lines in
+  let last = end_of_main lines in
   let r = ref [] in
   Array.iteri
     (fun i l ->
       let t = String.trim l in
-      if i >= first && indent_of l >= 4 && t <> "" && t.[0] <> '(' && (not (ends_with ":" t)) && not (contains t "->") then
+      if i >= first && i <= last && indent_of l >= 4 && t <> "" && t.[0] <> '(' && (not (ends_with ":" t)) && not (contains t "->") then
         r := (i, indent_of l) :: !r)
     lines;
   List.rev !r
@@ -709,7 +911,7 @@ let mutations : mutation list =
       in_context =
         (fun rng lines ->
           (* a variable of its own before a loop of the program, taken as the loop's first statement *)
-          let first = generated_from () in
+          let first = generated_from lines in
           let found = ref [] in
           Array.iteri
             (fun j l ->
@@ -1055,7 +1257,8 @@ let shrink ?(budget = 400) ~still_fails text =
     progress := false;
     let i = ref 0 in
     while !i < Array.length !cur && !evals < budget do
-      if blank !cur.(!i) then incr i
+      (* the comments say how the program is written to files, and stay *)
+      if blank !cur.(!i) || is_prefix "#" (String.trim !cur.(!i)) then incr i
       else begin
         let cand = delete_lines !cur !i (group_at !cur !i) in
         if attempt cand then (cur := cand; progress := true)
@@ -1086,29 +1289,37 @@ exception Hang of string
 
 let read_file path = In_channel.with_open_bin path In_channel.input_all
 
-(* Run the compiler on a file, with its output in a temporary file and a time limit. *)
-let run starnite tmp args path : int * string =
-  let out = Filename.concat tmp "out.txt" in
-  let fd = Unix.openfile out [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600 in
+(* How a process ended: with a status, or killed by a signal (an OCaml signal number) *)
+type outcome = Exited of int | Signaled of int
+
+(* Run a command, with its output in temporary files and a time limit. With [separate] the standard error is
+   in a file of its own, so that what a compiler says of itself is not taken for what a program prints; without
+   it both go to one file, in the order they were written, and the last of the three is empty. [what] says what
+   was run, for the report of one that does not end. *)
+let spawn ~separate tmp (argv : string array) what : outcome * string * string =
+  let out = Filename.concat tmp "out.txt" and err = Filename.concat tmp "err.txt" in
+  let open_file p = Unix.openfile p [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600 in
+  let fd = open_file out in
+  let efd = if separate then open_file err else fd in
   (* the compiler runs the program it builds as a child of its own, so each invocation
      gets a process group of its own, and the whole group is killed afterwards *)
-  let argv = Array.of_list ((starnite :: args) @ [ path ]) in
   let pid =
     match Unix.fork () with
     | 0 -> (
         try
           ignore (Unix.setsid ());
           Unix.dup2 fd Unix.stdout;
-          Unix.dup2 fd Unix.stderr;
+          Unix.dup2 efd Unix.stderr;
           (* execvp searches PATH, so STARNITE may name an installed command *)
-          Unix.execvp starnite argv
+          Unix.execvp argv.(0) argv
         with e ->
-          prerr_string (sprintf "fuzz: cannot run %s: %s\n" starnite (Printexc.to_string e));
+          prerr_string (sprintf "fuzz: cannot run %s: %s\n" argv.(0) (Printexc.to_string e));
           flush stderr;
           Unix._exit 127)
     | pid -> pid
   in
   Unix.close fd;
+  if separate then Unix.close efd;
   let kill_group () = try Unix.kill (-pid) Sys.sigkill with Unix.Unix_error _ -> () in
   let deadline = Unix.gettimeofday () +. !time_limit in
   let rec wait () =
@@ -1117,17 +1328,29 @@ let run starnite tmp args path : int * string =
         if Unix.gettimeofday () > deadline then begin
           kill_group ();
           ignore (Unix.waitpid [] pid);
-          raise (Hang (String.concat " " args))
+          raise (Hang what)
         end;
         Unix.sleepf 0.01;
         wait ()
-    | _, Unix.WEXITED c -> c
-    | _, (Unix.WSIGNALED s | Unix.WSTOPPED s) -> 128 + abs s
+    | _, Unix.WEXITED c -> Exited c
+    | _, (Unix.WSIGNALED s | Unix.WSTOPPED s) -> Signaled s
   in
-  let code = wait () in
+  let outcome = wait () in
   (* nothing the invocation started may outlive it and write to the next case's output *)
   kill_group ();
-  (code, read_file out)
+  (outcome, read_file out, if separate then read_file err else "")
+
+(* Run the compiler on a file, with its output in a temporary file and a time limit. *)
+let run starnite tmp args path : int * string =
+  match spawn ~separate:false tmp (Array.of_list ((starnite :: args) @ [ path ])) (String.concat " " args) with
+  | Exited c, out, _ -> (c, out)
+  | Signaled s, out, _ -> (128 + abs s, out)
+
+(* the same, with what the program printed and what it said on the standard error kept apart *)
+let run_apart starnite tmp args path : int * string * string =
+  match spawn ~separate:true tmp (Array.of_list ((starnite :: args) @ [ path ])) (String.concat " " args) with
+  | Exited c, out, err -> (c, out, err)
+  | Signaled s, out, err -> (128 + abs s, out, err)
 
 let tail s n = if String.length s <= n then s else String.sub s (String.length s - n) n
 
@@ -1138,9 +1361,11 @@ let first_difference a b =
   in
   go (String.split_on_char '\n' a, String.split_on_char '\n' b)
 
-(* what makes a program fail the same way: it checks, and the interpreter and the C build end with the
-   statuses they ended with, and still disagree *)
-let differential starnite tmp path =
+(* The oracles of a program: it checks, and the interpreter and the C build agree. A program that is split
+   across a module is also the one file that its text is, and the interpreter must do the same with that.
+   A shrink for the difference between the two does not need the C build. *)
+let differential ?(c_build = true) starnite tmp path text =
+  write_program path text;
   let ci, oi = run starnite tmp [ "check" ] path in
   if ci = 127 then begin
     (* the compiler did not start at all: no case can be judged *)
@@ -1150,14 +1375,28 @@ let differential starnite tmp path =
   if ci <> 0 then `Rejected oi
   else
     let ri, out_i = run starnite tmp [ "run"; "--interp" ] path in
-    let rc, out_c = run starnite tmp [ "run" ] path in
-    if ri = rc && out_i = out_c then `Agreed else `Differ (ri, out_i, rc, out_c)
+    let rc, out_c = if c_build then run starnite tmp [ "run" ] path else (ri, out_i) in
+    if ri <> rc || out_i <> out_c then `Differ (ri, out_i, rc, out_c)
+    else if not (is_split text) then `Agreed
+    else begin
+      let twin = Filename.concat tmp "twin.stn" in
+      Out_channel.with_open_bin twin (fun oc -> output_string oc text);
+      (* what a program prints is the same byte for byte; only the places in the traps it reports, on the standard
+         error, are not (they are those of two files and of one) *)
+      let rs, so, se = run_apart starnite tmp [ "run"; "--interp" ] path in
+      let rt, to_, te = run_apart starnite tmp [ "run"; "--interp" ] twin in
+      if rt = rs && so = to_ && without_places se = without_places te then `Agreed
+      else `Twin (rs, so ^ se, rt, to_ ^ te)
+    end
 
-let still_differs starnite tmp (ri0, rc0) text =
+(* what makes a program fail the same way: it checks, and it still fails in the way it did, with the
+   statuses it ended with *)
+let still_differs starnite tmp kind text =
   let p = candidate_path tmp "shrink" in
-  Out_channel.with_open_bin p (fun oc -> output_string oc text);
-  match differential starnite tmp p with
-  | `Differ (ri, _, rc, _) -> ri = ri0 && rc = rc0
+  let c_build = match kind with `Differ _ -> true | `Twin _ -> false in
+  match differential ~c_build starnite tmp p text with
+  | `Differ (ri, _, rc, _) -> (match kind with `Differ (ri0, rc0) -> ri = ri0 && rc = rc0 | `Twin _ -> false)
+  | `Twin (ri, _, rt, _) -> (match kind with `Twin (ri0, rt0) -> ri = ri0 && rt = rt0 | `Differ _ -> false)
   | `Agreed | `Rejected _ -> false
   | exception Hang _ -> false
 
@@ -1191,7 +1430,7 @@ let holds text witnesses =
    the violation *)
 let still_has starnite tmp witnesses text =
   let p = candidate_path tmp "shrink" in
-  Out_channel.with_open_bin p (fun oc -> output_string oc text);
+  write_program p text;
   holds text witnesses
   && (match run starnite tmp [ "check" ] p with 0, _ -> true | _ -> false | exception Hang _ -> false)
 
@@ -1217,19 +1456,128 @@ let added_lines a b =
 (* what makes a mutated program fail the same way: the checker rejects it with the code it was rejected with *)
 let still_rejected starnite tmp code text =
   let p = candidate_path tmp "shrink" in
-  Out_channel.with_open_bin p (fun oc -> output_string oc text);
+  write_program p text;
   match run starnite tmp [ "check"; "--json" ] p with
   | 0, _ -> false
   | _, out -> json_code out = Some code
   | exception Hang _ -> false
 
+(* ---------- the compiler must not crash (section 21.2, the first oracle) ---------- *)
+
+(* A change to the bytes of a text, with no regard for what it says: a character taken out, the text cut
+   short, a character replaced by a punctuation mark or a letter, a piece of it repeated or taken out, two
+   characters swapped. The program is then in most cases wrong in some way that no rule of the language
+   was written for, and whatever the compiler says of it, it must say. *)
+let corrupt rng text =
+  let b = Bytes.of_string text in
+  let n = Bytes.length b in
+  if n = 0 then text
+  else
+    let cut p m = Bytes.cat (Bytes.sub b 0 p) (Bytes.sub b (p + m) (n - p - m)) in
+    match Random.State.int rng 6 with
+    | 0 -> Bytes.to_string (cut (Random.State.int rng n) 1)
+    | 1 -> Bytes.to_string (Bytes.sub b 0 (Random.State.int rng n))
+    | 2 ->
+        let marks = "()[]{}:,.=+-*/%<>!?&|\"'#\\\n _0aZ" in
+        Bytes.set b (Random.State.int rng n) marks.[Random.State.int rng (String.length marks)];
+        Bytes.to_string b
+    | 3 ->
+        let p = Random.State.int rng n in
+        let m = min (n - p) (1 + Random.State.int rng 20) in
+        Bytes.to_string (Bytes.cat (Bytes.sub b 0 (p + m)) (Bytes.sub b p (n - p)))
+    | 4 ->
+        let p = Random.State.int rng n in
+        Bytes.to_string (cut p (min (n - p) (1 + Random.State.int rng 30)))
+    | _ ->
+        let p = Random.State.int rng n and q = Random.State.int rng n in
+        let c = Bytes.get b p in
+        Bytes.set b p (Bytes.get b q);
+        Bytes.set b q c;
+        Bytes.to_string b
+
+(* where a compiler crashed: in the check, or in what builds and runs a program that checks. The second is
+   named by what ran: "run --interp", "build" (the compiler and the C compiler), or "exe" (the program it built), and for
+   the last two by how it ended, a status or a signal: a shrink keeps the failure it was given, not another one *)
+(* the ones that end in a hang are kept apart: a candidate that ends in a regular answer after a longer time is not the same failure *)
+type crash = At_check | At_check_hung | At_run of string list | At_run_hung of string list
+
+(* A line that OCaml writes when an exception nothing caught ends a process. It is the compiler's own: the
+   programs it builds print on the standard output, and say what went wrong on the standard error in lines
+   of a few forms that do not begin like this. *)
+let uncaught err = List.exists (is_prefix "Fatal error: exception") (String.split_on_char '\n' err)
+
+(* The compiler's own report that a program uses what a backend does not support yet (`Unsupported`, which exits
+   1 before the C compiler runs): a line that is that report, and nothing of a fatal exception or of a C compiler
+   that failed. The words anywhere else in the output are not it. *)
+let unsupported err =
+  let ls = String.split_on_char '\n' err in
+  List.exists (is_prefix "error: not supported yet: ") ls
+  && (not (uncaught err))
+  && not (List.exists (is_prefix "error: the C compiler failed") ls)
+
+(* A process killed by a signal. A trap is an exit with a status, and so is the C build's stack overflow, so a
+   signal is a fault of the compiler or of the runtime, or of the machine (a kill for want of memory); a run
+   that the fuzzer ended for taking too long is not here, it is the exception Hang. *)
+let died_by_signal = function Signaled _ -> true | Exited _ -> false
+
+(* what the compiler does with a program that may be wrong: a crash, or nothing to say. What it prints and
+   what a program prints are kept apart (the standard output and the standard error of each step), the C build
+   is a step of its own, and the program it makes is run by the fuzzer: a program that prints a line that looks
+   like a crash is not one, a program or a build killed by a signal is, and a build that does not end is. *)
+let crash_of starnite tmp path text =
+  write_program path text;
+  let exe = Filename.concat tmp "crash.exe" in
+  let step args = spawn ~separate:true tmp (Array.of_list ((starnite :: args) @ [ path ])) (String.concat " " args) in
+  match step [ "check"; "--json" ] with
+  | exception Hang _ -> Some (At_check_hung, "the check did not end")
+  | Signaled s, _, err -> Some (At_check, sprintf "killed by signal %d\n%s" (abs s) err)
+  | Exited c, out, err when c >= 2 || uncaught err -> Some (At_check, err ^ out)
+  | Exited 0, _, _ -> (
+      (* it checks: it must run, on both backends, though it may run for ever or trap *)
+      let interp =
+        match step [ "run"; "--interp" ] with
+        | exception Hang _ -> None
+        | o, out, err ->
+            if died_by_signal o || uncaught err then Some (At_run [ "run"; "--interp" ], err ^ out) else None
+      in
+      match interp with
+      | Some c -> Some c
+      | None -> (
+          (try Sys.remove exe with Sys_error _ -> ());
+          match step [ "build"; "-o"; exe ] with
+          | exception Hang _ -> Some (At_run_hung [ "build" ], "the build did not end")
+          | Signaled s, _, err -> Some (At_run [ "build"; sprintf "signal %d" (abs s) ], sprintf "killed by signal %d\n%s" (abs s) err)
+          | Exited c, out, err when c <> 0 && not (c = 1 && unsupported err) ->
+              (* a program that checked is built, or the compiler says it cannot yet (valid code that a backend
+                 does not support, which is not a crash); the C compiler failing, with or without a word, is *)
+              Some (At_run [ "build"; sprintf "status %d" c ], err ^ out)
+          | Exited 0, _, _ -> (
+              match spawn ~separate:true tmp [| exe |] "the program" with
+              | exception Hang _ -> None
+              | o, out, err ->
+                  let said = if err = "" then out else err in
+                  (match o with
+                   | Signaled s -> Some (At_run [ "exe"; sprintf "signal %d" (abs s) ], sprintf "the program was killed by a signal\n%s" said)
+                   | Exited c when c > 2 ->
+                       (* 0 and 1 are what main ends with, 2 is a trap; 3 is the debug runtime finding objects that
+                          do not balance, 127 is a program that did not start: neither is the program's own *)
+                       Some (At_run [ "exe"; sprintf "status %d" c ], sprintf "the program ended with status %d\n%s" c said)
+                   | Exited _ -> None))
+          | _ -> None))
+  | _ -> None
+
+let still_crashes starnite tmp kind text =
+  let p = candidate_path tmp "shrink" in
+  match crash_of starnite tmp p text with Some (k, _) -> k = kind | None -> false
+
 let () =
   let count = ref 50 and seed = ref None and keep = ref None and print_only = ref false in
   let shrink_failures = ref false and reduce = ref None and keeping = ref [] and keeping_match = ref None and match_arms = ref [] and rejected = ref None and budget = ref 400 in
-  let negative = ref true and differential_runs = ref true and print_mutated = ref false in
+  let negative = ref true and differential_runs = ref true and print_mutated = ref false and write_dir = ref None and crash_mode = ref false and corruptions = ref 4 in
   Arg.parse
     [ ("--count", Arg.Set_int count, "N  number of programs (default 50)");
       ("--print", Arg.Set print_only, "  print the program of the seed given by --seed and stop");
+      ("--write", Arg.String (fun d -> write_dir := Some d), "DIR  with --print: write the program as the files the compiler is given, main.stn and, if it is split, fuzzlib.stn, instead of printing it");
       ("--mutated", Arg.Set print_mutated, "  with --print: print its mutation instead, the kind and the code it must be rejected with on stderr");
       ("--seed", Arg.Int (fun s -> seed := Some s), "S  first seed (default random)");
       ("--keep", Arg.String (fun d -> keep := Some d), "DIR  save failing programs in DIR");
@@ -1241,6 +1589,8 @@ let () =
       ("--arm", Arg.String (fun a -> match_arms := !match_arms @ [ a ]), "HEAD  with --keeping-match: the head of an arm of that match");
       ("--rejected", Arg.String (fun c -> rejected := Some c), "CODE  with --reduce: keep what the checker rejects with CODE (for a mutation rejected with the wrong code)");
       ("--no-negative", Arg.Clear negative, "  do not mutate programs to be rejected");
+      ("--crash", Arg.Set crash_mode, "  instead of the other oracles, corrupt the bytes of each program and require the compiler not to crash");
+      ("--corruptions", Arg.Set_int corruptions, "N  with --crash: how many corruptions of each program (default 4)");
       ("--negative-only", Arg.Clear differential_runs, "  only the mutated programs: no run of the interpreter or the C build") ]
     (fun a -> raise (Arg.Bad ("unexpected argument " ^ a)))
     "usage: fuzz.exe [--count N] [--seed S] [--keep DIR] [--shrink] [--reduce FILE [--keeping TEXT | --rejected CODE]]";
@@ -1257,18 +1607,25 @@ let () =
   let seed = match !seed with Some s -> s | None -> Random.bits () in
   if !print_only then begin
     let prog = program seed in
-    if !print_mutated then begin
-      let m, text, in_context, _ = mutate seed prog in
-      Printf.eprintf "%s, to be rejected with %s%s\n" m.kind (show_expect m.expect) (if in_context then ", made of the program's own lines" else "");
-      print_string text
-    end
-    else print_string prog;
+    let text =
+      if !print_mutated then begin
+        let m, text, in_context, _ = mutate seed prog in
+        Printf.eprintf "%s, to be rejected with %s%s\n" m.kind (show_expect m.expect) (if in_context then ", made of the program's own lines" else "");
+        text
+      end
+      else prog
+    in
+    (match !write_dir with
+     | Some dir ->
+         (try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+         write_program (Filename.concat dir "main.stn") text
+     | None -> print_string text);
     exit 0
   end;
   let tmp = Filename.concat (Filename.get_temp_dir_name ()) (sprintf "starnite-fuzz-%d-%08x" (Unix.getpid ()) (Random.bits ())) in
   Unix.mkdir tmp 0o700;
   let cleanup () =
-    List.iter (fun f -> try Sys.remove (Filename.concat tmp f) with Sys_error _ -> ()) [ "out.txt" ];
+    List.iter (fun f -> try Sys.remove (Filename.concat tmp f) with Sys_error _ -> ()) [ "out.txt"; "err.txt"; "crash.exe"; "twin.stn"; "corrupt.stn"; module_name ^ ".stn" ];
     (* the files this run made, and nothing else: next to the input only the ones it made *)
     (match !candidate_dir with
      | None -> List.iter (fun n -> try Sys.remove (Filename.concat tmp (n ^ ".stn")) with Sys_error _ -> ()) [ "shrink"; "orig" ]
@@ -1280,13 +1637,17 @@ let () =
   (match !reduce with
    | Some file ->
        let text = read_file file in
-       (* the program may import what is next to it *)
-       candidate_dir := Some (Filename.dirname file);
-       (try ignore (candidate_path tmp "orig")
-        with Unix.Unix_error (e, _, _) ->
-          Printf.eprintf "fuzz: cannot write next to %s, where what it imports is: %s\n" file (Unix.error_message e);
-          cleanup ();
-          exit 2);
+       (* the program may import what is next to it. A program split across a module, which is the text of
+          one that the fuzzer made, brings its module with it, and it is written in the scratch directory *)
+       if not (is_split text) then begin
+         single_file := true;
+         candidate_dir := Some (Filename.dirname file);
+         try ignore (candidate_path tmp "orig")
+         with Unix.Unix_error (e, _, _) ->
+           Printf.eprintf "fuzz: cannot write next to %s, where what it imports is: %s\n" file (Unix.error_message e);
+           cleanup ();
+           exit 2
+       end;
        let still_fails =
          match (!keeping, !rejected) with
          | _, _ when !keeping_match <> None ->
@@ -1295,9 +1656,9 @@ let () =
          | [], Some code -> still_rejected starnite tmp code
          | [], None -> (
              let p = candidate_path tmp "orig" in
-             Out_channel.with_open_bin p (fun oc -> output_string oc text);
-             match differential starnite tmp p with
-             | `Differ (ri, _, rc, _) -> still_differs starnite tmp (ri, rc)
+             match differential starnite tmp p text with
+             | `Differ (ri, _, rc, _) -> still_differs starnite tmp (`Differ (ri, rc))
+             | `Twin (ri, _, rt, _) -> still_differs starnite tmp (`Twin (ri, rt))
              | _ ->
                  prerr_endline "fuzz: the program does not fail: nothing to reduce";
                  cleanup ();
@@ -1320,17 +1681,63 @@ let () =
     match !keep with
     | Some dir ->
         (try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
-        Out_channel.with_open_bin (Filename.concat dir (sprintf "case%d%s.stn" case suffix)) (fun oc -> output_string oc prog)
+        Out_channel.with_open_bin (Filename.concat dir (sprintf "case%d%s.stn" case suffix)) (fun oc -> output_string oc prog);
+        (* a program split across a module: the text is the program in one file, and its two files are here *)
+        if is_split prog then begin
+          let sub = Filename.concat dir (sprintf "case%d%s.split" case suffix) in
+          (try Unix.mkdir sub 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+          write_program (Filename.concat sub "main.stn") prog
+        end
     | None -> ()
   in
+  if !crash_mode then begin
+    (* the compiler has the time of a check to end, and a program that loops is not its fault *)
+    time_limit := 30.0;
+    let crashes = ref 0 and tried = ref 0 and shrunk = ref 0 in
+    for i = 0 to !count - 1 do
+      let case = seed + i in
+      let prog = program case in
+      let path = Filename.concat tmp "corrupt.stn" in
+      for k = 0 to !corruptions - 1 do
+        let rng = Random.State.make [| case; k; 0x6372 |] in
+        let text = corrupt rng prog in
+        (* now and then a second change: the first may leave nothing wrong *)
+        let text = if Random.State.int rng 3 = 0 then corrupt rng text else text in
+        incr tried;
+        match crash_of starnite tmp path text with
+        | None -> ()
+        | Some (kind, out) ->
+            incr crashes;
+            Printf.printf "case %d, corruption %d: the compiler crashed %s:\n  %s\n%!" case k
+              (match kind with
+               | At_check | At_check_hung -> "in the check"
+               | At_run args | At_run_hung args -> "in " ^ String.concat " " args)
+              (String.concat "\n  " (String.split_on_char '\n' (tail out 300)));
+            let suffix = sprintf ".k%d.crash" k in
+            save case suffix text;
+            if !shrink_failures && !shrunk < 3 then begin
+              incr shrunk;
+              let small, evals = shrink ~budget:!budget ~still_fails:(still_crashes starnite tmp kind) text in
+              (* the shrink runs under a shorter limit than the campaign: what it ends with must fail in the same way
+                 under the campaign's own, or the program that was found is what is kept *)
+              let small = if still_crashes starnite tmp kind small then small else text in
+              Printf.printf "  shrunk from %d lines to %d, in %d checks\n%!" (Array.length (lines_of text)) (Array.length (lines_of small)) evals;
+              save case (suffix ^ ".min") small
+            end
+      done
+    done;
+    cleanup ();
+    Printf.printf "%d corruptions of %d programs: %d crashes\n" !tried !count !crashes;
+    exit (if !crashes > 0 then 1 else 0)
+  end;
   for i = 0 to !count - 1 do
     let case = seed + i in
     let prog = program case in
     let path = Filename.concat tmp (sprintf "fuzz%d.stn" i) in
-    Out_channel.with_open_bin path (fun oc -> output_string oc prog);
+    write_program path prog;
     let failed =
       match
-        if !differential_runs then differential starnite tmp path
+        if !differential_runs then differential starnite tmp path prog
         else
           match run starnite tmp [ "check" ] path with
           | 127, oi -> prerr_string oi; exit 2
@@ -1349,7 +1756,24 @@ let () =
           if !shrink_failures && !shrunk < 3 then begin
             incr shrunk;
             save case "" prog;
-            let small, evals = shrink ~budget:!budget ~still_fails:(still_differs starnite tmp (ri, rc)) prog in
+            let small, evals = shrink ~budget:!budget ~still_fails:(still_differs starnite tmp (`Differ (ri, rc))) prog in
+            Printf.printf "  shrunk from %d lines to %d, in %d checks\n%!" (Array.length (lines_of prog)) (Array.length (lines_of small)) evals;
+            save case ".min" small
+          end;
+          true
+      | `Twin (ri, out_i, rt, out_t) ->
+          Printf.printf "case %d: the program split across a module (exit %d) and the same program in one file (exit %d) differ\n" case ri rt;
+          (match
+             (match first_difference (without_places out_i) (without_places out_t) with
+              | Some d -> Some d
+              | None -> first_difference out_i out_t)
+           with
+           | Some (a, b) -> Printf.printf "  split:    %s\n  one file: %s\n%!" a b
+           | None -> Printf.printf "  split tail:    %S\n  one file tail: %S\n%!" (tail out_i 200) (tail out_t 200));
+          if !shrink_failures && !shrunk < 3 then begin
+            incr shrunk;
+            save case "" prog;
+            let small, evals = shrink ~budget:!budget ~still_fails:(still_differs starnite tmp (`Twin (ri, rt))) prog in
             Printf.printf "  shrunk from %d lines to %d, in %d checks\n%!" (Array.length (lines_of prog)) (Array.length (lines_of small)) evals;
             save case ".min" small
           end;
@@ -1371,7 +1795,7 @@ let () =
       incr neg_total;
       count neg_kinds;
       if in_context then count neg_ctx;
-      Out_channel.with_open_bin path (fun oc -> output_string oc text);
+      write_program path text;
       (* a failing mutation is kept, with the lines it put in the program; --shrink reduces it, keeping those
          lines if it was accepted, or the wrong code if it was rejected with one *)
       let added = List.filter (fun l -> not (blank l)) (added_lines (lines_of prog) (lines_of text)) in
