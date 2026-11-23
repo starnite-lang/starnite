@@ -37,8 +37,16 @@ for cpu in $(printf '%s' "$cpus" | tr ',' ' '); do
             seed=$((RANDOM % 993 + 7))
             checksums=
             for v in $(printf '%s\n' $variants | shuf --random-source=<(yes "$RANDOM")); do
-                read -r elapsed checksum < <(printf '%s\n%s\n' "$case" "$seed" | taskset -c "$cpu" "$binaries/$v")
-                if [ "$elapsed" -le 0 ]; then echo "$v recorded a nonpositive time for $case" >&2; exit 1; fi
+                # the run must succeed and print exactly a positive time and an integer checksum
+                if ! result=$(printf '%s\n%s\n' "$case" "$seed" | taskset -c "$cpu" "$binaries/$v"); then
+                    echo "$v failed on $case (CPU $cpu)" >&2; exit 1
+                fi
+                if ! printf '%s\n' "$result" | grep -Eqx '[1-9][0-9]* -?[0-9]+'; then
+                    echo "$v printed '$result' for $case; expected a positive time and a checksum" >&2; exit 1
+                fi
+                read -r elapsed checksum <<EOF
+$result
+EOF
                 checksums="$checksums $checksum"
                 if [ "$round" -gt 2 ]; then echo "$elapsed" >> "$tmp/$v"; fi
             done
