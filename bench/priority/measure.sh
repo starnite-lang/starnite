@@ -25,6 +25,8 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 RANDOM=310
 median() { sort -n | awk '{ a[NR] = $1 } END { if (NR % 2) print a[(NR + 1) / 2]; else print (a[NR / 2] + a[NR / 2 + 1]) / 2 }'; }
 
+# the samples are written to the output file only when every run has succeeded
+final=$output; output=$tmp/samples.json
 printf '{\n' > "$output"
 first_cpu=1
 for cpu in $(printf '%s' "$cpus" | tr ',' ' '); do
@@ -41,12 +43,11 @@ for cpu in $(printf '%s' "$cpus" | tr ',' ' '); do
                 if ! result=$(printf '%s\n%s\n' "$case" "$seed" | taskset -c "$cpu" "$binaries/$v"); then
                     echo "$v failed on $case (CPU $cpu)" >&2; exit 1
                 fi
-                if ! printf '%s\n' "$result" | grep -Eqx '[1-9][0-9]* -?[0-9]+'; then
+                # the whole of what it printed is matched, so a second line is not a record to skip
+                if [[ ! $result =~ ^([1-9][0-9]*)\ (-?[0-9]+)$ ]]; then
                     echo "$v printed '$result' for $case; expected a positive time and a checksum" >&2; exit 1
                 fi
-                read -r elapsed checksum <<EOF
-$result
-EOF
+                elapsed=${BASH_REMATCH[1]} checksum=${BASH_REMATCH[2]}
                 checksums="$checksums $checksum"
                 if [ "$round" -gt 2 ]; then echo "$elapsed" >> "$tmp/$v"; fi
             done
@@ -69,3 +70,4 @@ EOF
     printf '\n  }' >> "$output"
 done
 printf '\n}\n' >> "$output"
+mv "$output" "$final"
