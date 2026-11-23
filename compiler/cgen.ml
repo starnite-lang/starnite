@@ -2658,7 +2658,10 @@ let compile_instance st cname uname tys =
   pr st.protos "%s;\n" header;
   let b = Buffer.create 4096 in
   let fc = { st; b; ind = 1; sub; frames = []; can_fail; ret; vars = Hashtbl.create 32; self_struct = None; cached = Hashtbl.create 4; natural_max = Hashtbl.create 4; unique_arrays = []; loop_indices = []; checked_ranges = []; unchecked_pops = []; lend = sg.slend } in
-  pr b "%s {\n" header;
+  (* A C compiler guesses how often each block runs, and treats the late arms of a long chain of
+     tests as cold: a loop inlined there is then compiled for size, without the conditional moves
+     it would get anywhere else. Every Starnite function is compiled for speed instead. *)
+  pr b "STN_HOT %s {\n" header;
   push fc FFun;
   List.iter
     (fun (v, m, t) ->

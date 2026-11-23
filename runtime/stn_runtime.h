@@ -303,6 +303,13 @@ int     stn_parse_int(StnStr s, int64_t* out);   /* 0 ok, 1 invalid, 2 out of ra
 int     stn_parse_float(StnStr s, double* out);  /* 0 ok, 1 invalid */
 void    stn_check_char(int64_t c, const char* file, int line, int col);
 
+/* Generated functions are compiled for speed wherever they end up being inlined. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define STN_HOT __attribute__((hot))
+#else
+#  define STN_HOT
+#endif
+
 /* ---- integer arithmetic that traps (section 17.1) ---- */
 #define STN_ARITH(T, N)                                                                      \
     static inline T stn_add_##N(T a, T b, const char* f, int l, int c) {                     \
