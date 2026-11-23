@@ -303,8 +303,10 @@ int     stn_parse_int(StnStr s, int64_t* out);   /* 0 ok, 1 invalid, 2 out of ra
 int     stn_parse_float(StnStr s, double* out);  /* 0 ok, 1 invalid */
 void    stn_check_char(int64_t c, const char* file, int line, int col);
 
-/* Generated functions are compiled for speed wherever they end up being inlined. */
-#if defined(__GNUC__) || defined(__clang__)
+/* Generated functions are compiled for speed wherever they end up being inlined. Only an optimized
+   release build asks for it: Clang honours the attribute even at -O0, which makes a debug build
+   several times slower to compile. */
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__OPTIMIZE__) && !defined(STN_DEBUG)
 #  define STN_HOT __attribute__((hot))
 #else
 #  define STN_HOT
