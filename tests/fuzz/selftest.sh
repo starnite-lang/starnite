@@ -305,6 +305,19 @@ fault_cc_fails() { crashes cc-fails "in build"; }
 # debug runtime that finds objects that do not balance: a launch that failed and a status that is not the program's
 fault_no_exe() { crashes no-exe "in exe"; }
 fault_leak() { crashes leak "in exe"; }
+# the shrink keeps the failure it was given: a candidate that no longer leaks but fails to launch is not accepted,
+# so the saved program still ends with status 3 (it keeps the 8 lines that make the leak)
+fault_leak_kept() {
+    d="$tmp/crash-leak-kept"
+    out=$(with_fault leak-then-no-exe --crash --count 40 --seed 1 --shrink --keep "$d" 2>&1); status=$?
+    n=$(ls "$d"/*.crash.min.stn 2>/dev/null | wc -l | tr -d ' ')
+    if [ $status != 1 ] || [ "$n" = 0 ]; then bad "fault leak-then-no-exe: nothing was shrunk"; printf '%s\n' "$out" | tail -10; return; fi
+    all=1
+    for m in "$d"/*.crash.min.stn; do
+        if [ "$(lines "$m")" -lt 8 ]; then bad "fault leak-then-no-exe: $(basename "$m") has $(lines "$m") lines, a launch failure was accepted"; all=0; fi
+    done
+    [ $all = 1 ] && ok "fault leak-then-no-exe: $n programs shrunk, each still the leak"
+}
 
 # The compiler may say that a program uses what it does not support yet (the build of valid code, exit 1, in
 # its own words), and that is not a crash. The same words in a C compiler that failed, or in an exception
@@ -380,7 +393,7 @@ STN
 n=0
 pids=""
 names=""
-for check in negative_fuzzing fault_accept_take fault_accept_match fault_wrong_code fault_c_output fault_split fault_split_stdout reduce_keeping reduce_next_to_a_module reduce_ordinary_module_comment reduce_keeps_a_sibling_module reduce_rejected_next_to_a_module reduce_keeping_a_match reduce_name_taken reduce_without_compiler fault_crash fault_crash_run fault_silent_crash fault_killed fault_cc_fails fault_no_exe fault_leak unsupported_is_not_a_crash fault_cc_says_unsupported fault_exception_unsupported crash_phrase_is_output; do
+for check in negative_fuzzing fault_accept_take fault_accept_match fault_wrong_code fault_c_output fault_split fault_split_stdout reduce_keeping reduce_next_to_a_module reduce_ordinary_module_comment reduce_keeps_a_sibling_module reduce_rejected_next_to_a_module reduce_keeping_a_match reduce_name_taken reduce_without_compiler fault_crash fault_crash_run fault_silent_crash fault_killed fault_cc_fails fault_no_exe fault_leak fault_leak_kept unsupported_is_not_a_crash fault_cc_says_unsupported fault_exception_unsupported crash_phrase_is_output; do
     n=$((n + 1))
     "$check" > "$tmp/result.$n" 2>&1 &
     pids="$pids $!"

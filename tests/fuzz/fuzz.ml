@@ -1496,7 +1496,8 @@ let corrupt rng text =
         Bytes.to_string b
 
 (* where a compiler crashed: in the check, or in what builds and runs a program that checks. The second is
-   named by what ran: "run --interp", "build" (the compiler and the C compiler), or "exe" (the program it built) *)
+   named by what ran: "run --interp", "build" (the compiler and the C compiler), or "exe" (the program it built), and for
+   the last two by how it ended, a status or a signal: a shrink keeps the failure it was given, not another one *)
 (* the ones that end in a hang are kept apart: a candidate that ends in a regular answer after a longer time is not the same failure *)
 type crash = At_check | At_check_hung | At_run of string list | At_run_hung of string list
 
@@ -1545,22 +1546,22 @@ let crash_of starnite tmp path text =
           (try Sys.remove exe with Sys_error _ -> ());
           match step [ "build"; "-o"; exe ] with
           | exception Hang _ -> Some (At_run_hung [ "build" ], "the build did not end")
-          | Signaled s, _, err -> Some (At_run [ "build" ], sprintf "killed by signal %d\n%s" (abs s) err)
+          | Signaled s, _, err -> Some (At_run [ "build"; sprintf "signal %d" (abs s) ], sprintf "killed by signal %d\n%s" (abs s) err)
           | Exited c, out, err when c <> 0 && not (c = 1 && unsupported err) ->
               (* a program that checked is built, or the compiler says it cannot yet (valid code that a backend
                  does not support, which is not a crash); the C compiler failing, with or without a word, is *)
-              Some (At_run [ "build" ], err ^ out)
+              Some (At_run [ "build"; sprintf "status %d" c ], err ^ out)
           | Exited 0, _, _ -> (
               match spawn ~separate:true tmp [| exe |] "the program" with
               | exception Hang _ -> None
               | o, out, err ->
                   let said = if err = "" then out else err in
                   (match o with
-                   | Signaled _ -> Some (At_run [ "exe" ], sprintf "the program was killed by a signal\n%s" said)
+                   | Signaled s -> Some (At_run [ "exe"; sprintf "signal %d" (abs s) ], sprintf "the program was killed by a signal\n%s" said)
                    | Exited c when c > 2 ->
                        (* 0 and 1 are what main ends with, 2 is a trap; 3 is the debug runtime finding objects that
                           do not balance, 127 is a program that did not start: neither is the program's own *)
-                       Some (At_run [ "exe" ], sprintf "the program ended with status %d\n%s" c said)
+                       Some (At_run [ "exe"; sprintf "status %d" c ], sprintf "the program ended with status %d\n%s" c said)
                    | Exited _ -> None))
           | _ -> None))
   | _ -> None
