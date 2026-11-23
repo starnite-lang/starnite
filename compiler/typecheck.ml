@@ -2674,6 +2674,13 @@ let check_distinct_fields what (fs : Syntax.field list) =
    which the bounds may name: fn map[U: Conv[A]](...) in trait Mapper[A] *)
 let tparams_of ?(outer = []) tb (gs : gparam list) self =
   check_distinct_generics gs;
+  (* a method's own parameter may not have the name of one of the trait or impl around it: both are the same
+     name in the method's signature, and the one would hide the other *)
+  List.iter
+    (fun (g : gparam) ->
+      if List.mem g.gname outer then
+        err "E0101" g.gloc "type parameter '%s' is already a type parameter of the trait or impl around this method" g.gname)
+    gs;
   let names = outer @ List.map (fun g -> g.gname) gs in
   List.map
     (fun g ->

@@ -1,0 +1,15 @@
+# expect: E0101 5:13
+# A method's own type parameter may not have the name of a type parameter of the trait around it: the
+# impl below would name one and the call would settle none
+trait Pick[T]:
+    fn pick[T](x: Self, v: T) -> T
+
+type Box = struct(n: Int)
+
+impl Pick[Int] for Box:
+    fn pick[U](x: Box, v: Int) -> Int:
+        v
+
+fn main():
+    let r = Box(1).pick(3)
+    print(f"{r}")
