@@ -305,8 +305,18 @@ fault_cc_fails() { crashes cc-fails "in build"; }
 # debug runtime that finds objects that do not balance: a launch that failed and a status that is not the program's
 fault_no_exe() { crashes no-exe "in exe"; }
 fault_leak() { crashes leak "in exe"; }
+# the status of the program that the build makes of a saved case, built and run under a fault; a program
+# split across a module is read from the files next to it (X.stn is X.split/main.stn and fuzzlib.stn)
+replay_status() {
+    fault=$1; p=$2; w=$(mktemp -d "$tmp/replay.XXXXXX")
+    src=$p; [ -d "${p%.stn}.split" ] && src=${p%.stn}.split/main.stn
+    if BUGGY=$fault "$here/buggy.sh" build -o "$w/exe" "$src" >/dev/null 2>&1 && [ -x "$w/exe" ]; then
+        "$w/exe" >/dev/null 2>&1; echo $?
+    else echo 127; fi
+    rm -rf "$w"
+}
 # the shrink keeps the failure it was given: a candidate that no longer leaks but fails to launch is not accepted,
-# so the saved program still ends with status 3 (it keeps the 8 lines that make the leak)
+# so the saved program still ends with status 3 when it is built and run again, as the one it came from does
 fault_leak_kept() {
     d="$tmp/crash-leak-kept"
     out=$(with_fault leak-then-no-exe --crash --count 40 --seed 1 --shrink --keep "$d" 2>&1); status=$?
@@ -314,7 +324,12 @@ fault_leak_kept() {
     if [ $status != 1 ] || [ "$n" = 0 ]; then bad "fault leak-then-no-exe: nothing was shrunk"; printf '%s\n' "$out" | tail -10; return; fi
     all=1
     for m in "$d"/*.crash.min.stn; do
-        if [ "$(lines "$m")" -lt 8 ]; then bad "fault leak-then-no-exe: $(basename "$m") has $(lines "$m") lines, a launch failure was accepted"; all=0; fi
+        # replay the saved program and the one it was shrunk from (the files the compiler was given: the .split
+        # directory when there is one) under the same fault: both must end with status 3, not 127
+        for p in "$m" "${m%.min.stn}.stn"; do
+            s=$(replay_status leak-then-no-exe "$p")
+            if [ "$s" != 3 ]; then bad "fault leak-then-no-exe: $(basename "$p") ends with status $s, not the leak (3)"; all=0; fi
+        done
     done
     [ $all = 1 ] && ok "fault leak-then-no-exe: $n programs shrunk, each still the leak"
 }
