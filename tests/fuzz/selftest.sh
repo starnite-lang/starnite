@@ -116,8 +116,16 @@ same_run() {
     "$starnite" run --interp "$2" > "$tmp/o.out" 2> "$tmp/o.raw"; s2=$?
     sed 's/^\(trap: .*\) at .*$/\1/' "$tmp/s.raw" > "$tmp/s.err"
     sed 's/^\(trap: .*\) at .*$/\1/' "$tmp/o.raw" > "$tmp/o.err"
-    [ "$s1" = "$s2" ] && { [ "$s1" = 0 ] || [ "$s1" = 2 ]; } &&
-        cmp -s "$tmp/s.out" "$tmp/o.out" && cmp -s "$tmp/s.err" "$tmp/o.err"
+    # status 2 is also what an uncaught exception of the compiler leaves: it counts only with the
+    # line of a trap on standard error, and never with the words of a crash
+    [ "$s1" = "$s2" ] || return 1
+    case $s1 in
+        0) ;;
+        2) grep -q '^trap: ' "$tmp/s.raw" && grep -q '^trap: ' "$tmp/o.raw" || return 1
+           if grep -q 'Fatal error: exception' "$tmp/s.raw" "$tmp/o.raw"; then return 1; fi ;;
+        *) return 1 ;;
+    esac
+    cmp -s "$tmp/s.out" "$tmp/o.out" && cmp -s "$tmp/s.err" "$tmp/o.err"
 }
 split_fault() {
     fault=$1
