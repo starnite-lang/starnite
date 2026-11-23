@@ -107,15 +107,17 @@ fault_split() { split_fault split; }
 # the same, where the two differ in what a program prints (not in a trap's place, which is left out): the
 # difference is on the standard output, byte for byte
 fault_split_stdout() { split_fault split-stdout; }
-# two programs run alike: the same exit status and the same output. A shrunk program may end in a
-# trap, whose line names the file and the place in it, which differ between the two; that part of
-# the line is left out.
+# two programs run alike: the same exit status, which is success or the status of a trap, the same
+# standard output byte for byte, and the same standard error. A shrunk program may end in a trap,
+# whose line on standard error names the file and the place in it; those differ between the two
+# forms, so that part of that line alone is left out.
 same_run() {
-    "$starnite" run --interp "$1" > "$tmp/s.raw" 2>&1; s1=$?
-    "$starnite" run --interp "$2" > "$tmp/o.raw" 2>&1; s2=$?
-    sed 's/^\(trap: .*\) at .*$/\1/' "$tmp/s.raw" > "$tmp/s.out"
-    sed 's/^\(trap: .*\) at .*$/\1/' "$tmp/o.raw" > "$tmp/o.out"
-    [ $s1 = $s2 ] && [ $s1 != 1 ] && cmp -s "$tmp/s.out" "$tmp/o.out"
+    "$starnite" run --interp "$1" > "$tmp/s.out" 2> "$tmp/s.raw"; s1=$?
+    "$starnite" run --interp "$2" > "$tmp/o.out" 2> "$tmp/o.raw"; s2=$?
+    sed 's/^\(trap: .*\) at .*$/\1/' "$tmp/s.raw" > "$tmp/s.err"
+    sed 's/^\(trap: .*\) at .*$/\1/' "$tmp/o.raw" > "$tmp/o.err"
+    [ "$s1" = "$s2" ] && { [ "$s1" = 0 ] || [ "$s1" = 2 ]; } &&
+        cmp -s "$tmp/s.out" "$tmp/o.out" && cmp -s "$tmp/s.err" "$tmp/o.err"
 }
 split_fault() {
     fault=$1

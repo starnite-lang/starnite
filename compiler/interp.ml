@@ -736,6 +736,10 @@ and builtin env name (tys : ty list) (vals : value list) loc : value * value lis
       if Int64.compare n 0L < 0 then trap "index out of range" loc "negative length";
       if Int64.compare n max_alloc > 0 then too_large loc;
       pure (VArr (Array.make (Int64.to_int n) x))
+  | "repeat@Array", [ x; VInt n ] ->
+      if Int64.compare n 0L < 0 then trap "index out of range" loc "negative length";
+      if Int64.compare n max_alloc > 0 then too_large loc;
+      pure (VArr (Array.make (Int64.to_int n) x))
   | "copy@T", [ x ] -> pure x
   | "unreachable@Str", [ VStr m ] -> trap "unreachable" loc m
   | "byte_at_or_end@Str", [ VStr s; VInt i ] ->

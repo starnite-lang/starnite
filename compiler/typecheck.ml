@@ -1106,11 +1106,12 @@ and check_or_infer c (e : Syntax.expr) (expected : ty option) : texpr =
       let tes = List.map (fun e -> check c e elt) es in
       mk (XArray tes) (TArray elt) l
   | ArrayRepeat (x, n) ->
-      (* [x; n] is filled(n, x): the count is evaluated first, then the element, once *)
+      (* [x; n] is n copies of x. Evaluation is left to right (section 4.4): the element once,
+         then the count. It is a built-in of its own, since filled(n, x) takes them the other way. *)
       let elt = match exp with Some (TArray t) -> t | _ -> fresh () in
-      let tn = check c n (TInt IInt) in
       let tx = check c x elt in
-      mk (XCall (CBuiltin ("filled@Int", [ elt ]), [ { amode = MBorrow; a = tn }; { amode = MBorrow; a = tx } ], [])) (TArray elt) l
+      let tn = check c n (TInt IInt) in
+      mk (XCall (CBuiltin ("repeat@Array", [ elt ]), [ { amode = MBorrow; a = tx }; { amode = MBorrow; a = tn } ], [])) (TArray elt) l
   | Comp (body, comps) ->
       push_frame c ();
       let tcs = List.map (fun cp -> check_comp c cp) comps in

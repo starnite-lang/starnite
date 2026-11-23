@@ -2531,6 +2531,15 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       (match repr (elt ()) with
        | TInt (IInt | I64) -> owned (Printf.sprintf "stn_array_filled_i64(%s, %s, %s, %s)" (elem_ops st (elt ())) n xt la)
        | _ -> owned (Printf.sprintf "stn_array_filled(%s, %s, &%s, %s)" (elem_ops st (elt ())) n xt la))
+  | "repeat@Array" ->
+      (* [x; n]: the element is evaluated first and owned while the count runs, which may
+         replace the variable it was read from; the scope drops it once the copies are made *)
+      let xt = o 0 in
+      if rc fc (elt ()) then own_in fc xt (elt ());
+      let n = tmp fc (TInt IInt) (expr fc (arg 1).a).c in
+      (match repr (elt ()) with
+       | TInt (IInt | I64) -> owned (Printf.sprintf "stn_array_filled_i64(%s, %s, %s, %s)" (elem_ops st (elt ())) n xt la)
+       | _ -> owned (Printf.sprintf "stn_array_filled(%s, %s, &%s, %s)" (elem_ops st (elt ())) n xt la))
   | "copy@T" ->
       let x = expr fc (arg 0).a in
       { c = tmp fc t (own fc x t); owned = true }
