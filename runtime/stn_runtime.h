@@ -73,7 +73,26 @@ StnStr stn_str_new(const char* data, int64_t len);
 StnStr stn_str_from_bytes(const char* data, int64_t len);   /* makes the bytes valid UTF-8 */
 StnStr stn_str_concat(StnStr a, StnStr b);
 StnStr stn_str_concat_n(int n, StnStr* parts);   /* borrows parts */
-static inline int stn_str_eq(StnStr a, StnStr b) {
+/* Fixed-size comparisons may start at unaligned byte offsets. */
+static inline uint16_t stn_load_u16(const char* p) {
+    uint16_t value;
+    memcpy(&value, p, sizeof value);
+    return value;
+}
+
+static inline uint32_t stn_load_u32(const char* p) {
+    uint32_t value;
+    memcpy(&value, p, sizeof value);
+    return value;
+}
+
+static inline uint64_t stn_load_u64(const char* p) {
+    uint64_t value;
+    memcpy(&value, p, sizeof value);
+    return value;
+}
+
+static inline __attribute__((always_inline)) int stn_str_eq(StnStr a, StnStr b) {
     if (a == b) return 1;
     if (a->len != b->len) return 0;
     size_t n = (size_t)a->len;

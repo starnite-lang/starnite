@@ -1,0 +1,7 @@
+fn main():
+    var values = filled(64, 0)
+    clear(mut values)
+    let upper = 9223372036854775806
+    for i in 0..3:
+        values.push(upper + i)
+    print(f"{values}")

@@ -900,9 +900,9 @@ and lit fc t (l : lit) : r =
 and cond fc (e : texpr) : string =
   push fc FStmt;
   let v = (expr fc e).c in
-  let n = tmp fc TBool v in
+  let v = if (List.hd fc.frames).owned = [] then v else tmp fc TBool v in
   pop fc;
-  n
+  v
 
 and discard fc (e : texpr) =
   push fc FStmt;
@@ -1779,8 +1779,42 @@ and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) ?pop_array ?i
         | None, None, Some code -> local_push_array fc code
         | _ -> None
       in
-      (match pop_array, index_guard, unique_array with
-       | None, None, Some v ->
+      let append = match p, indexed_body, repr it with
+        | TPVar item, Some code, TInt (IInt | I64) -> affine_array_append fc item code
+        | _ -> None
+      in
+      (match pop_array, index_guard, unique_array, append with
+       | None, None, _, Some (v, base) ->
+           let array = var_read fc v in
+           let count = fresh st "_count" and done_ = fresh st "_appended" in
+           let unique = if List.mem v.vid fc.unique_arrays then "" else Printf.sprintf "stn_unique(%s) && " array in
+           line fc "uint8_t %s = 0;" done_;
+           line fc "if (%s < %s && %s(uint64_t)%s - (uint64_t)%s <= (uint64_t)(%s->cap - %s->len)) {"
+             lo hi unique hi lo array array;
+           fc.ind <- fc.ind + 1;
+           let offset = tmp fc it (expr fc base).c in
+           let limit = fresh st "_limit" and first = fresh st "_first" in
+           line fc "int64_t %s, %s;" first limit;
+           line fc "if (!__builtin_add_overflow(%s, %s, &%s) && !__builtin_add_overflow(%s, %s - 1, &%s)) {"
+             offset lo first offset hi limit;
+           fc.ind <- fc.ind + 1;
+           line fc "int64_t %s = (int64_t)((uint64_t)%s - (uint64_t)%s);" count hi lo;
+           let data = fresh st "_data" in
+           line fc "int64_t* %s = ((int64_t*)%s->data) + %s->len;" data array array;
+           line fc "for (int64_t %s = 0; %s < %s; %s++) %s[%s] = %s + %s;"
+             i i count i data i first i;
+           line fc "%s->len += %s;" array count;
+           line fc "%s = 1;" done_;
+           fc.ind <- fc.ind - 1;
+           line fc "}";
+           fc.ind <- fc.ind - 1;
+           line fc "}";
+           line fc "if (!%s) {" done_;
+           fc.ind <- fc.ind + 1;
+           emit_loop ();
+           fc.ind <- fc.ind - 1;
+           line fc "}"
+       | None, None, Some v, _ ->
            line fc "if (stn_unique(%s)) {" (var_read fc v);
            fc.ind <- fc.ind + 1;
            let saved = fc.unique_arrays in
@@ -1793,8 +1827,8 @@ and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) ?pop_array ?i
            emit_loop ();
            fc.ind <- fc.ind - 1;
            line fc "}"
-       | None, None, None -> emit_loop ()
-       | None, Some guards, _ ->
+       | None, None, None, _ -> emit_loop ()
+       | None, Some guards, _, _ ->
            let condition = List.map (fun (_, limit, len, _) ->
                Printf.sprintf "%s > INT64_C(%Ld)" len limit) guards |> String.concat " && " in
            line fc "if (%s) {" condition;
@@ -1830,7 +1864,7 @@ and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) ?pop_array ?i
            emit_loop ();
            fc.ind <- fc.ind - 1;
            line fc "}"
-       | Some v, _, _ ->
+       | Some v, _, _, _ ->
            let array = var_read fc v in
            line fc "if (%s < %s && stn_unique(%s) && (uint64_t)stn_len(%s) >= (uint64_t)%s - (uint64_t)%s) {"
              lo hi array array hi lo;
@@ -2075,6 +2109,33 @@ and single_array_call fc builtin body =
           | SAssign (p, _) when p.root.vid = v.vid -> allowed := false
           | _ -> ()) body;
       if !allowed then Some v else None
+  | _ -> None
+
+(* With a single push of an affine Int value, the range endpoints prove every
+   addition fits. The fast path uses existing capacity and commits length once. *)
+and affine_array_append fc item body =
+  let action = match body.e with
+    | XBlock ([ { st = SExpr call; _ } ], { e = XLit LUnit; _ }) -> call
+    | XBlock ([], call) -> call
+    | _ -> body
+  in
+  let rec invariant e =
+    match e.e with
+    | XLit (LInt _) -> true
+    | XVar v ->
+        v.vid <> item.vid && not v.vcell
+        && (match Hashtbl.find_opt fc.vars v.vid with Some (VDirect _) -> true | _ -> false)
+    | XBin ((Add | Sub | Mul), a, b) -> invariant a && invariant b
+    | _ -> false
+  in
+  match action.e with
+  | XCall (CBuiltin ("push@Array", _),
+           [ _; { a = { e = XBin (Add, base, { e = XVar index; _ }); _ }; _ } ], _)
+    when index.vid = item.vid && invariant base ->
+      (match single_array_call fc "push@Array" body with
+       | Some v when (match repr (ts fc v.vty) with TArray (TInt (IInt | I64)) -> true | _ -> false) ->
+           Some (v, base)
+       | _ -> None)
   | _ -> None
 
 (* Some writes when [v] is used only through elements and len in [body] *)
@@ -2447,14 +2508,35 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
   | "contains@Str" -> let s = b 0 in let x = b 1 in value (Printf.sprintf "stn_str_contains(%s, %s)" s x)
   | ("starts_with@Str" | "ends_with@Str") ->
       let prefix = name = "starts_with@Str" in
-      let s = tmp fc TStr (b 0) in
       (match (arg 1).a.e with
        | XLit (LStr literal) ->
+           let s =
+             match (arg 0).a.e with
+             | XVar v when not v.vcell -> var_read fc v
+             | _ -> tmp fc TStr (b 0)
+           in
            let n = String.length literal in
            let offset = if prefix then "" else Printf.sprintf " + (%s->len - %d)" s n in
-           value (Printf.sprintf "(%s->len >= %d && memcmp(%s->data%s, %s, %d) == 0)"
-                    s n s offset (c_string literal) n)
+           let data = Printf.sprintf "(%s->data%s)" s offset in
+           let cmp at width =
+             let bytes = c_string (String.sub literal at width) in
+             if width = 2 || width = 4 || width = 8 then
+               let bits = width * 8 in
+               Printf.sprintf "(stn_load_u%d(%s + %d) == stn_load_u%d(%s))" bits data at bits bytes
+             else Printf.sprintf "(memcmp(%s + %d, %s, %d) == 0)" data at bytes width
+           in
+           (* Two fixed-width, overlapping comparisons avoid a libc call
+              for short literals between the native comparison widths. *)
+           let same =
+             if n <= 1 || n > 16 then cmp 0 n
+             else
+               let width = if n < 4 then 2 else if n < 8 then 4 else 8 in
+               if n = width then cmp 0 width
+               else Printf.sprintf "(%s & %s)" (cmp 0 width) (cmp (n - width) width)
+           in
+           value (Printf.sprintf "(%s->len >= %d && %s)" s n same)
        | _ ->
+           let s = tmp fc TStr (b 0) in
            let p = b 1 in
            value (Printf.sprintf "stn_str_%s(%s, %s)" (if prefix then "starts_with" else "ends_with") s p))
   | "repeat@Str" -> let s = b 0 in let n = tmp fc (TInt IInt) (expr fc (arg 1).a).c in owned (Printf.sprintf "stn_str_repeat(%s, %s, %s)" s n la)

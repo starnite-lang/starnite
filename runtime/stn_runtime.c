@@ -418,6 +418,25 @@ void stn_array_reverse_i64(StnArray** pa) {
 }
 
 #if defined(__x86_64__) && defined(__SSE2__)
+__attribute__((target("avx512f")))
+static int stn_contains_i64_avx512(const int64_t* elements, int64_t length, int64_t value) {
+    const __m512i needle = _mm512_set1_epi64(value);
+    int64_t i = 0;
+    /* Align the full-width loads so none straddles a cache line. */
+    for (; i < length && ((uintptr_t)(elements + i) & 63u) != 0; i++)
+        if (elements[i] == value) return 1;
+    for (; length - i >= 32; i += 32) {
+        const __mmask8 a = _mm512_cmpeq_epi64_mask(_mm512_load_si512(elements + i), needle);
+        const __mmask8 b = _mm512_cmpeq_epi64_mask(_mm512_load_si512(elements + i + 8), needle);
+        const __mmask8 c = _mm512_cmpeq_epi64_mask(_mm512_load_si512(elements + i + 16), needle);
+        const __mmask8 d = _mm512_cmpeq_epi64_mask(_mm512_load_si512(elements + i + 24), needle);
+        if (a | b | c | d) return 1;
+    }
+    for (; i < length; i++)
+        if (elements[i] == value) return 1;
+    return 0;
+}
+
 __attribute__((target("avx2")))
 static int stn_contains_i64_avx2(const int64_t* elements, int64_t length, int64_t value) {
     const __m256i needle = _mm256_set1_epi64x(value);
@@ -439,6 +458,8 @@ static int stn_contains_i64_avx2(const int64_t* elements, int64_t length, int64_
 int stn_array_contains_i64(const StnArray* a, int64_t value) {
     const int64_t* elements = (const int64_t*)a->data;
 #if defined(__x86_64__) && defined(__SSE2__)
+    if (a->len >= 64 && __builtin_cpu_supports("avx512f"))
+        return stn_contains_i64_avx512(elements, a->len, value);
     if (a->len >= 32 && __builtin_cpu_supports("avx2"))
         return stn_contains_i64_avx2(elements, a->len, value);
 #endif
