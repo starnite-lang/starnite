@@ -1,0 +1,55 @@
+fn pop_one_then_return() -> Str:
+    var values = [repeat("owned", 2), "tail", "last"]
+    for i in 0..2:
+        let item = unwrap(values.pop())
+        if i == 0:
+            return item
+    "unreached"
+
+fn main():
+    let values = [10, 20, 30, 40, 50]
+    var sum = 0
+    for i in 2..11:
+        if i == 4:
+            continue
+        sum += values[(i * 12) % 5]
+
+    # The range proof is wider than this array. The checked path can still
+    # succeed when the actual subscript fits.
+    let small = [1, 2]
+    for i in 0..1:
+        sum += small[(i * 3) % 5]
+    print(f"indexed {sum}")
+
+    var exclusive_values = ["a", "b", "c", "d"]
+    for i in 0..4:
+        if i == 1:
+            continue
+        print(unwrap(exclusive_values.pop()))
+        if i == 2:
+            break
+    print(f"after break {exclusive_values}")
+
+    var shared_values = ["a", "b", "c"]
+    let snapshot = shared_values
+    for _ in 0..2:
+        print(unwrap(shared_values.pop()))
+    print(f"shared_values {snapshot} {shared_values} {pop_one_then_return()}")
+
+    var numbers = [1, 2]
+    let before = numbers
+    for i in 0..3:
+        clear(mut numbers)
+        for j in 0..8:
+            numbers.push(i * 100 + j)
+    print(f"refill {before} {numbers}")
+
+    let bits = [true, false, false, true, true]
+    var total = -2
+    for bit in bits:
+        if bit:
+            total += 1
+    print(f"count {total}")
+
+    print(f"{contains("012345678901234567890123456789xyz!", "xyz!")} {contains("012345678901234567890123456789xyz!", "xyz?")}")
+    print(f"{repeat("a", 37) == repeat("a", 37)} {repeat("a", 17) + "b" + repeat("a", 19) == repeat("a", 37)}")

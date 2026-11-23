@@ -1,0 +1,12 @@
+indexed 231
+d
+c
+after break [a, b]
+c
+b
+shared_values [a, b, c] [a] last
+refill [1, 2] [200, 201, 202, 203, 204, 205, 206, 207]
+count 1
+true false
+true false
+exit 0
