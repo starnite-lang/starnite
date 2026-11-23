@@ -103,32 +103,65 @@ fault_c_output() {
 # a compiler that prints one line more for a program that imports a module, and so does not do what
 # the same program in one file does: seen, and the program is shrunk to one that is still split, which
 # the real compiler runs alike in two files and in one
-fault_split() {
+fault_split() { split_fault split; }
+# the same, where the two differ in what a program prints (not in a trap's place, which is left out): the
+# difference is on the standard output, byte for byte
+fault_split_stdout() { split_fault split-stdout; }
+split_fault() {
+    fault=$1
     seed=
     for s in $(seq 1 50); do
         if [ "$("$fuzz" --print --seed "$s" | head -1)" = '# module' ]; then seed=$s; break; fi
     done
-    if [ -z "$seed" ]; then bad "fault split: none of 50 programs is split across a module"; return; fi
+    if [ -z "$seed" ]; then bad "fault $fault: none of 50 programs is split across a module"; return; fi
     d="$tmp/split"
-    out=$(with_fault split --no-negative --seed "$seed" --count 1 --shrink --keep "$d" 2>&1); status=$?
+    out=$(with_fault "$fault" --no-negative --seed "$seed" --count 1 --shrink --keep "$d" 2>&1); status=$?
     m="$d/case$seed.min.stn"
     if [ $status != 1 ] || ! printf '%s\n' "$out" | grep -q "split across a module"; then
-        bad "fault split: the fuzzer did not report a difference (seed $seed)"; printf '%s\n' "$out" | tail -10
-    elif [ ! -f "$m" ] || [ "$(head -1 "$m")" != '# module' ]; then bad "fault split: the shrunk program is not split (seed $seed)"
-    elif [ "$(lines "$m")" -gt 40 ]; then bad "fault split: the shrunk program has $(lines "$m") lines"
+        bad "fault $fault: the fuzzer did not report a difference (seed $seed)"; printf '%s\n' "$out" | tail -10
+    elif [ ! -f "$m" ] || [ "$(head -1 "$m")" != '# module' ]; then bad "fault $fault: the shrunk program is not split (seed $seed)"
+    elif [ "$(lines "$m")" -gt 40 ]; then bad "fault $fault: the shrunk program has $(lines "$m") lines"
     elif ! "$starnite" run --interp "$d/case$seed.min.split/main.stn" > "$tmp/s.out" 2>&1 || ! "$starnite" run --interp "$m" > "$tmp/o.out" 2>&1 || ! cmp -s "$tmp/s.out" "$tmp/o.out"; then
-        bad "fault split: the real compiler does not run the shrunk program alike in two files and in one"
-    else ok "fault split: $(lines "$d/case$seed.stn") lines shrunk to $(lines "$m")"; fi
+        bad "fault $fault: the real compiler does not run the shrunk program alike in two files and in one"
+    else ok "fault $fault: $(lines "$d/case$seed.stn") lines shrunk to $(lines "$m")"; fi
 }
 
-# --reduce: a program of 200 lines and more, kept while it compiles and has a main, is a few lines
-# of main
+# --reduce: programs of a dozen lines, kept while they compile and have a main, are a few lines of main. The
+# programs are fixed, so that the result does not depend on what the generator makes of a seed: one that is
+# split across a module, which stays split and checks, and an ordinary one
 reduce_keeping() {
-    "$fuzz" --print --seed 7 > "$tmp/p.stn"
+    cat > "$tmp/p.stn" <<'STN'
+# module
+fn double(n: Int) -> Int:
+    n * 2
+
+fn unused(n: Int) -> Int:
+    n + 1
+
+# generated
+fn main():
+    print(f"{double(2)}")
+    print(f"{unused(3)}")
+    print("done")
+STN
     STARNITE="$starnite" "$fuzz" --reduce "$tmp/p.stn" --keeping 'fn main' > "$tmp/r.stn" 2> "$tmp/r.err"; status=$?
-    if [ $status != 0 ] || [ "$(lines "$tmp/r.stn")" -gt 6 ] || ! grep -q 'fn main' "$tmp/r.stn" || ! "$starnite" check "$tmp/r.stn" > /dev/null 2>&1; then
-        bad "--reduce --keeping: exit $status, $(lines "$tmp/r.stn") lines"; cat "$tmp/r.err"
-    else ok "--reduce --keeping: $(lines "$tmp/p.stn") lines reduced to $(lines "$tmp/r.stn")"; fi
+    cp "$tmp/r.stn" "$tmp/r2.stn"
+    if [ $status != 0 ] || [ "$(lines "$tmp/r2.stn")" -gt 6 ] || [ "$(head -1 "$tmp/r2.stn")" != '# module' ] || ! grep -q 'fn main' "$tmp/r2.stn" || ! "$starnite" check "$tmp/r2.stn" > /dev/null 2>&1; then
+        bad "--reduce --keeping: a program split across a module: exit $status, $(lines "$tmp/r2.stn") lines"; cat "$tmp/r.err"; return
+    fi
+    cat > "$tmp/q.stn" <<'STN'
+fn double(n: Int) -> Int:
+    n * 2
+
+fn main():
+    print(f"{double(2)}")
+    print("done")
+STN
+    STARNITE="$starnite" "$fuzz" --reduce "$tmp/q.stn" --keeping 'fn main' > "$tmp/q.out" 2> "$tmp/q.err"; status=$?
+    cp "$tmp/q.out" "$tmp/q2.stn"
+    if [ $status != 0 ] || [ "$(lines "$tmp/q2.stn")" -gt 3 ] || ! grep -q 'fn main' "$tmp/q2.stn" || ! "$starnite" check "$tmp/q2.stn" > /dev/null 2>&1; then
+        bad "--reduce --keeping: an ordinary program: exit $status, $(lines "$tmp/q2.stn") lines"; cat "$tmp/q.err"
+    else ok "--reduce --keeping: $(lines "$tmp/p.stn") lines reduced to $(lines "$tmp/r2.stn") (split) and $(lines "$tmp/q.stn") to $(lines "$tmp/q2.stn")"; fi
 }
 
 # --reduce of a program that imports a module that is next to it: the candidates are tried where the
@@ -268,6 +301,11 @@ fault_killed() { crashes killed "in exe"; }
 # a C compiler that fails and says nothing: the build of a program that checked fails, and it is a crash
 fault_cc_fails() { crashes cc-fails "in build"; }
 
+# the build said it succeeded and left no program, and the program that was built ends with the status of the
+# debug runtime that finds objects that do not balance: a launch that failed and a status that is not the program's
+fault_no_exe() { crashes no-exe "in exe"; }
+fault_leak() { crashes leak "in exe"; }
+
 # The compiler may say that a program uses what it does not support yet (the build of valid code, exit 1, in
 # its own words), and that is not a crash. The same words in a C compiler that failed, or in an exception
 # that nothing caught, are not that, and are one.
@@ -342,7 +380,7 @@ STN
 n=0
 pids=""
 names=""
-for check in negative_fuzzing fault_accept_take fault_accept_match fault_wrong_code fault_c_output fault_split reduce_keeping reduce_next_to_a_module reduce_ordinary_module_comment reduce_keeps_a_sibling_module reduce_rejected_next_to_a_module reduce_keeping_a_match reduce_name_taken reduce_without_compiler fault_crash fault_crash_run fault_silent_crash fault_killed fault_cc_fails unsupported_is_not_a_crash fault_cc_says_unsupported fault_exception_unsupported crash_phrase_is_output; do
+for check in negative_fuzzing fault_accept_take fault_accept_match fault_wrong_code fault_c_output fault_split fault_split_stdout reduce_keeping reduce_next_to_a_module reduce_ordinary_module_comment reduce_keeps_a_sibling_module reduce_rejected_next_to_a_module reduce_keeping_a_match reduce_name_taken reduce_without_compiler fault_crash fault_crash_run fault_silent_crash fault_killed fault_cc_fails fault_no_exe fault_leak unsupported_is_not_a_crash fault_cc_says_unsupported fault_exception_unsupported crash_phrase_is_output; do
     n=$((n + 1))
     "$check" > "$tmp/result.$n" 2>&1 &
     pids="$pids $!"

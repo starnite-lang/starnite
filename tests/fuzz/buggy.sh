@@ -14,6 +14,10 @@
 #   silent-crash the program that the C build makes of one that has a main is killed by a signal,
 #                with nothing printed
 #   killed       the program that the C build makes is killed by SIGKILL, with nothing printed
+#   no-exe       the build says it succeeded and leaves no program: running it is a launch failure (status 127)
+#   leak         the program that the C build makes ends with status 3, as the debug runtime does when objects do not balance
+#   split-stdout both backends print `trap: message at split` as output for a program that imports fuzzlib and
+#                `trap: message at single` for one that does not: the same program in one file prints another line
 #   cc-fails     the C compiler exits 1 and says nothing
 #   unsupported  not a fault: the build says `error: not supported yet: ...` and exits 1, which is not a crash
 #   cc-says-unsupported, exception-unsupported
@@ -91,6 +95,27 @@ killed)
         "$real" "$@"; status=$?
         for last; do :; done
         if [ $status = 0 ] && grep -q '^fn main' "$last"; then replace_program 'kill -KILL $$'; fi
+        exit $status
+    fi ;;
+no-exe)
+    if [ "$1" = build ]; then
+        "$real" "$@"; status=$?
+        for last; do :; done
+        if [ $status = 0 ] && grep -q '^fn main' "$last"; then rm -f "$exe"; fi
+        exit $status
+    fi ;;
+leak)
+    if [ "$1" = build ]; then
+        "$real" "$@"; status=$?
+        for last; do :; done
+        if [ $status = 0 ] && grep -q '^fn main' "$last"; then replace_program 'exit 3'; fi
+        exit $status
+    fi ;;
+split-stdout)
+    if [ "$1" = run ]; then
+        for last; do :; done
+        "$real" "$@"; status=$?
+        if grep -q '^import fuzzlib' "$last"; then echo "trap: message at split"; else echo "trap: message at single"; fi
         exit $status
     fi ;;
 cc-fails)

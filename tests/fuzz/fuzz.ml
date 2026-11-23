@@ -1346,6 +1346,12 @@ let run starnite tmp args path : int * string =
   | Exited c, out, _ -> (c, out)
   | Signaled s, out, _ -> (128 + abs s, out)
 
+(* the same, with what the program printed and what it said on the standard error kept apart *)
+let run_apart starnite tmp args path : int * string * string =
+  match spawn ~separate:true tmp (Array.of_list ((starnite :: args) @ [ path ])) (String.concat " " args) with
+  | Exited c, out, err -> (c, out, err)
+  | Signaled s, out, err -> (128 + abs s, out, err)
+
 let tail s n = if String.length s <= n then s else String.sub s (String.length s - n) n
 
 let first_difference a b =
@@ -1375,8 +1381,12 @@ let differential ?(c_build = true) starnite tmp path text =
     else begin
       let twin = Filename.concat tmp "twin.stn" in
       Out_channel.with_open_bin twin (fun oc -> output_string oc text);
-      let rt, out_t = run starnite tmp [ "run"; "--interp" ] twin in
-      if rt = ri && without_places out_t = without_places out_i then `Agreed else `Twin (ri, out_i, rt, out_t)
+      (* what a program prints is the same byte for byte; only the places in the traps it reports, on the standard
+         error, are not (they are those of two files and of one) *)
+      let rs, so, se = run_apart starnite tmp [ "run"; "--interp" ] path in
+      let rt, to_, te = run_apart starnite tmp [ "run"; "--interp" ] twin in
+      if rt = rs && so = to_ && without_places se = without_places te then `Agreed
+      else `Twin (rs, so ^ se, rt, to_ ^ te)
     end
 
 (* what makes a program fail the same way: it checks, and it still fails in the way it did, with the
@@ -1487,7 +1497,8 @@ let corrupt rng text =
 
 (* where a compiler crashed: in the check, or in what builds and runs a program that checks. The second is
    named by what ran: "run --interp", "build" (the compiler and the C compiler), or "exe" (the program it built) *)
-type crash = At_check | At_run of string list
+(* the ones that end in a hang are kept apart: a candidate that ends in a regular answer after a longer time is not the same failure *)
+type crash = At_check | At_check_hung | At_run of string list | At_run_hung of string list
 
 (* A line that OCaml writes when an exception nothing caught ends a process. It is the compiler's own: the
    programs it builds print on the standard output, and say what went wrong on the standard error in lines
@@ -1517,7 +1528,7 @@ let crash_of starnite tmp path text =
   let exe = Filename.concat tmp "crash.exe" in
   let step args = spawn ~separate:true tmp (Array.of_list ((starnite :: args) @ [ path ])) (String.concat " " args) in
   match step [ "check"; "--json" ] with
-  | exception Hang _ -> Some (At_check, "the check did not end")
+  | exception Hang _ -> Some (At_check_hung, "the check did not end")
   | Signaled s, _, err -> Some (At_check, sprintf "killed by signal %d\n%s" (abs s) err)
   | Exited c, out, err when c >= 2 || uncaught err -> Some (At_check, err ^ out)
   | Exited 0, _, _ -> (
@@ -1533,7 +1544,7 @@ let crash_of starnite tmp path text =
       | None -> (
           (try Sys.remove exe with Sys_error _ -> ());
           match step [ "build"; "-o"; exe ] with
-          | exception Hang _ -> Some (At_run [ "build" ], "the build did not end")
+          | exception Hang _ -> Some (At_run_hung [ "build" ], "the build did not end")
           | Signaled s, _, err -> Some (At_run [ "build" ], sprintf "killed by signal %d\n%s" (abs s) err)
           | Exited c, out, err when c <> 0 && not (c = 1 && unsupported err) ->
               (* a program that checked is built, or the compiler says it cannot yet (valid code that a backend
@@ -1543,9 +1554,14 @@ let crash_of starnite tmp path text =
               match spawn ~separate:true tmp [| exe |] "the program" with
               | exception Hang _ -> None
               | o, out, err ->
-                  if died_by_signal o then
-                    Some (At_run [ "exe" ], sprintf "the program was killed by a signal\n%s" (if err = "" then out else err))
-                  else None)
+                  let said = if err = "" then out else err in
+                  (match o with
+                   | Signaled _ -> Some (At_run [ "exe" ], sprintf "the program was killed by a signal\n%s" said)
+                   | Exited c when c > 2 ->
+                       (* 0 and 1 are what main ends with, 2 is a trap; 3 is the debug runtime finding objects that
+                          do not balance, 127 is a program that did not start: neither is the program's own *)
+                       Some (At_run [ "exe" ], sprintf "the program ended with status %d\n%s" c said)
+                   | Exited _ -> None))
           | _ -> None))
   | _ -> None
 
@@ -1692,13 +1708,18 @@ let () =
         | Some (kind, out) ->
             incr crashes;
             Printf.printf "case %d, corruption %d: the compiler crashed %s:\n  %s\n%!" case k
-              (match kind with At_check -> "in the check" | At_run args -> "in " ^ String.concat " " args)
+              (match kind with
+               | At_check | At_check_hung -> "in the check"
+               | At_run args | At_run_hung args -> "in " ^ String.concat " " args)
               (String.concat "\n  " (String.split_on_char '\n' (tail out 300)));
             let suffix = sprintf ".k%d.crash" k in
             save case suffix text;
             if !shrink_failures && !shrunk < 3 then begin
               incr shrunk;
               let small, evals = shrink ~budget:!budget ~still_fails:(still_crashes starnite tmp kind) text in
+              (* the shrink runs under a shorter limit than the campaign: what it ends with must fail in the same way
+                 under the campaign's own, or the program that was found is what is kept *)
+              let small = if still_crashes starnite tmp kind small then small else text in
               Printf.printf "  shrunk from %d lines to %d, in %d checks\n%!" (Array.length (lines_of text)) (Array.length (lines_of small)) evals;
               save case (suffix ^ ".min") small
             end
@@ -1741,7 +1762,11 @@ let () =
           true
       | `Twin (ri, out_i, rt, out_t) ->
           Printf.printf "case %d: the program split across a module (exit %d) and the same program in one file (exit %d) differ\n" case ri rt;
-          (match first_difference (without_places out_i) (without_places out_t) with
+          (match
+             (match first_difference (without_places out_i) (without_places out_t) with
+              | Some d -> Some d
+              | None -> first_difference out_i out_t)
+           with
            | Some (a, b) -> Printf.printf "  split:    %s\n  one file: %s\n%!" a b
            | None -> Printf.printf "  split tail:    %S\n  one file tail: %S\n%!" (tail out_i 200) (tail out_t 200));
           if !shrink_failures && !shrunk < 3 then begin
