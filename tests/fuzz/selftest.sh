@@ -126,7 +126,8 @@ same_run() {
                [ "$first" = 'trap: stack overflow' ] && continue
                # the place is the last `:LINE:COL` of the line; the path before it may hold spaces
                printf '%s\n' "$first" | grep -q '^trap: .* at ..*:[0-9][0-9]*:[0-9][0-9]*$' || return 1
-               sed '1s/^\(trap: [a-z0-9 ]*\) at ..*:[0-9][0-9]*:[0-9][0-9]*$/\1/' "$tmp/$f.err" > "$tmp/$f.cut" && mv "$tmp/$f.cut" "$tmp/$f.err"
+               # the kind of a trap holds no ` at `, so the first one on the line begins the place
+               sed '1s/ at .*$//' "$tmp/$f.err" > "$tmp/$f.cut" && mv "$tmp/$f.cut" "$tmp/$f.err"
            done ;;
         *) return 1 ;;
     esac
