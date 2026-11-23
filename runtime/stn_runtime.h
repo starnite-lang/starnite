@@ -252,7 +252,7 @@ static inline StnError stn_error_dup(StnError e) { if (e.box) stn_dup(e.box); re
 /* ---- console and the rest of the built-ins ---- */
 void    stn_print(StnStr s);
 int     stn_read_line(StnStr* out);
-StnStr  stn_read_all(void);
+StnStr  stn_read_all(const char* file, int line, int col);
 int64_t stn_clock_ns(void);
 StnArray* stn_str_chars(StnStr s, const StnElemOps* char_ops);
 StnArray* stn_str_split(StnStr s, StnStr sep, const StnElemOps* str_ops, const char* file, int line, int col);

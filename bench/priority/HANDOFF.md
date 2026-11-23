@@ -30,11 +30,12 @@ Membership and refill were faster than both controls on every CPU. String compar
 
 ## Reproduce
 
-From the branch root, build both compilers. The parent of the handoff commit is the baseline for this comparison.
+Pin both sides explicitly. `HEAD^` moves with every commit, so it is not a baseline once more commits land on the branch. The baseline is `a7475b6e4009031e6da538647ecf85c43f535bc0` (the Codex handoff parent), and the candidate is the commit under review. The baseline must compile the current `bench.stn` and `kernels-c-tuned.c`; it provides `byte_at_or_end` and `stn_array_contains_i64`, and the runner fails at build time if it does not.
 
 ```sh
-git worktree add --detach ../starnite-benchmark-base HEAD^
+git worktree add --detach ../starnite-benchmark-base a7475b6e4009031e6da538647ecf85c43f535bc0
 (cd ../starnite-benchmark-base && dune build compiler/main.exe)
+git rev-parse HEAD   # record the candidate commit next to the results
 dune build compiler/main.exe
 bench/priority/run.sh ../starnite-benchmark-base --output /tmp/priority-samples.json
 bench/priority/run.sh ../starnite-benchmark-base --all --output /tmp/priority-regression.json

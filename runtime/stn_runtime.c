@@ -717,7 +717,7 @@ int stn_read_line(StnStr* out) {
     return 1;
 }
 
-StnStr stn_read_all(void) {
+StnStr stn_read_all(const char* file, int line, int col) {
     stn_flush();
     size_t cap = 65536;
     struct stat info;
@@ -733,14 +733,14 @@ StnStr stn_read_all(void) {
     for (;;) {
         len += fread(s->data + len, 1, cap - len, stdin);
         if (feof(stdin)) break;
-        if (ferror(stdin)) stn_trap("input error", "<runtime>", 0, 0, "could not read stdin");
+        if (ferror(stdin)) stn_trap("input error", file, line, col, "could not read stdin");
         if (len == cap) {
             if (cap > (SIZE_MAX - sizeof(StnStrBuf) - 1) / 2 ||
                 (uint64_t)cap > (uint64_t)STN_MAX_ALLOC / 2)
-                stn_too_large("<runtime>", 0, 0);
+                stn_too_large(file, line, col);
             cap *= 2;
             StnStr grown = realloc(s, sizeof(StnStrBuf) + cap + 1);
-            if (!grown) stn_trap("out of memory", "<runtime>", 0, 0, "could not grow input buffer");
+            if (!grown) stn_trap("out of memory", file, line, col, "could not grow input buffer");
             s = grown;
         }
     }

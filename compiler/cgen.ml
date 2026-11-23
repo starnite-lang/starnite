@@ -2405,7 +2405,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       line fc "  %s = %s;" res nv.c;
       line fc "}";
       { c = res; owned = true }
-  | "read_all@" -> owned "stn_read_all()"
+  | "read_all@" -> owned (Printf.sprintf "stn_read_all(%s)" (loc_args e.l))
   | "clock_ns@" -> value "stn_clock_ns()"
   | "len@Array" -> (
       match (arg 0).a.e with
