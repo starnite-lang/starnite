@@ -13,6 +13,8 @@
 #   crash-run    the interpreter does, for a program that has a main and checks
 #   silent-crash the program that the C build makes of one that has a main is killed by a signal,
 #                with nothing printed
+#   killed       the program that the C build makes is killed by SIGKILL, with nothing printed
+#   cc-fails     the C compiler exits 1 and says nothing
 #   phrase       not a fault: the programs print `Fatal error: exception Not_found` as their output, which is
 #                not a crash of the compiler (the crashes above are written on the standard error, as OCaml does)
 real=${REAL_STARNITE:?REAL_STARNITE names the compiler to run}
@@ -79,5 +81,17 @@ phrase)
         if [ $status = 0 ]; then replace_program 'echo "Fatal error: exception Not_found"'; fi
         exit $status
     fi ;;
+killed)
+    # the program that the C build makes is killed by SIGKILL before the time is up (the machine does it
+    # for want of memory): a signal like any other
+    if [ "$1" = build ]; then
+        "$real" "$@"; status=$?
+        for last; do :; done
+        if [ $status = 0 ] && grep -q '^fn main' "$last"; then replace_program 'kill -KILL $$'; fi
+        exit $status
+    fi ;;
+cc-fails)
+    # the C compiler exits 1 and says nothing
+    if [ "$1" = build ]; then exec "$real" --cc "$(command -v false)" "$@"; fi ;;
 esac
 exec "$real" "$@"

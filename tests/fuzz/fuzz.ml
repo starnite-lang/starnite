@@ -620,13 +620,19 @@ let marker_index lines =
   Array.iteri (fun i l -> if l = generated_marker && !r < 0 then r := i) lines;
   !r
 
-(* A text is a program split across a module when its first line is the header, exactly, and the line between
+(* [single_file] is set by a reduction of a file that is not split: its candidates are written in that mode
+   whatever they look like (they can come to look split, when what is before the header is taken out), so
+   that a module that is next to the input is never written over.
+
+   A text is a program split across a module when its first line is the header, exactly, and the line between
    the prelude and what is generated comes after it. A file that starts with a comment that begins alike
    (`# module smoke test`) is an ordinary program: the same test decides how a text is written and where a
    reduction is tried, so that what it imports is found where it is. *)
+let single_file = ref false
+
 let is_split text =
   let ls = lines_of text in
-  Array.length ls > 0 && ls.(0) = module_header && marker_index ls > 0
+  (not !single_file) && Array.length ls > 0 && ls.(0) = module_header && marker_index ls > 0
 
 (* a top-level function, type or trait, with a star after its name: the module exports it *)
 let export_decl l =
@@ -1488,13 +1494,10 @@ type crash = At_check | At_run of string list
    of a few forms that do not begin like this. *)
 let uncaught err = List.exists (is_prefix "Fatal error: exception") (String.split_on_char '\n' err)
 
-(* what the compiler says when the C compiler could not build what it wrote *)
-let c_build_failed err =
-  contains err "undefined reference" || contains err "In function" || (contains err ".c:" && contains err "error")
-
-(* A process killed by a signal other than the one that ends one that does not end. A trap is an exit with a
-   status, and so is the C build's stack overflow, so a signal is a fault of the compiler or of the runtime. *)
-let died_by_signal = function Signaled s -> s <> Sys.sigkill | Exited _ -> false
+(* A process killed by a signal. A trap is an exit with a status, and so is the C build's stack overflow, so a
+   signal is a fault of the compiler or of the runtime, or of the machine (a kill for want of memory); a run
+   that the fuzzer ended for taking too long is not here, it is the exception Hang. *)
+let died_by_signal = function Signaled _ -> true | Exited _ -> false
 
 (* what the compiler does with a program that may be wrong: a crash, or nothing to say. What it prints and
    what a program prints are kept apart (the standard output and the standard error of each step), the C build
@@ -1523,7 +1526,10 @@ let crash_of starnite tmp path text =
           match step [ "build"; "-o"; exe ] with
           | exception Hang _ -> Some (At_run [ "build" ], "the build did not end")
           | Signaled s, _, err -> Some (At_run [ "build" ], sprintf "killed by signal %d\n%s" (abs s) err)
-          | Exited c, out, err when c >= 2 || uncaught err || c_build_failed err -> Some (At_run [ "build" ], err ^ out)
+          | Exited c, out, err when c <> 0 && not (contains err "not supported yet") ->
+              (* a program that checked is built, or the compiler says it cannot yet (valid code that a backend
+                 does not support, which is not a crash); the C compiler failing, with or without a word, is *)
+              Some (At_run [ "build" ], err ^ out)
           | Exited 0, _, _ -> (
               match spawn ~separate:true tmp [| exe |] "the program" with
               | exception Hang _ -> None
@@ -1608,6 +1614,7 @@ let () =
        (* the program may import what is next to it. A program split across a module, which is the text of
           one that the fuzzer made, brings its module with it, and it is written in the scratch directory *)
        if not (is_split text) then begin
+         single_file := true;
          candidate_dir := Some (Filename.dirname file);
          try ignore (candidate_path tmp "orig")
          with Unix.Unix_error (e, _, _) ->

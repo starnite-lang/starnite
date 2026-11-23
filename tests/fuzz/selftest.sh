@@ -262,6 +262,12 @@ fault_crash_run() { crashes crash-run "in run --interp"; }
 # and sees how it ended, which the compiler's output does not say
 fault_silent_crash() { crashes silent-crash "in exe"; }
 
+# a SIGKILL that the machine sends is a signal like another, and not the end of a run that took too long
+fault_killed() { crashes killed "in exe"; }
+
+# a C compiler that fails and says nothing: the build of a program that checked fails, and it is a crash
+fault_cc_fails() { crashes cc-fails "in build"; }
+
 # not a crash: programs that print what a crash looks like, from the interpreter and from the C build.
 # The words are the program's output, and the compiler did nothing wrong.
 crash_phrase_is_output() {
@@ -294,12 +300,37 @@ STN
     else ok "--reduce of a file with a comment that begins like the module header: it is an ordinary file, and its import is found"; fi
 }
 
+# A program that is not split across a module, with the two marker comments of one in it but not at its
+# start, can become one while it is reduced (the blank line before them goes). The mode is the input's, and
+# the candidates are written in it: a module that is next to the input is not written over.
+reduce_keeps_a_sibling_module() {
+    proj="$tmp/proj7"; mkdir "$proj"
+    printf '%s\n' 'fn keep*() -> Int:' '    1' > "$proj/fuzzlib.stn"
+    cp "$proj/fuzzlib.stn" "$tmp/fuzzlib.orig"
+    cat > "$proj/main.stn" <<'STN'
+
+# module
+# generated
+fn main():
+    var xs: Array[Int] = [3, 1, 2]
+    sort(mut xs)
+    print("unused")
+STN
+    (cd "$tmp" && with_fault c-output --reduce "$proj/main.stn" > "$tmp/o7.out" 2> "$tmp/o7.err"); status=$?
+    left=$(ls -A "$proj" | tr '\n' ' ')
+    if [ $status != 0 ] || ! grep -q 'sort(mut' "$tmp/o7.out"; then
+        bad "--reduce next to a module with the marker comments in a file that is not split: exit $status"; cat "$tmp/o7.err"
+    elif ! cmp -s "$proj/fuzzlib.stn" "$tmp/fuzzlib.orig"; then bad "--reduce wrote over the module next to its input"
+    elif [ "$left" != "fuzzlib.stn main.stn " ]; then bad "--reduce left files, or took one away: $left"
+    else ok "--reduce keeps the module that is next to its input, whatever a candidate looks like"; fi
+}
+
 # The checks run together, each as a process of its own. Every one has to end, and to say how: a check that
 # was killed, or that stopped before it printed its result, fails the run, and does not drop out of it.
 n=0
 pids=""
 names=""
-for check in negative_fuzzing fault_accept_take fault_accept_match fault_wrong_code fault_c_output fault_split reduce_keeping reduce_next_to_a_module reduce_ordinary_module_comment reduce_rejected_next_to_a_module reduce_keeping_a_match reduce_name_taken reduce_without_compiler fault_crash fault_crash_run fault_silent_crash crash_phrase_is_output; do
+for check in negative_fuzzing fault_accept_take fault_accept_match fault_wrong_code fault_c_output fault_split reduce_keeping reduce_next_to_a_module reduce_ordinary_module_comment reduce_keeps_a_sibling_module reduce_rejected_next_to_a_module reduce_keeping_a_match reduce_name_taken reduce_without_compiler fault_crash fault_crash_run fault_silent_crash fault_killed fault_cc_fails crash_phrase_is_output; do
     n=$((n + 1))
     "$check" > "$tmp/result.$n" 2>&1 &
     pids="$pids $!"
