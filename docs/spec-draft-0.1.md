@@ -247,7 +247,7 @@ Lists, dictionaries and sets are variable-length built-ins with value semantics 
 
 `{}` alone is accepted only where the expected type says which of the two it is.
 
-`[x; n]` is an array of `n` copies of `x`, built in one allocation: `[0; 500]`, `[false; len(xs)]`. The count is any `Int` expression and is evaluated first, then `x`, once; a negative count traps. The result is an ordinary `Array[T]`, which can grow like any other. `filled(n, x)` is the same operation as a function.
+`[x; n]` is an array of `n` copies of `x`, built in one allocation: `[0; 500]`, `[false; len(xs)]`. Evaluation is left to right, as everywhere (section 4.4): `x` once, then the count, which is any `Int` expression; a negative count traps. The result is an ordinary `Array[T]`, which can grow like any other. `filled(n, x)` builds the same array as a function, taking the count first.
 
 A fixed-size array type, `Array[T, N]`, is planned for milestone 5. `N` is an `Int` known at compile time and part of the type. Such an array cannot grow: `push`, `pop`, `insert` and `remove` do not exist for it. It is stored inline, in the frame or in the struct that holds it, with no box of its own; an index that is a constant in range needs no check; and `[x; N]` builds one where the expected type is `Array[T, N]`. Until then `[x; n]` always builds a growable array.
 
