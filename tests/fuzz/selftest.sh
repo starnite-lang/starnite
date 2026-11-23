@@ -109,7 +109,8 @@ fault_split() { split_fault split; }
 fault_split_stdout() { split_fault split-stdout; }
 # two programs run alike: the same exit status, the same standard output and the same standard
 # error, byte for byte. A shrunk program may end in a trap (status 2). A trap writes one header,
-# `trap: KIND at FILE:LINE:COL`, as the first line of standard error, and then its message. The
+# `trap: KIND at FILE:LINE:COL` (or `trap: stack overflow`, which has no place), as the first line
+# of standard error, and then its message. The
 # place differs between the two forms, so it is left out of that first line and of nothing else:
 # the message is compared as it is, whatever it says. Status 2 without that header first is an
 # uncaught exception of the compiler, which begins with a header of its own, and is not alike.
@@ -120,8 +121,12 @@ same_run() {
     case $s1 in
         0) ;;
         2) for f in s o; do
-               head -n 1 "$tmp/$f.err" | grep -q '^trap: .* at [^ ]*:[0-9]*:[0-9]*$' || return 1
-               sed '1s/ at [^ ]*:[0-9]*:[0-9]*$//' "$tmp/$f.err" > "$tmp/$f.cut" && mv "$tmp/$f.cut" "$tmp/$f.err"
+               first=$(head -n 1 "$tmp/$f.err")
+               # a stack overflow has no place, and is compared as it is
+               [ "$first" = 'trap: stack overflow' ] && continue
+               # the place is the last `:LINE:COL` of the line; the path before it may hold spaces
+               printf '%s\n' "$first" | grep -q '^trap: .* at ..*:[0-9][0-9]*:[0-9][0-9]*$' || return 1
+               sed '1s/^\(trap: [a-z0-9 ]*\) at ..*:[0-9][0-9]*:[0-9][0-9]*$/\1/' "$tmp/$f.err" > "$tmp/$f.cut" && mv "$tmp/$f.cut" "$tmp/$f.err"
            done ;;
         *) return 1 ;;
     esac
