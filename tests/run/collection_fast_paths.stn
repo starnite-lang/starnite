@@ -21,3 +21,31 @@ fn main():
     print(f"{parse_int("-9223372036854775808")} {parse_int("+9223372036854775807")}")
     print(f"{try parse_int("999999999999999999999x")} {try parse_int("999999999999999999999")}")
     print(f"{parse_float("-0.0")} {parse_float(".125")} {parse_float("1e5")} {parse_float("2.2250738585072014e-308")}")
+    # eight digits per step: one block, two blocks and a tail, and a non-digit inside a block
+    print(f"{parse_int("98765432")} {parse_int("-123456789012345678")} {parse_int("+12345678")}")
+    print(f"{try parse_int("1234567x")} {try parse_int("12345678:")} {try parse_int("/2345678")}")
+    # the short float parse: digits on both sides of the point, none on one side, two points
+    print(f"{parse_float("123.125")} {parse_float("-7.")} {parse_float("+42")} {try parse_float("1.2.3")} {try parse_float("-")}")
+    # chars: a run of sixteen ASCII bytes, a run cut short by a longer character, and a tail
+    let wide = chars("0123456789abcdefXYZé0123456789abcde漢0123456789abcdef!")
+    print(f"{len(wide)} {wide[15]} {wide[19]} {wide[35]} {wide[36]} {wide[52]}")
+    # a sort large enough for wide digits, with negative keys and a constant low byte
+    var big: Array[Int] = []
+    var x = 12345
+    for i in 0..20000:
+        x = (x * 1103515245 + 12345) % 2147483648
+        big.push((x - 1073741824) * 256)
+    sort(mut big)
+    var ordered = true
+    for i in 1..20000:
+        if big[i - 1] > big[i]:
+            ordered = false
+    print(f"{ordered} {big[0]} {big[10000]} {big[19999]}")
+    # sum += e stores the checked add in place: the same value, and the same trap
+    var total = 9223372036854775800
+    let parts = [(1, 2), (3, 1)]
+    for pair in parts:
+        let (p, q) = pair
+        total += p + q
+    print(f"{total}")
+    total += parts[0].1 + 0
