@@ -6,15 +6,15 @@ The `handoff/` directory (bundle and patches) exists only in the local clone and
 ## 1. State
 
 - `origin/main` is at `5923c05` (PR #8, squash-merged). PRs #1-#8 are merged, all squash merges. Tests: 201 pass with GCC and with Clang.
-- Two branches, both based on `5923c05`, both green, pushed to `origin`, and each has an open PR: [#9](https://github.com/starnite-lang/starnite/pull/9) (`wip/trait-generic-methods`, the compiler fixes) and [#10](https://github.com/starnite-lang/starnite/pull/10) (`wip/fuzz-modules`, the fuzzer's module and crash oracles). Neither has been reviewed yet.
+- Two branches, both based on `5923c05`, pushed to `origin`, each with an open PR: [#9](https://github.com/starnite-lang/starnite/pull/9) (`wip/trait-generic-methods`, the compiler fixes; head `a41c81c`) and [#10](https://github.com/starnite-lang/starnite/pull/10) (`wip/fuzz-modules`, the fuzzer's module and crash oracles; head `15075cd`). CI was green on both at their first heads; each got a review from `sr-auto` (4 and 3 findings), all answered, fixed and resolved. The heads above are the fixes; check CI on them.
 - `claude/spec-draft-0.1` (remote) holds the spec as a branch. **Leave it** until the user says milestone 1 is done, then delete it.
 
 | Branch | Commits | Tests |
 |---|---|---|
-| `wip/fuzz-modules` | `58fbf3f` Fuzzer: programs split across a module; `50d9f02` Fuzzer: the compiler must not crash (§21.2, first oracle) | 204 pass; `tests/fuzz/selftest.sh` 14/14 |
-| `wip/trait-generic-methods` | `054225b` trait methods with type parameters of their own; `34c98ce` explicit type arguments `first[Int](xs)`; `9ecdf3d` an integer literal is an Int, never a Float; `d7b908b` prelude `swap` and `words`; `643d154` two crashes found by byte mutation; `69a10b1` unsettled constructed generic values are E0210; `9dc70e9` stack overflow is a trap / E0100 | 221 pass |
+| `wip/fuzz-modules` | `58fbf3f` Fuzzer: programs split across a module; `50d9f02` the compiler must not crash (§21.2, first oracle); `15075cd` review fixes (crash oracle keeps status and streams apart, exact `is_split`, parallel checks waited for) | `tests/fuzz/selftest.sh` 17/17; `--crash --count 300` 0 crashes; `tests/run.sh` not run as a whole on `15075cd` |
+| `wip/trait-generic-methods` | `054225b` trait methods with type parameters of their own; `34c98ce` explicit type arguments `first[Int](xs)`; `9ecdf3d` an integer literal is an Int, never a Float; `d7b908b` prelude `swap` and `words`; `643d154` two crashes found by byte mutation; `69a10b1` unsettled constructed generic values are E0210; `9dc70e9` stack overflow is a trap / E0100 ; `a41c81c` review fixes (impl bounds E0204, partial constructor type arguments, integer handler, JSON E0100) | 225 pass with GCC and with Clang |
 
-The two branches are independent; merged together they conflict only in `README.md` (one paragraph). **Merge order: #9 first, then #10.** #10's CI step `--crash --count 300` finds the unresolved-type-variable crash that #9 fixes, so it can fail until #9 is on main. After #9 merges, rebase `wip/fuzz-modules` onto `origin/main` (the only conflict is one README paragraph, in the "Passes 2 and 3" bullet or "Not done yet") and re-run the checks. #9 could be split into several PRs (generic methods and explicit type arguments; literal rule; library; crash fixes; stack overflow), but its commits are already separate. Both PRs are squash-merged on request only.
+The two branches are independent; merged together they conflict only in `README.md` (one paragraph). **Merge order: #9 first, then #10** is the natural order (#10's crash oracle found the crash #9 fixes), but CI was green on #10 against main's compiler, so it is not forced. After #9 merges, rebase `wip/fuzz-modules` onto `origin/main` (the conflict is one README paragraph) and re-run the checks. Both PRs are squash-merged on request only.
 
 ### Getting the work (the branches are also on origin)
 
@@ -55,6 +55,7 @@ Do not rebuild `_build` while a background run uses its binaries; use `--build-d
 
 - Fuzzer: productions with `lend` (projections); the oracle "compare each optional pass on and off" waits for the optional passes (later milestone).
 - Negative-fuzz kinds for E0210 (e.g. `is_none(None)`); a kind for explicit type arguments (E0102/E0203).
+- A negative-fuzz kind for an impl that adds a bound to a method's type parameter (E0204): the reviewer found that hole, the fuzzer did not. The stack-overflow handler (`runtime/stn_runtime.c`) is a heuristic by the faulting address; platform stack and guard bounds, or an explicit runtime check, were suggested in review and not done.
 - `split_at_mut`, `Slice[T]`, `StrView`: views into a borrowed buffer; need the `local` mode of milestone 3 (§10.5). `swap` covers the common case. The array search function is unspecified in the draft.
 - E0205 and `Iter`/`Send`/`Abandon`/`Cont` need later milestones.
 - Property, snapshot and doc tests belong to milestone 2.
