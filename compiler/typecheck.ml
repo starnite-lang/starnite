@@ -2670,9 +2670,11 @@ let check_distinct_fields what (fs : Syntax.field list) =
       | None -> ())
     fs
 
-let tparams_of tb (gs : gparam list) self =
+(* [outer] are the names of the parameters of what encloses the declaration (the trait or the impl of a method),
+   which the bounds may name: fn map[U: Conv[A]](...) in trait Mapper[A] *)
+let tparams_of ?(outer = []) tb (gs : gparam list) self =
   check_distinct_generics gs;
-  let names = List.map (fun g -> g.gname) gs in
+  let names = outer @ List.map (fun g -> g.gname) gs in
   List.map
     (fun g ->
       ( g.gname,
@@ -2700,7 +2702,7 @@ let make_sig tb ~modname ~uname (fd : Syntax.fn_def) (extra_tps : (string * (str
     (fun (p : Syntax.param) ->
       match p.pdefault with Some e -> default_modules := (e, modname) :: !default_modules | None -> ())
     fd.fparams;
-  let own = tparams_of tb fd.fgenerics self in
+  let own = tparams_of ~outer:(List.map fst extra_tps) tb fd.fgenerics self in
   let tps = extra_tps @ own in
   let names = List.map fst tps in
   let params =
@@ -2930,7 +2932,7 @@ let declare_items tb modname (items : item list) =
                         let want = List.map impl_t bargs in
                         let stated (ttr, targs_) =
                           ttr = btr && List.length targs_ = List.length want
-                          && List.for_all2 ty_equal want (List.map (subst ts) targs_)
+                          && List.for_all2 ty_equal_eff want (List.map (subst ts) targs_)
                         in
                         if not (List.exists stated tbs) then
                           err "E0204" fd.floc "type parameter '%s' of '%s' has the bound %s in the impl, which trait %s does not state for it"

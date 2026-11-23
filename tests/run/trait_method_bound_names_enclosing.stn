@@ -1,0 +1,40 @@
+# A bound of a method's own type parameter can name a parameter of the trait or of the impl around it.
+trait Conv[T]:
+    fn conv(x: Self) -> T
+
+impl Conv[Int] for Int:
+    fn conv(x: Int) -> Int:
+        x * 2
+
+impl Conv[Str] for Str:
+    fn conv(x: Str) -> Str:
+        x
+
+trait Mapper[A]:
+    fn map[U: Conv[A]](x: Self, v: U) -> A
+
+type Box = struct(n: Int)
+
+impl Mapper[Int] for Box:
+    fn map[U: Conv[Int]](x: Box, v: U) -> Int:
+        v.conv() + x.n
+
+# an impl for a generic type, whose method bound names the impl's own parameter
+type Wrapper[T] = struct(item: T)
+
+impl[T] Mapper[T] for Wrapper[T]:
+    fn map[U: Conv[T]](x: Wrapper[T], v: U) -> T:
+        v.conv()
+
+# through a bound, where the trait's argument is known only by the bound
+fn through[M: Mapper[Int]](m: M, v: Int) -> Int:
+    m.map(v)
+
+fn main():
+    let a = Box(1).map(20)
+    print(f"{a}")
+    let b = Wrapper("w").map("hello")
+    print(b)
+    let c = Wrapper(5).map(4)
+    print(f"{c}")
+    print(f"{through(Box(100), 7)} {through(Wrapper(0), 8)}")
