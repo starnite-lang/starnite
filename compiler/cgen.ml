@@ -2295,6 +2295,27 @@ and stmt fc (s : tstmt) =
        let _, binds = pat_test fc e.ty p n in
        bind_pattern fc binds;
        fc.frames <- { fk = FStmt; owned = [] } :: fc.frames
+   | SAssign ({ via = None; path = []; root; _ },
+              ({ e = XBin (Add, { e = XVar lhs; _ }, rhs); ty = TInt (IInt | I64); _ } as e))
+     when lhs.vid = root.vid && not root.vcell
+          && (match Hashtbl.find_opt fc.vars root.vid with Some (VDirect _) -> true | _ -> false)
+          && natural_bound fc e = None
+          && (let rec quiet (x : texpr) =
+                match x.e with
+                | XLit _ | XVar _ -> true
+                | XBin ((Add | Sub | Mul), a, b) -> quiet a && quiet b
+                | XField (b, _, _) | XTupleGet (b, _) -> quiet b
+                | XIndex (a, i) -> quiet a && quiet i
+                | _ -> false
+              in
+              quiet rhs) ->
+       (* `v = v + e` on a plain local, where e writes nothing: the checked add stores straight
+          into v, which compiles to an add and a jump on overflow. e is evaluated first, and it
+          cannot change v, so the value and the trap are the ones the general form gives. *)
+       let x = expr fc rhs in
+       let rv = tmp fc (TInt IInt) (borrow fc x rhs.ty) in
+       let dst = var_read fc root in
+       line fc "if (__builtin_add_overflow(%s, %s, &%s)) stn_overflow(%s);" dst rv dst (loc_args e.l)
    | SAssign (p, e) ->
        let x = expr fc e in
        let nv = tmp fc p.pty (own fc x e.ty) in

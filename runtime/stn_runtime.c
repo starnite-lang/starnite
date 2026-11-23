@@ -505,10 +505,19 @@ int64_t stn_array_count_true(const StnArray* a) {
 int64_t stn_array_sum_i64(const StnArray* a, int64_t sum, const char* file, int line, int col) {
     const int64_t* values = (const int64_t*)a->data;
     int64_t n = stn_len(a);
-    #pragma GCC unroll 4
-    for (int64_t i = 0; i < n; i++)
-        sum = stn_add_i64(sum, values[i], file, line, col);
+    int64_t i = 0;
+    /* written out so that each checked add is an add and a jump on overflow */
+    for (; i + 4 <= n; i += 4) {
+        if (__builtin_add_overflow(sum, values[i], &sum)) goto overflow;
+        if (__builtin_add_overflow(sum, values[i + 1], &sum)) goto overflow;
+        if (__builtin_add_overflow(sum, values[i + 2], &sum)) goto overflow;
+        if (__builtin_add_overflow(sum, values[i + 3], &sum)) goto overflow;
+    }
+    for (; i < n; i++)
+        if (__builtin_add_overflow(sum, values[i], &sum)) goto overflow;
     return sum;
+overflow:
+    stn_overflow(file, line, col);
 }
 
 /* Entry guards prove unique ownership and 0 <= count <= len. */
@@ -542,8 +551,10 @@ void stn_array_sort_i64(StnArray** pa) {
         return;
     }
 
-    /* Skip passes for bytes that are constant across the input. Stable digit
-       passes order negative keys first by flipping the sign bit on the last pass. */
+    /* Stable digit passes over the bits that differ across the input, lowest first. The span of
+       differing bits is cut into as few digits as possible, of up to eleven bits for a large input
+       (a 16 KiB table of counts) and eight for a small one; a digit whose bits are all constant is
+       skipped. Negative keys order first by flipping the sign bit in the digit that holds it. */
     uint64_t differing = 0, first = (uint64_t)elements[0];
     for (size_t i = 1; i < n; i++) differing |= first ^ (uint64_t)elements[i];
     if (differing == 0) return;
@@ -551,19 +562,26 @@ void stn_array_sort_i64(StnArray** pa) {
     if (!scratch) stn_trap("out of memory", "<runtime>", 0, 0, "could not allocate sort buffer");
     int64_t* src = elements;
     int64_t* dst = scratch;
-    for (unsigned shift = 0; differing; shift += 8, differing >>= 8) {
-        if ((differing & 255) == 0) continue;
-        size_t offsets[256] = {0};
-        unsigned sign = shift == 56 ? 128 : 0;
-        for (size_t i = 0; i < n; i++) offsets[(((uint64_t)src[i] >> shift) & 255) ^ sign]++;
+    const unsigned low = (unsigned)__builtin_ctzll(differing);
+    const unsigned span = 64 - (unsigned)__builtin_clzll(differing) - low;
+    const unsigned widest = n >= 16384 ? 11 : 8;
+    const unsigned passes = (span + widest - 1) / widest;
+    const unsigned width = (span + passes - 1) / passes;
+    const uint64_t mask = ((uint64_t)1 << width) - 1;
+    for (unsigned shift = low; shift < low + span; shift += width) {
+        if (((differing >> shift) & mask) == 0) continue;
+        size_t offsets[2048];
+        memset(offsets, 0, ((size_t)mask + 1) * sizeof offsets[0]);
+        const uint64_t sign = shift + width > 63 ? (uint64_t)1 << (63 - shift) : 0;
+        for (size_t i = 0; i < n; i++) offsets[(((uint64_t)src[i] >> shift) & mask) ^ sign]++;
         size_t total = 0;
-        for (unsigned bucket = 0; bucket < 256; bucket++) {
+        for (size_t bucket = 0; bucket <= mask; bucket++) {
             size_t count = offsets[bucket];
             offsets[bucket] = total;
             total += count;
         }
         for (size_t i = 0; i < n; i++)
-            dst[offsets[(((uint64_t)src[i] >> shift) & 255) ^ sign]++] = src[i];
+            dst[offsets[(((uint64_t)src[i] >> shift) & mask) ^ sign]++] = src[i];
         int64_t* tmp = src;
         src = dst;
         dst = tmp;
@@ -745,6 +763,25 @@ StnArray* stn_str_chars(StnStr s, const StnElemOps* ops) {
     while (i < s->len) {
         uint32_t c = p[i];
         int len = 1;
+#if defined(__SSE2__)
+        /* a run of ASCII widens sixteen bytes at a time; the block is all inside the string, and
+           the array has room for one Char per byte */
+        if (c < 0x80 && i + 16 <= s->len) {
+            const __m128i block = _mm_loadu_si128((const __m128i_u*)(p + i));
+            if (_mm_movemask_epi8(block) == 0) {
+                const __m128i zero = _mm_setzero_si128();
+                const __m128i lo = _mm_unpacklo_epi8(block, zero), hi = _mm_unpackhi_epi8(block, zero);
+                uint32_t* out = (uint32_t*)a->data + a->len;
+                _mm_storeu_si128((__m128i_u*)(out), _mm_unpacklo_epi16(lo, zero));
+                _mm_storeu_si128((__m128i_u*)(out + 4), _mm_unpackhi_epi16(lo, zero));
+                _mm_storeu_si128((__m128i_u*)(out + 8), _mm_unpacklo_epi16(hi, zero));
+                _mm_storeu_si128((__m128i_u*)(out + 12), _mm_unpackhi_epi16(hi, zero));
+                a->len += 16;
+                i += 16;
+                continue;
+            }
+        }
+#endif
         /* strings are valid UTF-8; the bound keeps a decode inside the buffer regardless */
         if ((c >= 0xF0 && i + 4 > s->len) || (c >= 0xE0 && i + 3 > s->len) || (c >= 0xC0 && i + 2 > s->len)) c = 0xFFFD, len = 0;
         if (len == 0) len = 1;
@@ -867,6 +904,21 @@ int stn_parse_int(StnStr s, int64_t* out) {
     if (i == n) return 1;
     int64_t acc = 0;
     if (n - i <= 18) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+        /* eight digits at a time: one test says all eight bytes are digits, three multiplies
+           combine them; at most eighteen digits in all, so nothing here can overflow */
+        for (; n - i >= 8; i += 8) {
+            uint64_t v;
+            memcpy(&v, s->data + i, 8);
+            if (((v & UINT64_C(0xF0F0F0F0F0F0F0F0)) |
+                 (((v + UINT64_C(0x0606060606060606)) & UINT64_C(0xF0F0F0F0F0F0F0F0)) >> 4)) !=
+                UINT64_C(0x3333333333333333)) return 1;
+            v = ((v & UINT64_C(0x0F0F0F0F0F0F0F0F)) * 2561) >> 8;
+            v = ((v & UINT64_C(0x00FF00FF00FF00FF)) * 6553601) >> 16;
+            v = ((v & UINT64_C(0x0000FFFF0000FFFF)) * UINT64_C(42949672960001)) >> 32;
+            acc = acc * 100000000 - (int64_t)v;
+        }
+#endif
         for (; n - i >= 4; i += 4) {
             unsigned a = (unsigned char)s->data[i] - (unsigned)'0';
             unsigned b = (unsigned char)s->data[i+1] - (unsigned)'0';
@@ -904,17 +956,24 @@ static int stn_parse_short_float(const char* data, int64_t n, double* out) {
     if (n > 15) return 0;
     int64_t i = data[0] == '-' || data[0] == '+' ? 1 : 0;
     uint64_t mantissa = 0, divisor = 1;
-    int digits = 0, has_point = 0;
+    int64_t first = i, digits;
+    /* the digits before the point, then the digits after it: two plain loops */
     for (; i < n; i++) {
-        unsigned c = (unsigned char)data[i];
-        if (c == '.' && !has_point) {
-            has_point = 1;
-            continue;
+        unsigned d = (unsigned char)data[i] - (unsigned)'0';
+        if (d > 9) break;
+        mantissa = mantissa * 10 + d;
+    }
+    digits = i - first;
+    if (i < n) {
+        if (data[i] != '.') return 0;
+        first = ++i;
+        for (; i < n; i++) {
+            unsigned d = (unsigned char)data[i] - (unsigned)'0';
+            if (d > 9) return 0;
+            mantissa = mantissa * 10 + d;
+            divisor *= 10;
         }
-        if (c - '0' > 9) return 0;
-        mantissa = mantissa * 10 + (c - '0');
-        if (has_point) divisor *= 10;
-        digits++;
+        digits += i - first;
     }
     if (!digits) return 0;
     double signed_mantissa = data[0] == '-' ? -(double)mantissa : (double)mantissa;
