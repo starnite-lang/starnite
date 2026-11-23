@@ -1105,6 +1105,12 @@ and check_or_infer c (e : Syntax.expr) (expected : ty option) : texpr =
       if es = [] then c.unsolved <- (elt, l, "the element type of this empty literal is never settled; add an annotation") :: c.unsolved;
       let tes = List.map (fun e -> check c e elt) es in
       mk (XArray tes) (TArray elt) l
+  | ArrayRepeat (x, n) ->
+      (* [x; n] is filled(n, x): the count is evaluated first, then the element, once *)
+      let elt = match exp with Some (TArray t) -> t | _ -> fresh () in
+      let tn = check c n (TInt IInt) in
+      let tx = check c x elt in
+      mk (XCall (CBuiltin ("filled@Int", [ elt ]), [ { amode = MBorrow; a = tn }; { amode = MBorrow; a = tx } ], [])) (TArray elt) l
   | Comp (body, comps) ->
       push_frame c ();
       let tcs = List.map (fun cp -> check_comp c cp) comps in

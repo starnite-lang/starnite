@@ -1,0 +1,9 @@
+[0, 0, 7, 0, 0, 9] 6
+count
+element
+[false, false] [ab, ab, ab]
+[[1, 2], [1, 2]] [[1, 2, 3], [1, 2]]
+2 0 [1.5, 1.5] [2, 2, 2]
+trap: index out of range at tests/run/array_repeat.stn:30:15
+negative length
+exit 2

@@ -107,6 +107,16 @@ fault_split() { split_fault split; }
 # the same, where the two differ in what a program prints (not in a trap's place, which is left out): the
 # difference is on the standard output, byte for byte
 fault_split_stdout() { split_fault split-stdout; }
+# two programs run alike: the same exit status and the same output. A shrunk program may end in a
+# trap, whose line names the file and the place in it, which differ between the two; that part of
+# the line is left out.
+same_run() {
+    "$starnite" run --interp "$1" > "$tmp/s.raw" 2>&1; s1=$?
+    "$starnite" run --interp "$2" > "$tmp/o.raw" 2>&1; s2=$?
+    sed 's/^\(trap: .*\) at .*$/\1/' "$tmp/s.raw" > "$tmp/s.out"
+    sed 's/^\(trap: .*\) at .*$/\1/' "$tmp/o.raw" > "$tmp/o.out"
+    [ $s1 = $s2 ] && [ $s1 != 1 ] && cmp -s "$tmp/s.out" "$tmp/o.out"
+}
 split_fault() {
     fault=$1
     seed=
@@ -121,7 +131,7 @@ split_fault() {
         bad "fault $fault: the fuzzer did not report a difference (seed $seed)"; printf '%s\n' "$out" | tail -10
     elif [ ! -f "$m" ] || [ "$(head -1 "$m")" != '# module' ]; then bad "fault $fault: the shrunk program is not split (seed $seed)"
     elif [ "$(lines "$m")" -gt 40 ]; then bad "fault $fault: the shrunk program has $(lines "$m") lines"
-    elif ! "$starnite" run --interp "$d/case$seed.min.split/main.stn" > "$tmp/s.out" 2>&1 || ! "$starnite" run --interp "$m" > "$tmp/o.out" 2>&1 || ! cmp -s "$tmp/s.out" "$tmp/o.out"; then
+    elif ! same_run "$d/case$seed.min.split/main.stn" "$m"; then
         bad "fault $fault: the real compiler does not run the shrunk program alike in two files and in one"
     else ok "fault $fault: $(lines "$d/case$seed.stn") lines shrunk to $(lines "$m")"; fi
 }

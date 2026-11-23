@@ -47,6 +47,7 @@ and expr_d =
   | Bracket of expr * barg list
   | Tuple of expr list
   | ArrayLit of expr list
+  | ArrayRepeat of expr * expr                   (* [x; n]: n copies of x *)
   | Comp of expr * comp list
   | BraceLit of expr list                        (* set literal (milestone 2) *)
   | MapLit of (expr * expr) list                 (* map literal (milestone 2) *)

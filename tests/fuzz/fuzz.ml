@@ -389,7 +389,8 @@ let rec expr g t d =
             | vs -> sprintf "%s.note()" (choice_l g vs))
         | _ -> sprintf {|join(["x", %s], "-")|} (e "Str"))
     | "Array[Int]" -> (
-        match int g 4 with
+        match int g 5 with
+        | 4 -> sprintf "[%s; %d]" (e "Int") (int g 4)
         | 0 -> "[" ^ String.concat ", " (List.init (range g 1 4) (fun _ -> e "Int")) ^ "]"
         | 1 -> sprintf "[x +%% %s for x in %s]" (small g) (e "Array[Int]")
         | 2 -> sprintf "[i *%% i for i in 0..%d]" (int g 6)
