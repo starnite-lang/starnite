@@ -19,6 +19,8 @@ while [ $# -gt 0 ]; do
         *) echo "measure.sh: unknown argument $1" >&2; exit 2 ;;
     esac
 done
+# the output is a file: a directory there would take the samples as a file inside it
+if [ -d "$output" ]; then echo "measure.sh: --output $output is a directory; give a file path" >&2; exit 2; fi
 variants="previous-starnite starnite c-reference c-tuned rust-reference"
 if [ $all = 1 ]; then cases=$(cat "$here/cases.txt"); else cases="str_prefix_suffix_eq array_contains array_clear_refill"; fi
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -70,4 +72,4 @@ for cpu in $(printf '%s' "$cpus" | tr ',' ' '); do
     printf '\n  }' >> "$output"
 done
 printf '\n}\n' >> "$output"
-mv "$output" "$final"
+mv -T -- "$output" "$final"
