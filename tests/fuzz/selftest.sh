@@ -122,7 +122,7 @@ same_run() {
     case $s1 in
         0) ;;
         2) grep -q '^trap: ' "$tmp/s.raw" && grep -q '^trap: ' "$tmp/o.raw" || return 1
-           if grep -q 'Fatal error: exception' "$tmp/s.raw" "$tmp/o.raw"; then return 1; fi ;;
+           if grep -q '^Fatal error: exception' "$tmp/s.raw" "$tmp/o.raw"; then return 1; fi ;;
         *) return 1 ;;
     esac
     cmp -s "$tmp/s.out" "$tmp/o.out" && cmp -s "$tmp/s.err" "$tmp/o.err"
