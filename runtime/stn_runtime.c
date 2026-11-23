@@ -12,9 +12,6 @@
 #include <sys/resource.h>
 #define STN_STACK_TRAP 1
 #endif
-#if defined(__linux__)
-#include <sys/mman.h>
-#endif
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <errno.h>
@@ -32,21 +29,6 @@ int64_t stn_live_objects = 0;
 typedef struct stn_free_node { struct stn_free_node* next; } stn_free_node;
 static stn_free_node* stn_free_lists[STN_CLASSES + 1];
 
-/* A buffer of a few megabytes is scanned across thousands of pages; asking for huge pages for the
-   2 MiB spans inside it takes most of the translation misses away. Advice only: a refusal changes
-   nothing, and it is not given to the debug build, whose blocks go through poison and quarantine. */
-#if defined(__linux__) && defined(MADV_HUGEPAGE) && !defined(STN_DEBUG)
-static void stn_advise_huge(void* p, size_t bytes) {
-    const uintptr_t span = (uintptr_t)2 << 20;
-    if (bytes < span) return;
-    uintptr_t lo = ((uintptr_t)p + span - 1) & ~(span - 1);
-    uintptr_t hi = ((uintptr_t)p + bytes) & ~(span - 1);
-    if (hi > lo) (void)madvise((void*)lo, hi - lo, MADV_HUGEPAGE);
-}
-#else
-static void stn_advise_huge(void* p, size_t bytes) { (void)p; (void)bytes; }
-#endif
-
 void* stn_alloc(size_t size) {
     stn_header* h;
     /* compare before rounding up, so a huge size cannot wrap into a small class */
@@ -63,7 +45,6 @@ void* stn_alloc(size_t size) {
     } else {
         h = (stn_header*)malloc(size);
         if (!h) { fputs("trap: out of memory\n", stderr); exit(2); }
-        stn_advise_huge(h, size);
         h->size_class = 0;
     }
     h->rc = 1; h->tag = 0; h->flags = 0;
@@ -309,13 +290,9 @@ void stn_array_reserve(StnArray** pa, int64_t extra) {
         /* a large buffer already belongs to the system allocator, whose realloc can
            move pages instead of copying them; the debug build keeps copying so that
            every freed block goes through the poison and quarantine of stn_free */
-        /* a buffer that is not yet huge-page sized is copied once into one that is, so that the whole of it
-           gets the advice before its pages are touched; mremap would carry small pages along */
-        if (a->h.size_class == 0 && bytes > (size_t)STN_CLASSES * 16 &&
-            (bytes < ((size_t)2 << 20) || sizeof(StnArray) + (size_t)a->cap * a->ops->size >= ((size_t)2 << 20))) {
+        if (a->h.size_class == 0 && bytes > (size_t)STN_CLASSES * 16) {
             StnArray* b = (StnArray*)realloc(a, bytes);
             if (!b) { fputs("trap: out of memory\n", stderr); exit(2); }
-            stn_advise_huge(b, bytes);
             b->cap = cap;
             *pa = b;
             return;
