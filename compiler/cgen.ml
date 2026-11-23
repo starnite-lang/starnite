@@ -1790,8 +1790,8 @@ and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) ?pop_array ?i
            let count = fresh st "_count" and done_ = fresh st "_appended" in
            let unique = if List.mem v.vid fc.unique_arrays then "" else Printf.sprintf "stn_unique(%s) && " array in
            line fc "uint8_t %s = 0;" done_;
-           line fc "if (%s < %s && %s(uint64_t)%s - (uint64_t)%s <= (uint64_t)(%s->cap - %s->len)) {"
-             lo hi unique hi lo array array;
+           line fc "if (%s < %s && %s(uint64_t)%s - (uint64_t)%s <= (uint64_t)STN_MAX_ALLOC) {"
+             lo hi unique hi lo;
            fc.ind <- fc.ind + 1;
            let offset = tmp fc it (expr fc base).c in
            let limit = fresh st "_limit" and first = fresh st "_first" in
@@ -1800,6 +1800,7 @@ and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) ?pop_array ?i
              offset lo first offset hi limit;
            fc.ind <- fc.ind + 1;
            line fc "int64_t %s = (int64_t)((uint64_t)%s - (uint64_t)%s);" count hi lo;
+           line fc "if ((uint64_t)%s - (uint64_t)%s > (uint64_t)(%s->cap - %s->len)) stn_array_reserve(&%s, (int64_t)((uint64_t)%s - (uint64_t)%s));" hi lo array array array hi lo;
            let data = fresh st "_data" in
            line fc "int64_t* %s = ((int64_t*)%s->data) + %s->len;" data array array;
            line fc "for (int64_t %s = 0; %s < %s; %s++) %s[%s] = %s + %s;"
@@ -2129,10 +2130,15 @@ and affine_array_append fc item body =
     | XBin ((Add | Sub | Mul), a, b) -> invariant a && invariant b
     | _ -> false
   in
-  match action.e with
-  | XCall (CBuiltin ("push@Array", _),
-           [ _; { a = { e = XBin (Add, base, { e = XVar index; _ }); _ }; _ } ], _)
-    when index.vid = item.vid && invariant base ->
+  let affine = match action.e with
+    | XCall (CBuiltin ("push@Array", _), [ _; { a = { e = XBin (Add, base, { e = XVar index; _ }); _ }; _ } ], _)
+      when index.vid = item.vid && invariant base -> Some base
+    | XCall (CBuiltin ("push@Array", _), [ _; { a = { e = XBin (Add, { e = XVar index; _ }, base); _ }; _ } ], _)
+      when index.vid = item.vid && invariant base -> Some base
+    | _ -> None
+  in
+  match affine with
+  | Some base ->
       (match single_array_call fc "push@Array" body with
        | Some v when (match repr (ts fc v.vty) with TArray (TInt (IInt | I64)) -> true | _ -> false) ->
            Some (v, base)
