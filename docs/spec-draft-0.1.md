@@ -247,6 +247,10 @@ Lists, dictionaries and sets are variable-length built-ins with value semantics 
 
 `{}` alone is accepted only where the expected type says which of the two it is.
 
+`[x; n]` is an array of `n` copies of `x`, built in one allocation: `[0; 500]`, `[false; len(xs)]`. The count is any `Int` expression and is evaluated first, then `x`, once; a negative count traps. The result is an ordinary `Array[T]`, which can grow like any other. `filled(n, x)` is the same operation as a function.
+
+A fixed-size array type, `Array[T, N]`, is planned for milestone 5. `N` is an `Int` known at compile time and part of the type. Such an array cannot grow: `push`, `pop`, `insert` and `remove` do not exist for it. It is stored inline, in the frame or in the struct that holds it, with no box of its own; an index that is a constant in range needs no check; and `[x; N]` builds one where the expected type is `Array[T, N]`. Until then `[x; n]` always builds a growable array.
+
 Growth and core operations:
 
 - `Array`: `push`, `pop`, `insert`, `remove`, `len`, indexing, slicing `xs[a..b]`. Capacity doubles when full, so `push` is constant time on average.
@@ -2784,7 +2788,7 @@ Eleven milestones, plus the native backend as milestone 12. Milestones 1 to 8 ea
 | 2 | Counting insertion, reuse, destination passing, uniqueness, `inplace`, `noalloc`, copy reporting, collections and comprehensions | 3.6, 6.2, 9 | Formal model with P1 and P2 tested; property, snapshot and doc tests; benchmarks with counters and budgets |
 | 3 | Escape analysis, stack and region placement, allocator passing, `local` | 10 |  |
 | 4 | Resource types, typestate, `with`, built-in and user effects, resuming and aborting handlers, foreign functions | 6.3 to 6.5, 7 (except 7.5's evented backend), 18 | P3 tested; I/O fakes, rejection tests, fuzz targets |
-| 5 | `Pool`, `Ref`, check removal, interval analysis | 12, 17.1, 17.2 |  |
+| 5 | `Pool`, `Ref`, check removal, interval analysis, fixed-size arrays `Array[T, N]` | 3.6, 12, 17.1, 17.2 |  |
 | 6 | `iso`, `frozen`, marking, `par`, tasks, channels, mutexes with levels, suspending handlers and async, the I/O reactor | 7.3, 7.5's evented backend, 14 | Thread-sanitizer runs; schedule tests, thread-scaling benchmarks |
 | 7 | Reachability inference, stages R1 to R4 | 13.3, 15 | P4 tested |
 | 8 | ASAP stage A, then B if A passes its exit test | 16 | Shadow-count verifier |
