@@ -286,6 +286,8 @@ void stn_array_reserve_hint(StnArray** pa, uint64_t extra) {
     if (extra > (uint64_t)STN_MAX_ALLOC || (uint64_t)a->len + extra > (uint64_t)STN_MAX_ALLOC) return;
     int64_t need = a->len + (int64_t)extra;
     if (need <= a->cap || (uint64_t)need > (uint64_t)STN_MAX_ALLOC / size) return;
+    /* the byte count must fit size_t, which is narrower than the element limit on a 32-bit target */
+    if ((uint64_t)need > (SIZE_MAX - sizeof(StnArray)) / size) return;
     size_t bytes = sizeof(StnArray) + (size_t)need * size;
     if (bytes <= (size_t)STN_CLASSES * 16) return;
 #ifndef STN_DEBUG
