@@ -147,9 +147,12 @@ StnStr stn_str_new_heap(const char* data, int64_t len) {
 }
 
 #if defined(__SIZEOF_INT128__)
+/* A 128-bit integer is an extension; __extension__ keeps a strict ISO build (-pedantic-errors)
+   accepting it, as both GCC and Clang allow. */
+__extension__ typedef unsigned __int128 stn_u128;
 /* the bytes of an inline string as one number, without its length */
-static inline unsigned __int128 stn_str_bits(const StnStr* s) {
-    return (unsigned __int128)s->w0 | ((unsigned __int128)(s->w1 & ~(UINT64_C(0xFF) << 56)) << 64);
+static inline stn_u128 stn_str_bits(const StnStr* s) {
+    return (stn_u128)s->w0 | ((stn_u128)(s->w1 & ~(UINT64_C(0xFF) << 56)) << 64);
 }
 #endif
 
@@ -159,7 +162,7 @@ StnStr stn_str_concat(const StnStr* a, const StnStr* b) {
 #if defined(__SIZEOF_INT128__)
     if (an + bn <= STN_STR_INLINE_MAX) {
         /* both parts are inline: shift and combine their words */
-        unsigned __int128 v = stn_str_bits(a) | (stn_str_bits(b) << (8 * an));
+        stn_u128 v = stn_str_bits(a) | (stn_str_bits(b) << (8 * an));
         s.w0 = (uint64_t)v;
         s.w1 = (uint64_t)(v >> 64) | ((uint64_t)(an + bn) << 56);
         return s;
@@ -177,7 +180,7 @@ StnStr stn_str_concat_n(int n, StnStr* parts) {
     StnStr s;
 #if defined(__SIZEOF_INT128__)
     if (total <= STN_STR_INLINE_MAX) {
-        unsigned __int128 v = 0;
+        stn_u128 v = 0;
         int64_t at = 0;
         for (int i = 0; i < n; i++) {
             int64_t k = stn_str_len(parts[i]);

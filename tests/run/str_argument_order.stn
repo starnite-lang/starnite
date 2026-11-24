@@ -1,0 +1,28 @@
+# Arguments and operands are evaluated left to right (section 4.4): a string read first keeps the
+# value it had, even when a later argument assigns the variable or element it came from.
+fn replace(mut s: Str, to: Str, give: Str) -> Str:
+    s = to
+    give
+
+fn replace_at(mut xs: Array[Str], i: Int, to: Str, give: Str) -> Str:
+    xs[i] = to
+    give
+
+fn main():
+    var s = "old hello"
+    print(f"{starts_with(s, replace(mut s, "changed", "old"))} {s}")
+    s = "a fairly long string that lives in a buffer"
+    print(f"{ends_with(s, replace(mut s, "short", "buffer"))} {s}")
+    s = "needle in a hay"
+    print(f"{contains(s, replace(mut s, "gone", "hay"))} {s}")
+    s = "a,b,c"
+    print(f"{split(s, replace(mut s, "x", ","))} {s}")
+    s = "left"
+    print(f"{s + replace(mut s, "LEFT", "+right")} {s}")
+    s = "same"
+    print(f"{s == replace(mut s, "other", "same")} {s < replace(mut s, "zzz", "samf")} {s}")
+    s = "first part of the string"
+    print(f"{s}|{replace(mut s, "second", "middle")}|{s}")
+    var xs = ["old element value", "y"]
+    print(f"{starts_with(xs[0], replace_at(mut xs, 0, "new", "old"))} {xs}")
+    print(f"{xs[1] + replace_at(mut xs, 1, "Y", "z")} {xs}")

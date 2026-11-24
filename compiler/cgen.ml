@@ -554,6 +554,33 @@ let borrow fc (x : r) t =
     n
   end else x.c
 
+(* An expression that cannot assign anything: it makes no calls and runs no statements. *)
+let rec writes_nothing (e : texpr) =
+  match e.e with
+  | XLit _ | XVar _ | XFnRef _ | XNone | XLambda _ -> true
+  | XField (x, _, _) | XTupleGet (x, _) | XNeg x | XNot x | XConv x -> writes_nothing x
+  | XIndex (a, i) -> writes_nothing a && writes_nothing i
+  | XSlice (a, lo, hi) -> writes_nothing a && writes_nothing lo && writes_nothing hi
+  | XBin (_, a, b) -> writes_nothing a && writes_nothing b
+  | XTuple xs | XArray xs | XStruct (_, _, xs) | XVariant (_, _, _, xs) | XFStr xs -> List.for_all writes_nothing xs
+  | _ -> false
+
+(* [first] is a borrowed Str that is read only after the code of [later], which began at [mark].
+   That code may assign the variable or element [first] names, and a Str is read by address, so
+   unless [later] cannot assign anything, [first] is saved ahead of it with a count of its own:
+   operands and arguments are evaluated left to right (section 4.4). *)
+let hold_str fc mark (first : string) (later : texpr) =
+  let n = String.length first in
+  if Buffer.length fc.b = mark || writes_nothing later || (n > 6 && String.sub first 0 6 = "strlit") then first
+  else begin
+    let right = Buffer.sub fc.b mark (Buffer.length fc.b - mark) in
+    Buffer.truncate fc.b mark;
+    let held = tmp fc TStr (dup_expr fc.st TStr first) in
+    own_in fc held TStr;
+    Buffer.add_string fc.b right;
+    held
+  end
+
 (* drop everything up to (not including) the first frame satisfying [stop] *)
 let drop_until fc stop =
   let rec go = function
@@ -729,7 +756,16 @@ let rec expr fc (e : texpr) : r =
   | XLit l -> lit fc t l
   | XNone -> { c = "0"; owned = false }
   | XFStr ps ->
-      let parts = List.map (fun p -> borrow fc (expr fc p) TStr) ps in
+      (* each part is held against the code of the parts after it *)
+      let rec parts_of = function
+        | [] -> []
+        | p :: rest ->
+            let c = borrow fc (expr fc p) TStr in
+            let mark = Buffer.length fc.b in
+            let later = parts_of rest in
+            let c = if rest = [] then c else hold_str fc mark c { p with e = XFStr rest } in
+            c :: later in
+      let parts = parts_of ps in
       (match parts with
        | [ p ] -> { c = p; owned = false }
        | _ -> { c = tmp fc TStr (Printf.sprintf "stn_str_concat_n(%d, (StnStr[]){ %s })" (List.length parts) (String.concat ", " parts)); owned = true })
@@ -1478,7 +1514,8 @@ and binop fc (e : texpr) op (a : texpr) (b : texpr) : r =
   let mark = Buffer.length fc.b in
   let bb = borrow fc (expr fc b) b.ty in
   let ab =
-    if rc fc a.ty || (Buffer.length fc.b = mark && simple_operand ab) then ab
+    if repr at = TStr then hold_str fc mark ab b
+    else if rc fc a.ty || (Buffer.length fc.b = mark && simple_operand ab) then ab
     else begin
       let right = Buffer.sub fc.b mark (Buffer.length fc.b - mark) in
       Buffer.truncate fc.b mark;
@@ -2635,6 +2672,12 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
   let la = loc_args e.l in
   let arg i = List.nth targs i in
   let b i = borrow fc (expr fc (arg i).a) (arg i).a.ty in
+  (* the first two arguments as Str, the first held against the code of the second *)
+  let b2 () =
+    let x = b 0 in
+    let mark = Buffer.length fc.b in
+    let y = b 1 in
+    (hold_str fc mark x (arg 1).a, y) in
   let o i = tmp fc (arg i).a.ty (own fc (expr fc (arg i).a) (arg i).a.ty) in
   let m i = place_lvalue_of_expr fc (arg i).a in
   (* a receiver whose address is taken after the other arguments have run, as for any mut place *)
@@ -2967,7 +3010,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       let i = tmp fc (TInt IInt) (b 1) in
       value (Printf.sprintf "stn_str_byte_at_or_end(%s, %s)" (sref fc s) i)
   | "chars@Str" -> owned (Printf.sprintf "stn_str_chars(%s, %s)" (sref fc (b 0)) (elem_ops st TChar))
-  | "split@Str" -> let s = sref fc (b 0) in let sep = sref fc (b 1) in owned (Printf.sprintf "stn_str_split(%s, %s, %s, %s)" s sep (elem_ops st TStr) la)
+  | "split@Str" -> let s, sep = b2 () in let s = sref fc s and sep = sref fc sep in owned (Printf.sprintf "stn_str_split(%s, %s, %s, %s)" s sep (elem_ops st TStr) la)
   | "join@Array" -> (
       match (arg 0).a.e with
       | XArray parts ->
@@ -2987,7 +3030,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
           let sep = b 1 in
           owned (Printf.sprintf "stn_str_join(%s, %s)" xs sep))
   | "trim@Str" -> owned (Printf.sprintf "stn_str_trim(%s)" (sref fc (b 0)))
-  | "contains@Str" -> let s = sref fc (b 0) in let x = sref fc (b 1) in value (Printf.sprintf "stn_str_contains(%s, %s)" s x)
+  | "contains@Str" -> let s, x = b2 () in let s = sref fc s and x = sref fc x in value (Printf.sprintf "stn_str_contains(%s, %s)" s x)
   | ("starts_with@Str" | "ends_with@Str") ->
       let prefix = name = "starts_with@Str" in
       (match (arg 1).a.e with
@@ -3027,8 +3070,8 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
            end else
            value (Printf.sprintf "(stn_str_len(*%s) >= %d && %s)" s n same)
        | _ ->
-           let s = sref fc (b 0) in
-           let p = sref fc (b 1) in
+           let s, p = b2 () in
+           let s = sref fc s and p = sref fc p in
            value (Printf.sprintf "stn_str_%s(%s, %s)" (if prefix then "starts_with" else "ends_with") s p))
   | "repeat@Str" -> let s = sref fc (b 0) in let n = tmp fc (TInt IInt) (expr fc (arg 1).a).c in owned (Printf.sprintf "stn_str_repeat(%s, %s, %s)" s n la)
   | "parse_int@Str" | "parse_float@Str" ->
