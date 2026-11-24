@@ -855,6 +855,8 @@ let ensure_const : (tables -> string -> unit) ref = ref (fun _ _ -> ())
 (* Some m when [te] calls a lend function (lend mut when m) *)
 let lend_of tb (te : texpr) : bool option =
   match te.e with
+  (* m[k] inside a longer place, as in m[k].x = v: the entry is lent out of the Map (section 3.6) *)
+  | XCall (CBuiltin ("entry@Map", _), _, _) -> Some true
   | XCall (CFn (u, _), _, _) -> (match Hashtbl.find_opt tb.fns u with Some sg -> sg.slend | None -> None)
   | XCall (CTrait (tr, _, m, _, _), _, _) -> (
       match Hashtbl.find_opt tb.traits tr with
@@ -1218,7 +1220,7 @@ and check_iter c (it : Syntax.expr) mode : titer * ty =
   | _ ->
       let te = infer c it in
       (match repr te.ty with
-       | TArray t -> (IArray (te, mode), t)
+       | TArray t -> (IArray ((if mode = MMut then as_mut_place te else te), mode), t)
        (* a Map is visited as its (key, value) pairs and a Set as its keys, both in insertion order
           (section 3.6): the loop runs over what the collection held when it started *)
        | TNamed ("Map", [ k; v ]) ->
@@ -1347,6 +1349,17 @@ and match_args c l (params : (mode * string * ty * Syntax.expr option) list) (ar
     named;
   res
 
+(* A mut argument that reads an entry of a Map, as in m[k].push(x) or f(mut m[k].xs), passes the
+   entry itself, lent out of the Map, so that what the call does to it stays in the Map. *)
+and as_mut_place (te : texpr) : texpr =
+  match te.e with
+  | XCall (CBuiltin ("index@Map", tys), [ m; k ], cv) ->
+      { te with e = XCall (CBuiltin ("entry@Map", tys), [ { amode = MMut; a = as_mut_place m.a }; k ], cv) }
+  | XField (b, i, f) -> { te with e = XField (as_mut_place b, i, f) }
+  | XTupleGet (b, i) -> { te with e = XTupleGet (as_mut_place b, i) }
+  | XIndex (b, i) -> { te with e = XIndex (as_mut_place b, i) }
+  | _ -> te
+
 and mutable_place c (e : Syntax.expr) : bool =
   let rec root (e : Syntax.expr) =
     match e.d with
@@ -1384,7 +1397,7 @@ and args_check c l (st : args_state) (slots : int list) : targ list =
         match st.a_params with
         | (m, _, t, _) :: _ ->
             (* a mut argument is the place itself: boxing it would write to a copy *)
-            let r = if m = MMut then (unify_at r.l t r.ty; r) else coerce c r t in
+            let r = if m = MMut then (unify_at r.l t r.ty; as_mut_place r) else coerce c r t in
             { amode = m; a = r }
         | [] -> err "E0203" l "this function takes no arguments")
     | _ -> (
@@ -1409,7 +1422,7 @@ and args_check c l (st : args_state) (slots : int list) : targ list =
              | Some MTake, XVar v -> c.moved <- (v.vid, a.aloc) :: c.moved
              | Some MTake, _ -> err "E0302" a.aloc "'take' moves a variable; write it before a variable name"
              | _ -> ());
-            { amode = m; a = te }
+            { amode = m; a = (if m = MMut then as_mut_place te else te) }
         | None -> (
             match d with
             | Some d ->
@@ -2239,12 +2252,11 @@ and infer_binop c l op a b exp : texpr =
 
 (* ---------- places and assignment ---------- *)
 
-and place_of c (e : Syntax.expr) : place =
-  try place_of_raw c e
-  with Map_place (_, _, at) ->
-    err "E0103" at.loc "an entry of a Map is not a place of its own: assign the whole entry, as in m[k] = value"
+and place_of c (e : Syntax.expr) : place = place_of_raw c e
 
-and place_of_raw c (e : Syntax.expr) : place =
+(* With ~map_top, a place that is m[k] itself is left to the caller (it puts the entry); inside a
+   longer place, m[k] is the entry of the key, lent out of the Map, which traps if it is missing. *)
+and place_of_raw ?(map_top = false) c (top : Syntax.expr) : place =
   let rec go (e : Syntax.expr) : place =
     match e.d with
     | Name n -> (
@@ -2285,7 +2297,15 @@ and place_of_raw c (e : Syntax.expr) : place =
         let p = go b in
         match repr p.pty with
         | TArray t -> { p with path = p.path @ [ PIndex (check c i (TInt IInt)) ]; pty = t }
-        | TNamed ("Map", _) -> raise (Map_place (p, i, e))
+        | TNamed ("Map", [ k; v ]) ->
+            if map_top && e == top then raise (Map_place (p, i, e));
+            need_key c e.loc k;
+            let map_place = fix_place_types c (place_expr p e.loc) in
+            let tk = check c i k in
+            let call =
+              mk (XCall (CBuiltin ("entry@Map", [ k; v ]), [ { amode = MMut; a = map_place }; { amode = MBorrow; a = tk } ], [])) v e.loc
+            in
+            { root = p.root; via = Some call; path = []; pty = v }
         | TNamed ("Set", _) -> err "E0201" e.loc "a Set has no elements to assign; use s.add(x)"
         | _ ->
             (* the base place is lent to IndexMut.at_mut, which lends the element back *)
@@ -2293,7 +2313,7 @@ and place_of_raw c (e : Syntax.expr) : place =
             { root = p.root; via = Some call; path = []; pty = call.ty })
     | _ -> err "E0103" e.loc "the left side of an assignment must be a variable, field or element"
   in
-  go e
+  go top
 
 and place_expr (p : place) l : texpr =
   List.fold_left
@@ -2321,10 +2341,8 @@ and fix_place_types c (te : texpr) : texpr =
 
 and check_assign c l (lhs : Syntax.expr) op (rhs : Syntax.expr) : tstmt =
   if not (is_place lhs) then err "E0103" lhs.loc "the left side of an assignment must be a variable, field or element";
-  match place_of_raw c lhs with
-  | exception Map_place (mp, key, at) when at == lhs -> map_assign c l mp key op rhs
-  | exception Map_place (_, _, at) ->
-      err "E0103" at.loc "an entry of a Map is not a place of its own: assign the whole entry, as in m[k] = value"
+  match place_of_raw ~map_top:true c lhs with
+  | exception Map_place (mp, key, _) -> map_assign c l mp key op rhs
   | p ->
   if op = "=" then begin
     let rhs = check c rhs p.pty in

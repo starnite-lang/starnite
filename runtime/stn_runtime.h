@@ -339,6 +339,8 @@ typedef struct StnMap {
 } StnMap;
 
 void     stn_map_release(void* p);
+/* a write to an entry in place needs the table unshared (section 4.5) */
+void     stn_map_make_unique_for_write(StnMap** pm);
 StnMap*  stn_map_new(const StnMapOps* ops);
 StnMap*  stn_map_with_capacity(const StnMapOps* ops, int64_t n);
 /* the value of the key (for a set, any address that is not NULL), or NULL */

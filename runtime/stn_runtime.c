@@ -1040,6 +1040,7 @@ static void stn_map_copy_for_write(StnMap** pm) {
 static inline void stn_map_make_unique(StnMap** pm) {
     if (__builtin_expect(!stn_unique(*pm), 0)) stn_map_copy_for_write(pm);
 }
+void stn_map_make_unique_for_write(StnMap** pm) { stn_map_make_unique(pm); }
 
 /* The entry of the key, or NULL. When it is there and slot is given, *slot is the slot of the
    index that names it. */

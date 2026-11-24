@@ -612,6 +612,7 @@ let unsigned_of = function
 (* Some m when [e] calls a lend function (section 4.6) *)
 let lend_sig fc (e : texpr) : bool option =
   match e.e with
+  | XCall (CBuiltin ("entry@Map", _), _, _) -> Some true
   | XCall (CFn (u, _), _, _) -> (Hashtbl.find fc.st.prog.fns u).fsig.slend
   | XCall (CTrait (tr, ta, m, self, _), _, _) -> (
       match Typecheck.impl_method_in (Typecheck.rtab_of_prog fc.st.prog) tr (List.map (ts fc) ta) m (ts fc self) with
@@ -858,12 +859,18 @@ let rec expr fc (e : texpr) : r =
       (* the result grows by doubling; sizing it up front from the source would evaluate
          the source twice *)
       line fc "StnArray* %s = stn_array_new(%s, 4);" a (elem_ops st elt);
+      comp_loops fc comps (fun () ->
+          let v = own fc (expr fc body) body.ty in
+          let n = tmp fc elt v in
+          line fc "STN_PUSH(&%s, %s, %s);" a (cty st elt) n);
+      { c = a; owned = true }
+
+(* the loops of a comprehension, with [sink] run for each element, in a statement frame of its own *)
+and comp_loops fc (comps : tcomp list) (sink : unit -> unit) =
       let rec go = function
         | [] ->
             push fc FStmt;
-            let v = own fc (expr fc body) body.ty in
-            let n = tmp fc elt v in
-            line fc "STN_PUSH(&%s, %s, %s);" a (cty st elt) n;
+            sink ();
             pop fc
         | cp :: rest ->
             loop_over fc cp.csrc cp.cvar (fun () ->
@@ -880,8 +887,7 @@ let rec expr fc (e : texpr) : r =
                     line fc "}"
                 | None -> go rest)
       in
-      go comps;
-      { c = a; owned = true }
+      go comps
 
 and lit fc t (l : lit) : r =
   match l with
@@ -2687,6 +2693,24 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
         end else line fc "stn_map_put(&%s, &%s, NULL);" m k
       done;
       { c = dup_expr st mt m; owned = true }
+  | ("from_pairs@Map" | "from_items@Set")
+    when (match (arg 0).a.e with XComp (body, _) -> (name = "from_items@Set" || (match body.e with XTuple [ _; _ ] -> true | _ -> false)) | _ -> false) ->
+      (* a comprehension into a Map or a Set puts each element as it is made, with no array first *)
+      let is_map = name = "from_pairs@Map" in
+      let mt = TNamed ((if is_map then "Map" else "Set"), tys) in
+      let body, comps = match (arg 0).a.e with XComp (b, cs) -> (b, cs) | _ -> assert false in
+      let m = fresh st "_t" in
+      line fc "StnMap* %s = stn_map_new(%s);" m (map_ops fc mt);
+      comp_loops fc comps (fun () ->
+          match body.e with
+          | XTuple [ ke; ve ] when is_map ->
+              let k = tmp fc ke.ty (own fc (expr fc ke) ke.ty) in
+              let v = tmp fc ve.ty (own fc (expr fc ve) ve.ty) in
+              line fc "stn_map_put(&%s, &%s, &%s);" m k v
+          | _ ->
+              let k = tmp fc body.ty (own fc (expr fc body) body.ty) in
+              line fc "stn_map_put(&%s, &%s, NULL);" m k);
+      { c = m; owned = true }
   | "from_pairs@Map" | "from_items@Set" ->
       (* the array of the comprehension is owned here: its elements move into the table, and it is
          freed without dropping them *)
@@ -2816,6 +2840,18 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
              (if needs_rc st vt then drop_stmt st vt ("*" ^ p) else "") p v lv k v
        | _ -> line fc "stn_map_put(&%s, &%s, &%s);" lv k v);
       unit_ ()
+  | "entry@Map" ->
+      (* the place of the value of a key that is there, in a table made unshared first; a key that
+         is missing traps, as m[k] does *)
+      let kt = ts fc (List.hd tys) and vt = ts fc (List.nth tys 1) in
+      let fin = md 0 in
+      let k = tmp fc kt (b 1) in
+      let lv = fin () in
+      let p = fresh st "_entry" in
+      line fc "stn_map_make_unique_for_write(&%s);" lv;
+      line fc "%s* %s = (%s*)%s;" (ct fc vt) p (ct fc vt) (map_find_call kt lv k);
+      line fc "if (!%s) stn_trap(\"missing key\", %s, \"the Map has no entry for this key\");" p la;
+      value (Printf.sprintf "(*%s)" p)
   | "add@Set" ->
       let fin = md 0 in
       let k = o 1 in

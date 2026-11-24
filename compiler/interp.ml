@@ -381,6 +381,18 @@ and hold_busy env (e : texpr) =
 
 and place_of_expr env (e : texpr) : (unit -> value) * (value -> unit) =
   match e.e with
+  | XCall (CBuiltin ("entry@Map", tys), [ m; key ], _) ->
+      (* the entry of a key that must be there, in a Map that is a place *)
+      let get, set = place_of_expr env m.a in
+      let k = eval env key.a in
+      let kt = List.hd tys in
+      let find () =
+        match get () with
+        | VMap es -> (match map_find env kt es k with Some i -> (es, i) | None -> trap "missing key" e.l "the Map has no entry for this key")
+        | _ -> failwith "entry of a non-map"
+      in
+      ( (fun () -> let es, i = find () in snd es.(i)),
+        fun x -> let es, i = find () in let es = Array.copy es in es.(i) <- (fst es.(i), x); set (VMap es) )
   | XCall (cl, targs, _) when lend_target env cl <> None -> lend_place env (Option.get (lend_target env cl)) targs
   | _ ->
   (match cell_root env e with
@@ -795,6 +807,10 @@ and builtin env name (tys : ty list) (vals : value list) loc : value * value lis
   | "len@Map", [ VMap es ] -> pure (VInt (Int64.of_int (Array.length es)))
   | "len@Set", [ VSet ks ] -> pure (VInt (Int64.of_int (Array.length ks)))
   | "index@Map", [ VMap es; key ] -> (
+      match map_find env (List.hd tys) es key with
+      | Some i -> pure (snd es.(i))
+      | None -> trap "missing key" loc "the Map has no entry for this key")
+  | "entry@Map", [ VMap es; key ] -> (
       match map_find env (List.hd tys) es key with
       | Some i -> pure (snd es.(i))
       | None -> trap "missing key" loc "the Map has no entry for this key")

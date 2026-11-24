@@ -155,4 +155,20 @@ fn main():
     let names_of: Map[Int, Array[Str]] = {n: [w for w in ws if len(w) == n] for n in [3, 4, 5]}
     let nothing: Set[Int] = {x for x in 0..3 if x > 9}
     print(f"{lengths} {firsts} {squares} {swapped} {names_of} {nothing} {len(nothing)}")
+    # an entry is a place inside a longer one: a field, an element, a mut argument, a loop
+    var shelves = {"top": Shelf("t", {"a": 1}, {"x"}), "low": Shelf("l", {}, {})}
+    let snap = shelves
+    shelves["top"].name = "T"
+    shelves["top"].books["b"] = 2
+    shelves["top"].books["a"] += 10
+    shelves["low"].tags.add("y")
+    var lists: Map[Str, Array[Int]] = {"p": [], "q": [5, 6]}
+    lists["p"].push(1)
+    lists["q"][0] = 50
+    for x in mut lists["q"]:
+        x = x + 1
+    var levels = {"o": {"i": 1}}
+    levels["o"]["i"] += 1
+    levels["o"]["j"] = 7
+    print(f"{shelves["top"].name} {shelves["top"].books} {shelves["low"].tags} {snap["top"].name} {snap["top"].books} {lists} {levels}")
     print(f"{m["missing"]}")

@@ -1,6 +1,0 @@
-# expect: E0103 5:5
-type P = struct(x: Int)
-fn main():
-    var m = {"a": P(1)}
-    m["a"].x = 2
-    print("x")
