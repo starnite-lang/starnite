@@ -438,7 +438,10 @@ pids=""
 names=""
 for check in negative_fuzzing fault_accept_take fault_accept_match fault_wrong_code fault_c_output fault_split fault_split_stdout reduce_keeping reduce_next_to_a_module reduce_ordinary_module_comment reduce_keeps_a_sibling_module reduce_rejected_next_to_a_module reduce_keeping_a_match reduce_name_taken reduce_without_compiler fault_crash fault_crash_run fault_silent_crash fault_killed fault_cc_fails fault_no_exe fault_leak fault_leak_kept unsupported_is_not_a_crash fault_cc_says_unsupported fault_exception_unsupported crash_phrase_is_output; do
     n=$((n + 1))
-    "$check" > "$tmp/result.$n" 2>&1 &
+    # each check runs in a directory of its own: they run at the same time, and a file one of them
+    # writes must never be one another reads
+    mkdir "$tmp/check.$n"
+    (tmp="$tmp/check.$n"; "$check") > "$tmp/result.$n" 2>&1 &
     pids="$pids $!"
     names="$names $check"
 done
