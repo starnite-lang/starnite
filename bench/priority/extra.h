@@ -183,14 +183,14 @@ static int extra(const char *name, int64_t seed, uint64_t *elapsed, int64_t *res
         for(int i=0;i<count;i++) {
             Text s=values[i%128], next=values[(i+1)%128];
 #ifdef SHARED
-            StnStr text=strings[i%128], next_text=strings[(i+1)%128], out=NULL;
+            StnStr text=strings[i%128], next_text=strings[(i+1)%128], out=text;
 #endif
             if(split) {
 #ifdef SHARED
-                StnArray *pieces=stn_str_split(text,comma,&string_ops,"benchmark",0,0);
+                StnArray *pieces=stn_str_split(SREF(text),SREF(comma),&string_ops,"benchmark",0,0);
                 StnStr *fields=(StnStr*)pieces->data;
                 require(pieces->len>=3); observe(pieces);
-                sum=add(sum,add(pieces->len,add(fields[1]->len,fields[2]->len)));
+                sum=add(sum,add(pieces->len,add(SLEN(fields[1]),SLEN(fields[2]))));
                 for(int64_t j=0;j<pieces->len;j++)STN_STR_DROP(fields[j]);
                 stn_drop(pieces,stn_array_release);
 #else
@@ -204,7 +204,7 @@ static int extra(const char *name, int64_t seed, uint64_t *elapsed, int64_t *res
 #endif
             } else if(chars) {
 #ifdef SHARED
-                StnArray *letters=stn_str_chars(text,&char_ops);
+                StnArray *letters=stn_str_chars(SREF(text),&char_ops);
                 require(letters->len>=3); observe(letters);
                 sum=add(sum,add(letters->len,((uint32_t*)letters->data)[2]));
                 stn_drop(letters,stn_array_release);
@@ -217,13 +217,13 @@ static int extra(const char *name, int64_t seed, uint64_t *elapsed, int64_t *res
             } else {
                 size_t index=slice?2:0;
 #ifdef SHARED
-                if(concat) out=stn_str_concat(text,next_text);
-                else if(slice) out=stn_str_slice(text,0,12,"benchmark",0,0);
+                if(concat) out=stn_str_concat(SREF(text),SREF(next_text));
+                else if(slice) out=stn_str_slice(SREF(text),0,12,"benchmark",0,0);
                 else if(join) {StnStr p[]={text,next_text,last};out=stn_str_join_parts(p,3,pipe);}
-                else if(trim) out=stn_str_trim(text);
-                else out=stn_str_repeat(text,i%5+1,"benchmark",0,0);
-                observe(out); require(index<(size_t)out->len);
-                sum=add(sum,add(out->len,(unsigned char)out->data[index])); STN_STR_DROP(out);
+                else if(trim) out=stn_str_trim(SREF(text));
+                else out=stn_str_repeat(SREF(text),i%5+1,"benchmark",0,0);
+                SOBSERVE(out); require(index<(size_t)SLEN(out));
+                sum=add(sum,add(SLEN(out),SBYTE(out,index))); STN_STR_DROP(out);
 #else
                 Text out;
                 if(concat) {Text p[]={s,next};out=join_text(p,2,"",0);}
