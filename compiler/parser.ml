@@ -418,6 +418,11 @@ and parse_primary st =
         let e = parse_expr st in
         if accept_op st ":" then begin
           let v = parse_expr st in
+          if is_kw st "for" then begin
+            let cs = parse_comps st in
+            expect_op st "}";
+            mk (MapComp (e, v, cs)) l
+          end else
           let rest =
             if accept_op st "," then
               comma_list st "}" (fun st -> let k = parse_expr st in expect_op st ":"; (k, parse_expr st))
@@ -425,6 +430,10 @@ and parse_primary st =
           in
           expect_op st "}";
           mk (MapLit ((e, v) :: rest)) l
+        end else if is_kw st "for" then begin
+          let cs = parse_comps st in
+          expect_op st "}";
+          mk (SetComp (e, cs)) l
         end else begin
           let rest = if accept_op st "," then comma_list st "}" parse_expr else [] in
           expect_op st "}";

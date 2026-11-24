@@ -1126,6 +1126,28 @@ and check_or_infer c (e : Syntax.expr) (expected : ty option) : texpr =
       List.iter (fun _ -> ()) tcs;
       pop_frame c;
       mk (XComp (tb, tcs)) (TArray tb.ty) l
+  | MapComp (kb, vb, comps) ->
+      (* a comprehension over a Map is the array comprehension of its pairs, put in order: a later
+         pair with an equal key replaces the value and keeps the place (section 3.6) *)
+      let k, v = match exp with Some (TNamed ("Map", [ k; v ])) -> (k, v) | _ -> (fresh (), fresh ()) in
+      push_frame c ();
+      let tcs = List.map (fun cp -> check_comp c cp) comps in
+      let tk = check c kb k in
+      let tv = check c vb v in
+      pop_frame c;
+      need_key c l k;
+      let pair = TTuple [ k; v ] in
+      let pairs = mk (XComp (mk (XTuple [ tk; tv ]) pair l, tcs)) (TArray pair) l in
+      mk (XCall (CBuiltin ("from_pairs@Map", [ k; v ]), [ { amode = MBorrow; a = pairs } ], [])) (TNamed ("Map", [ k; v ])) l
+  | SetComp (body, comps) ->
+      let k = match exp with Some (TNamed ("Set", [ k ])) -> k | _ -> fresh () in
+      push_frame c ();
+      let tcs = List.map (fun cp -> check_comp c cp) comps in
+      let tb = check c body k in
+      pop_frame c;
+      need_key c l k;
+      let items = mk (XComp (tb, tcs)) (TArray k) l in
+      mk (XCall (CBuiltin ("from_items@Set", [ k ]), [ { amode = MBorrow; a = items } ], [])) (TNamed ("Set", [ k ])) l
   | MapLit pairs ->
       let k, v = match exp with Some (TNamed ("Map", [ k; v ])) -> (k, v) | _ -> (fresh (), fresh ()) in
       let args = List.concat_map (fun (ke, ve) -> let tk = check c ke k in let tv = check c ve v in [ tk; tv ]) pairs in

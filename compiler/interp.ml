@@ -786,6 +786,10 @@ and builtin env name (tys : ty list) (vals : value list) loc : value * value lis
       in
       pure (VMap (go [||] kvs))
   | "lit@Set", ks -> let k = List.hd tys in pure (VSet (List.fold_left (fun acc x -> set_add env k acc x) [||] ks))
+  | "from_pairs@Map", [ VArr ps ] ->
+      let k = List.hd tys in
+      pure (VMap (Array.fold_left (fun acc p -> match p with VTuple [| key; v |] -> map_put env k acc key v | _ -> acc) [||] ps))
+  | "from_items@Set", [ VArr xs ] -> let k = List.hd tys in pure (VSet (Array.fold_left (fun acc x -> set_add env k acc x) [||] xs))
   | "entries@Map", [ VMap es ] -> pure (VArr (Array.map (fun (k, v) -> VTuple [| k; v |]) es))
   | "items@Set", [ VSet ks ] -> pure (VArr ks)
   | "len@Map", [ VMap es ] -> pure (VInt (Int64.of_int (Array.length es)))

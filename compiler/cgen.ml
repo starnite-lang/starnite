@@ -2677,6 +2677,22 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
         end else line fc "stn_map_put(&%s, &%s, NULL);" m k
       done;
       { c = dup_expr st mt m; owned = true }
+  | "from_pairs@Map" | "from_items@Set" ->
+      (* the array of the comprehension is owned here: its elements move into the table, and it is
+         freed without dropping them *)
+      let is_map = name = "from_pairs@Map" in
+      let mt = TNamed ((if is_map then "Map" else "Set"), tys) in
+      let et = if is_map then TTuple tys else List.hd tys in
+      let a = o 0 in
+      let m = tmp fc mt (Printf.sprintf "stn_map_with_capacity(%s, %s->len)" (map_ops fc mt) a) in
+      let i = fresh st "_i" in
+      line fc "for (int64_t %s = 0; %s < %s->len; %s++) {" i i a i;
+      line fc "  %s _x = ((%s*)%s->data)[%s];" (cty st et) (cty st et) a i;
+      if is_map then line fc "  stn_map_put(&%s, &_x.f0, &_x.f1);" m else line fc "  stn_map_put(&%s, &_x, NULL);" m;
+      line fc "}";
+      line fc "if (stn_unique(%s)) stn_free(%s); else { for (int64_t %s = 0; %s < %s->len; %s++) { %s } stn_drop(%s, stn_array_release); }" a a i i a i
+        (if needs_rc st et then dup_stmt st et (Printf.sprintf "((%s*)%s->data)[%s]" (cty st et) a i) else "") a;
+      { c = m; owned = true }
   | "entries@Map" ->
       let kt, vt = (List.nth tys 0, List.nth tys 1) in
       let pair = TTuple [ kt; vt ] in

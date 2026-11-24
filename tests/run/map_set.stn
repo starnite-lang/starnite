@@ -146,4 +146,13 @@ fn main():
     for k in 0..2000:
         bs.add(k * k % 1009)
     print(f"{len(big)} {sum} {big[1]} {big.get(3)} {len(bs)}")
+    # comprehensions: a later pair with an equal key replaces the value and keeps the place
+    let ws = words("pear fig apple fig kiwi")
+    let lengths = {w: len(w) for w in ws}
+    let firsts = {chars(w)[0] for w in ws}
+    let squares = {k: k * k for k in 0..5 if k % 2 == 0}
+    let swapped = {v: k for (k, v) in {"a": 1, "b": 2, "c": 1}}
+    let names_of: Map[Int, Array[Str]] = {n: [w for w in ws if len(w) == n] for n in [3, 4, 5]}
+    let nothing: Set[Int] = {x for x in 0..3 if x > 9}
+    print(f"{lengths} {firsts} {squares} {swapped} {names_of} {nothing} {len(nothing)}")
     print(f"{m["missing"]}")
