@@ -18,7 +18,7 @@ best() { # best of 9 wall-clock runs, in seconds: the short ones are noisy
 printf "%-12s %9s %9s %7s\n" benchmark starnite c ratio
 for b in centroid nbody spectral mandelbrot; do
     "$starnite" build --release "$here/$b.stn" -o "$out/$b-stn"
-    ${CC:-cc} -O2 -o "$out/$b-c" "$here/$b.c" -lm
+    ${CC:-cc} -O2 -falign-functions=64 -falign-loops=64 -o "$out/$b-c" "$here/$b.c" -lm
     norm() { "$1" | awk '{ for (i = 1; i <= NF; i++) printf "%.12g ", $i; print "" }'; }
     if [ "$(norm "$out/$b-stn")" != "$(norm "$out/$b-c")" ]; then echo "$b: outputs differ"; exit 1; fi
     ts=$(best "$out/$b-stn"); tc=$(best "$out/$b-c")

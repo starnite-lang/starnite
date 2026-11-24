@@ -103,6 +103,8 @@ Not done yet:
 
 - **Inline strings (section 3.6).** A `Str` is 16 bytes. A string of up to 15 bytes is stored in the value itself, with its length in the last byte, and needs no allocation; a longer one is a counted buffer and its length. Two inline strings are equal exactly when their two words are, and hash from those words. A slice is a new string: inline when short, the same buffer when it is the whole string, a copy otherwise. Runtime string functions read a string where it already is, by address, and short results are assembled in registers, because reading an inline string back right after its words were stored stalls the processor.
 
+- **Release builds align functions and loops to 64 bytes.** Without it, the speed of a loop depended on where unrelated code before it happened to end: moving unchanged code by sixteen bytes changed single benchmarks by up to 80% with GCC and 66% with Clang, and two builds that ran the same instructions differed by up to 18%. Aligned, the same shifts move them by 8% or less (GCC) and 5% or less (Clang, one case at 16%). It costs about 5% of the size of the code. The benchmark scripts build every C program, the references included, the same way.
+
 ## Gate benchmarks
 
 `bench/run.sh` compares `starnite build --release` with the same algorithm in C at `-O2`. Section 21.5 sets the milestone 1 target at 1.1 times C time or less.

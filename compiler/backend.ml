@@ -30,7 +30,10 @@ let build o (prog : Types.tprog) (exe : string) =
   write (Filename.concat dir "stn_runtime.c") Runtime_src.source;
   let cfile = if o.keep_c then exe ^ ".c" else Filename.concat dir "main.c" in
   write cfile c;
-  let flags = if o.release then "-O2 -fno-strict-aliasing" else "-O0 -g -DSTN_DEBUG" in
+  (* A release build starts every function and loop on a 64-byte boundary. Without it the speed of
+     a loop depends on where the code before it happens to end: moving unchanged code by sixteen
+     bytes changed single benchmarks by up to 80%. It costs about 5% of the size of the code. *)
+  let flags = if o.release then "-O2 -fno-strict-aliasing -falign-functions=64 -falign-loops=64" else "-O0 -g -DSTN_DEBUG" in
   let cmd =
     Printf.sprintf "%s -std=c11 %s -w -I%s -o %s %s %s -lm" (cc_cmd o) flags (Filename.quote dir) (Filename.quote exe)
       (Filename.quote cfile) (Filename.quote (Filename.concat dir "stn_runtime.c"))
