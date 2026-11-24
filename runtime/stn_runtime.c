@@ -156,17 +156,37 @@ static inline stn_u128 stn_str_bits(const StnStr* s) {
 }
 #endif
 
+#if defined(__SIZEOF_INT128__)
+/* Both parts are inline: shift and combine their words. Kept out of line, so the registers it
+   needs are not saved on every call that builds a buffer. */
+static __attribute__((noinline)) StnStr stn_str_concat_small(const StnStr* a, const StnStr* b, int64_t an, int64_t bn) {
+    StnStr s;
+    stn_u128 v = stn_str_bits(a) | (stn_str_bits(b) << (8 * an));
+    s.w0 = (uint64_t)v;
+    s.w1 = (uint64_t)(v >> 64) | ((uint64_t)(an + bn) << 56);
+    return s;
+}
+
+static __attribute__((noinline)) StnStr stn_str_concat_n_small(int n, const StnStr* parts, int64_t total) {
+    StnStr s;
+    stn_u128 v = 0;
+    int64_t at = 0;
+    for (int i = 0; i < n; i++) {
+        int64_t k = stn_str_len(parts[i]);
+        if (k) v |= stn_str_bits(&parts[i]) << (8 * at);
+        at += k;
+    }
+    s.w0 = (uint64_t)v;
+    s.w1 = (uint64_t)(v >> 64) | ((uint64_t)total << 56);
+    return s;
+}
+#endif
+
 StnStr stn_str_concat(const StnStr* a, const StnStr* b) {
     int64_t an = stn_str_len(*a), bn = stn_str_len(*b);
     StnStr s;
 #if defined(__SIZEOF_INT128__)
-    if (an + bn <= STN_STR_INLINE_MAX) {
-        /* both parts are inline: shift and combine their words */
-        stn_u128 v = stn_str_bits(a) | (stn_str_bits(b) << (8 * an));
-        s.w0 = (uint64_t)v;
-        s.w1 = (uint64_t)(v >> 64) | ((uint64_t)(an + bn) << 56);
-        return s;
-    }
+    if (an + bn <= STN_STR_INLINE_MAX) return stn_str_concat_small(a, b, an, bn);
 #endif
     char* d = stn_str_start(&s, an + bn);
     memcpy(d, stn_str_ptr(a), (size_t)an);
@@ -179,18 +199,7 @@ StnStr stn_str_concat_n(int n, StnStr* parts) {
     for (int i = 0; i < n; i++) total += stn_str_len(parts[i]);
     StnStr s;
 #if defined(__SIZEOF_INT128__)
-    if (total <= STN_STR_INLINE_MAX) {
-        stn_u128 v = 0;
-        int64_t at = 0;
-        for (int i = 0; i < n; i++) {
-            int64_t k = stn_str_len(parts[i]);
-            if (k) v |= stn_str_bits(&parts[i]) << (8 * at);
-            at += k;
-        }
-        s.w0 = (uint64_t)v;
-        s.w1 = (uint64_t)(v >> 64) | ((uint64_t)total << 56);
-        return s;
-    }
+    if (total <= STN_STR_INLINE_MAX) return stn_str_concat_n_small(n, parts, total);
 #endif
     char* d = stn_str_start(&s, total);
     int64_t at = 0;

@@ -322,17 +322,15 @@ StnStr  stn_str_trim(const StnStr* s);
 uint8_t stn_str_contains_slow(const StnStr* s, const StnStr* sub);
 static inline uint8_t stn_str_contains(const StnStr* s, const StnStr* sub) {
 #if defined(__SSE2__)
-    int64_t s_len = stn_str_len(*s);
-    const char* s_data = stn_str_ptr(s);
-    const char* sub_data = stn_str_ptr(sub);
-    /* A four-byte needle can be verified without a memcmp call. Scan a
-       final overlapping vector so both loads stay inside the string. */
-    if (stn_str_len(*sub) == 4 && s_len >= 19 && s_len <= 64) {
-        uint32_t needle;
-        memcpy(&needle, sub_data, sizeof needle);
-        __m128i first = _mm_set1_epi8(sub_data[0]);
-        __m128i last = _mm_set1_epi8(sub_data[3]);
-        size_t limit = (size_t)s_len - 19;
+    /* A four-byte needle can be verified without a memcmp call. Scan a final overlapping vector
+       so both loads stay inside the string. The lengths settle the forms: the needle is inline,
+       its bytes in its first word, and the string is in a buffer, so each is one comparison. */
+    if (sub->w1 == (UINT64_C(4) << 56) && s->w1 >= (STN_STR_HEAP_BIT | 19) && s->w1 <= (STN_STR_HEAP_BIT | 64)) {
+        uint32_t needle = (uint32_t)sub->w0;
+        const char* s_data = s->buf->data;
+        __m128i first = _mm_set1_epi8((char)(needle & 0xFF));
+        __m128i last = _mm_set1_epi8((char)(needle >> 24));
+        size_t limit = (size_t)(s->w1 & ~STN_STR_HEAP_BIT) - 19;
         size_t i = 0;
         for (;;) {
             const char* start = s_data + i;
@@ -366,6 +364,17 @@ static inline __attribute__((always_inline)) uint64_t stn_str_tail8(const StnStr
     uint64_t n = s->w1 >> 56, hi = s->w1 & ~(UINT64_C(0xFF) << 56);
     if (n > 8) return (s->w0 >> (8 * (n - 8))) | (hi << (8 * (16 - n)));
     return n == 8 ? s->w0 : s->w0 << (8 * (8 - n));
+}
+/* s starts or ends with the n bytes (1 to 8) of a literal, given as a word: a string in a buffer
+   has at least sixteen bytes, so only an inline one needs its length checked. */
+static inline __attribute__((always_inline)) uint8_t stn_str_starts8(const StnStr* s, unsigned n, uint64_t mask, uint64_t lit) {
+    if (stn_str_heap(*s)) return (stn_load_u64(s->buf->data) & mask) == lit;
+    return (s->w1 >> 56) >= n && (s->w0 & mask) == lit;
+}
+static inline __attribute__((always_inline)) uint8_t stn_str_ends8(const StnStr* s, unsigned n, uint64_t lit) {
+    if (stn_str_heap(*s))
+        return (stn_load_u64(s->buf->data + (s->w1 & ~STN_STR_HEAP_BIT) - 8) >> (64 - 8 * n)) == lit;
+    return (s->w1 >> 56) >= n && (stn_str_tail8(s) >> (64 - 8 * n)) == lit;
 }
 static inline uint8_t stn_str_starts_with(const StnStr* s, const StnStr* p) {
     int64_t n = stn_str_len(*p);

@@ -579,13 +579,17 @@ let rec writes_nothing (e : texpr) =
 let hold_str fc (first : string) (later : texpr) =
   let is_ident x = x <> "" && String.for_all (fun ch -> ch = '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) x in
   let literal = String.length first > 6 && String.sub first 0 6 = "strlit" in
+  let named_element =
+    (* a name bound, by its address, to an element of an array that does not change *)
+    let n = String.length first in
+    n > 3 && String.sub first 0 2 = "(*" && first.[n - 1] = ')' && is_ident (String.sub first 2 (n - 3)) in
   if literal then first
   else if not (writes_nothing later) then begin
     let held = tmp fc TStr (dup_expr fc.st TStr first) in
     own_in fc held TStr;
     held
   end
-  else if is_ident first then first
+  else if is_ident first || named_element then first
   else if first <> "" && first.[String.length first - 1] = ']' then begin
     let p = fresh fc.st "_p" in
     line fc "StnStr const* %s = &%s;" p first;
@@ -2574,11 +2578,18 @@ and stmt fc (s : tstmt) =
   push fc FStmt;
   (match s.st with
    | SLet (TPVar v, e) when borrows_array_string fc v e ->
-       let init = tmp fc e.ty (expr fc e).c in
+       let c = (expr fc e).c in
        let f = List.hd fc.frames in
        fc.frames <- List.tl fc.frames;
        emit_drops fc f;
-       declare_var ~owned:false fc v init;
+       (* the element of an array that does not change is named where it is, not copied: a Str is
+          read by address, and a copy would be stored to the stack only to be read back *)
+       (match sref fc c with
+        | addr when addr = "&" ^ c ->
+            let n = var_name v in
+            line fc "StnStr const* %s = %s;" n addr;
+            Hashtbl.replace fc.vars v.vid (VPtr n)
+        | _ -> declare_var ~owned:false fc v (tmp fc e.ty c));
        fc.frames <- { fk = FStmt; owned = [] } :: fc.frames
    | SLet (TPVar v, e) | SVar (v, e) ->
        let x = expr fc e in
@@ -3096,13 +3107,10 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
                 bytes of the string, read from its words when it is inline *)
              let w = ref 0L in
              for i = n - 1 downto 0 do w := Int64.logor (Int64.shift_left !w 8) (Int64.of_int (Char.code literal.[i])) done;
-             let word =
-               if prefix then
-                 let mask = if n = 8 then "" else Printf.sprintf " & UINT64_C(0x%Lx)" (Int64.sub (Int64.shift_left 1L (8 * n)) 1L) in
-                 Printf.sprintf "(stn_str_head8(%s)%s)" s mask
-               else if n = 8 then Printf.sprintf "stn_str_tail8(%s)" s
-               else Printf.sprintf "(stn_str_tail8(%s) >> %d)" s (8 * (8 - n)) in
-             value (Printf.sprintf "(stn_str_len(*%s) >= %d && %s == UINT64_C(0x%Lx))" s n word !w)
+             if prefix then
+               let mask = if n = 8 then "UINT64_MAX" else Printf.sprintf "UINT64_C(0x%Lx)" (Int64.sub (Int64.shift_left 1L (8 * n)) 1L) in
+               value (Printf.sprintf "stn_str_starts8(%s, %d, %s, UINT64_C(0x%Lx))" s n mask !w)
+             else value (Printf.sprintf "stn_str_ends8(%s, %d, UINT64_C(0x%Lx))" s n !w)
            end else
            value (Printf.sprintf "(stn_str_len(*%s) >= %d && %s)" s n same)
        | _ ->
