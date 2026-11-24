@@ -1381,6 +1381,12 @@ and map_ops fc (t : ty) : string =
   end;
   "&" ^ name
 
+(* a lookup of the key k in the table m, inline when the key is a 64-bit integer *)
+and map_find_call (kt : ty) m k =
+  match repr kt with
+  | TInt (IInt | I64 | U64) | TDur | TBytes -> Printf.sprintf "stn_map_find_i64(%s, (uint64_t)%s)" m k
+  | _ -> Printf.sprintf "stn_map_find(%s, &%s)" m k
+
 and cmp_call fc t a b : string =
   let st = fc.st in
   match repr t with
@@ -2699,7 +2705,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       let k = tmp fc kt (b 1) in
       let start = if name = "index_or@Map" then Some (o 2) else None in
       let p = fresh st "_p" in
-      line fc "%s* %s = (%s*)stn_map_find(%s, &%s);" (cty st vt) p (cty st vt) m k;
+      line fc "%s* %s = (%s*)%s;" (cty st vt) p (cty st vt) (map_find_call (List.hd tys) m k);
       (match name, start with
        | "index@Map", _ ->
            line fc "if (!%s) stn_trap(\"missing key\", %s, \"the Map has no entry for this key\");" p la;
@@ -2726,7 +2732,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       let mt = TNamed ((if name = "contains@Map" then "Map" else "Set"), tys) in
       let m = tmp fc mt (b 0) in
       let k = tmp fc (List.hd tys) (b 1) in
-      value (tmp fc TBool (Printf.sprintf "(stn_map_find(%s, &%s) != NULL)" m k))
+      value (tmp fc TBool (Printf.sprintf "(%s != NULL)" (map_find_call (List.hd tys) m k)))
   | "put@Map"
     when (match (arg 0).a.e, (arg 1).a.e, (arg 2).a.e with
           | XVar root, XVar key, XBin ((Add | Sub | Mul | Div | Mod), { e = XCall (CBuiltin ("index_or@Map", _), [ { a = { e = XVar root'; _ }; _ }; { a = { e = XVar key'; _ }; _ }; _ ], _); _ }, rhs) ->

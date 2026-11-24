@@ -361,11 +361,68 @@ StnMap*  stn_set_union(const StnMap* a, const StnMap* b);
 StnMap*  stn_set_intersection(const StnMap* a, const StnMap* b);
 StnMap*  stn_set_difference(const StnMap* a, const StnMap* b);
 /* SipHash-1-3 under a key drawn once per process */
-uint64_t stn_hash_u64(uint64_t x);
+extern uint64_t stn_hash_k0, stn_hash_k1;
+#define STN_ROTL(x, b) (((x) << (b)) | ((x) >> (64 - (b))))
+#define STN_SIPROUND do { \
+        v0 += v1; v1 = STN_ROTL(v1, 13); v1 ^= v0; v0 = STN_ROTL(v0, 32); \
+        v2 += v3; v3 = STN_ROTL(v3, 16); v3 ^= v2; \
+        v0 += v3; v3 = STN_ROTL(v3, 21); v3 ^= v0; \
+        v2 += v1; v1 = STN_ROTL(v1, 17); v1 ^= v2; v2 = STN_ROTL(v2, 32); } while (0)
+/* SipHash-1-3 of one 64-bit word: inline, since an integer key is hashed on every lookup */
+static inline uint64_t stn_hash_u64(uint64_t x) {
+    uint64_t v0 = stn_hash_k0 ^ UINT64_C(0x736f6d6570736575), v1 = stn_hash_k1 ^ UINT64_C(0x646f72616e646f6d);
+    uint64_t v2 = stn_hash_k0 ^ UINT64_C(0x6c7967656e657261), v3 = stn_hash_k1 ^ UINT64_C(0x7465646279746573);
+    v3 ^= x; STN_SIPROUND; v0 ^= x;
+    const uint64_t b = (uint64_t)8 << 56;
+    v3 ^= b; STN_SIPROUND; v0 ^= b;
+    v2 ^= 0xff; STN_SIPROUND; STN_SIPROUND; STN_SIPROUND;
+    return v0 ^ v1 ^ v2 ^ v3;
+}
 uint64_t stn_hash_bytes(const void* p, size_t n);
 /* equal floats hash alike: -0.0 is 0.0 */
 static inline uint64_t stn_hash_f64(double x) { uint64_t b; if (x == 0) x = 0; memcpy(&b, &x, 8); return stn_hash_u64(b); }
 static inline uint64_t stn_hash_combine(uint64_t h, uint64_t x) { return stn_hash_u64(h ^ (x + UINT64_C(0x9E3779B97F4A7C15) + (h << 6) + (h >> 2))); }
+
+/* stn_map_find for a table whose keys are 64-bit integers (STN_KEY_I64), inline: the layout of
+   the index is the one stn_runtime.c describes. */
+static inline void* stn_map_find_i64(const StnMap* m, uint64_t key) {
+    if (__builtin_expect(!m->ilog, 0)) return NULL;
+    uint64_t h = stn_hash_u64(key);
+    uint64_t w = h | (uint64_t)(h == 0);
+    uint64_t mask = ((uint64_t)1 << m->ilog) - 1, pos = (w >> 7) & mask, step = 0;
+    int64_t cap = m->cap;
+    unsigned width = cap <= 256 ? 1 : cap <= 65536 ? 2 : cap <= INT64_C(4294967296) ? 4 : 8;
+    const uint8_t* ctrl = m->index;
+    for (;;) {
+        const uint8_t* g = ctrl + pos;
+        unsigned hits, unused_free;
+#if defined(__SSE2__)
+        __m128i grp = _mm_loadu_si128((const __m128i_u*)g);
+        hits = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(grp, _mm_set1_epi8((char)(w & 0x7F))));
+        unused_free = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(grp, _mm_set1_epi8((char)0xFF)));
+#else
+        hits = 0; unused_free = 0;
+        for (unsigned i = 0; i < 16; i++) { hits |= (unsigned)(g[i] == (uint8_t)(w & 0x7F)) << i; unused_free |= (unsigned)(g[i] == 0xFF) << i; }
+#endif
+        for (; hits; hits &= hits - 1) {
+            uint64_t s = (pos + (unsigned)__builtin_ctz(hits)) & mask;
+            uint64_t place;
+            switch (width) {
+                case 1: place = m->places[s]; break;
+                case 2: { uint16_t v; memcpy(&v, m->places + s * 2, 2); place = v; break; }
+                case 4: { uint32_t v; memcpy(&v, m->places + s * 4, 4); place = v; break; }
+                default: memcpy(&place, m->places + s * 8, 8);
+            }
+            char* e = m->entries + (size_t)place * m->stride;
+            uint64_t k;
+            memcpy(&k, e + 8, 8);
+            if (*(const uint64_t*)e == w && k == key) return e + m->voff;
+        }
+        if (unused_free) return NULL;
+        step += 16;
+        pos = (pos + step) & mask;
+    }
+}
 
 /* Generated functions are compiled for speed wherever they end up being inlined. Only an optimized
    release build asks for it: Clang honours the attribute even at -O0, which makes a debug build

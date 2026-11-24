@@ -792,7 +792,7 @@ int64_t stn_clock_ns(void) {
 }
 
 /* ---- maps and sets (section 3.6) ---- */
-static uint64_t stn_hash_k0 = UINT64_C(0x0706050403020100), stn_hash_k1 = UINT64_C(0x0f0e0d0c0b0a0908);
+uint64_t stn_hash_k0 = UINT64_C(0x0706050403020100), stn_hash_k1 = UINT64_C(0x0f0e0d0c0b0a0908);
 
 /* The key of the hash is drawn once, when the program starts, so that chosen keys cannot be made to
    collide. Nothing a program can observe depends on it: iteration follows insertion. */
@@ -808,23 +808,6 @@ static void stn_hash_init(void) {
         k[1] = (uint64_t)getpid() * UINT64_C(0x9E3779B97F4A7C15) ^ (uint64_t)(uintptr_t)&stn_hash_init;
     }
     stn_hash_k0 = k[0]; stn_hash_k1 = k[1];
-}
-
-#define STN_ROTL(x, b) (((x) << (b)) | ((x) >> (64 - (b))))
-#define STN_SIPROUND do { \
-        v0 += v1; v1 = STN_ROTL(v1, 13); v1 ^= v0; v0 = STN_ROTL(v0, 32); \
-        v2 += v3; v3 = STN_ROTL(v3, 16); v3 ^= v2; \
-        v0 += v3; v3 = STN_ROTL(v3, 21); v3 ^= v0; \
-        v2 += v1; v1 = STN_ROTL(v1, 17); v1 ^= v2; v2 = STN_ROTL(v2, 32); } while (0)
-
-uint64_t stn_hash_u64(uint64_t x) {
-    uint64_t v0 = stn_hash_k0 ^ UINT64_C(0x736f6d6570736575), v1 = stn_hash_k1 ^ UINT64_C(0x646f72616e646f6d);
-    uint64_t v2 = stn_hash_k0 ^ UINT64_C(0x6c7967656e657261), v3 = stn_hash_k1 ^ UINT64_C(0x7465646279746573);
-    v3 ^= x; STN_SIPROUND; v0 ^= x;
-    uint64_t b = (uint64_t)8 << 56;
-    v3 ^= b; STN_SIPROUND; v0 ^= b;
-    v2 ^= 0xff; STN_SIPROUND; STN_SIPROUND; STN_SIPROUND;
-    return v0 ^ v1 ^ v2 ^ v3;
 }
 
 uint64_t stn_hash_bytes(const void* p, size_t n) {
