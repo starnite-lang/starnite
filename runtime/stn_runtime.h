@@ -392,6 +392,26 @@ static inline uint64_t stn_hash_u64(uint64_t x) {
 uint64_t stn_hash_bytes(const void* p, size_t n);
 /* equal floats hash alike: -0.0 is 0.0 */
 static inline uint64_t stn_hash_f64(double x) { uint64_t b; if (x == 0) x = 0; memcpy(&b, &x, 8); return stn_hash_u64(b); }
+/* SipHash-1-3 over a stream of 64-bit words, for keys made of several parts (a tuple, a struct,
+   a data type, an array): one hash for the whole key, as if its parts were laid out in a row */
+typedef struct { uint64_t v0, v1, v2, v3, n; } StnSip;
+static inline void stn_sip_init(StnSip* s) {
+    s->v0 = stn_hash_k0 ^ UINT64_C(0x736f6d6570736575); s->v1 = stn_hash_k1 ^ UINT64_C(0x646f72616e646f6d);
+    s->v2 = stn_hash_k0 ^ UINT64_C(0x6c7967656e657261); s->v3 = stn_hash_k1 ^ UINT64_C(0x7465646279746573);
+    s->n = 0;
+}
+static inline void stn_sip_word(StnSip* s, uint64_t m) {
+    uint64_t v0 = s->v0, v1 = s->v1, v2 = s->v2, v3 = s->v3;
+    v3 ^= m; STN_SIPROUND; v0 ^= m;
+    s->v0 = v0; s->v1 = v1; s->v2 = v2; s->v3 = v3; s->n += 8;
+}
+static inline uint64_t stn_sip_finish(StnSip* s) {
+    uint64_t v0 = s->v0, v1 = s->v1, v2 = s->v2, v3 = s->v3;
+    uint64_t b = s->n << 56;
+    v3 ^= b; STN_SIPROUND; v0 ^= b;
+    v2 ^= 0xff; STN_SIPROUND; STN_SIPROUND; STN_SIPROUND;
+    return v0 ^ v1 ^ v2 ^ v3;
+}
 static inline uint64_t stn_hash_combine(uint64_t h, uint64_t x) { return stn_hash_u64(h ^ (x + UINT64_C(0x9E3779B97F4A7C15) + (h << 6) + (h >> 2))); }
 
 /* stn_map_find for a table whose keys are 64-bit integers (STN_KEY_I64), inline: the layout of

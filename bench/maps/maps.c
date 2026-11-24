@@ -156,6 +156,42 @@ static inline int64_t sm_get(const StrMap* m, const char* key, size_t n) {
     return 0;
 }
 
+/* ---- a table of (Int, Int) keys, for the struct and tuple keys ---- */
+typedef struct { int64_t x, y, value; } PSlot;
+typedef struct { uint8_t* state; PSlot* slots; size_t cap, len; } PairMap;
+static inline uint64_t hash_pair(int64_t x, int64_t y) {
+#ifdef FAST_HASH
+    return hash_int((uint64_t)x * 0x9E3779B97F4A7C15ULL ^ (uint64_t)y);
+#else
+    int64_t b[2] = { x, y };
+    return sip_bytes((const unsigned char*)b, 16);
+#endif
+}
+static void pm_init(PairMap* m, size_t cap) { m->cap = cap; m->len = 0; m->state = calloc(cap, 1); m->slots = malloc(cap * sizeof(PSlot)); require(m->state && m->slots); }
+static void pm_free(PairMap* m) { free(m->state); free(m->slots); }
+static void pm_grow(PairMap* m) {
+    PairMap n;
+    pm_init(&n, m->cap * 2);
+    for (size_t i = 0; i < m->cap; i++)
+        if (m->state[i]) {
+            size_t s = hash_pair(m->slots[i].x, m->slots[i].y) & (n.cap - 1);
+            while (n.state[s]) s = (s + 1) & (n.cap - 1);
+            n.state[s] = 1; n.slots[s] = m->slots[i]; n.len++;
+        }
+    pm_free(m); *m = n;
+}
+static inline void pm_put(PairMap* m, int64_t x, int64_t y, int64_t v) {
+    if ((m->len + 1) * 4 > m->cap * 3) pm_grow(m);
+    size_t mask = m->cap - 1, s = hash_pair(x, y) & mask;
+    while (m->state[s]) { if (m->slots[s].x == x && m->slots[s].y == y) { m->slots[s].value = v; return; } s = (s + 1) & mask; }
+    m->state[s] = 1; m->slots[s] = (PSlot){ x, y, v }; m->len++;
+}
+static inline int64_t* pm_get(PairMap* m, int64_t x, int64_t y) {
+    size_t mask = m->cap - 1, s = hash_pair(x, y) & mask;
+    while (m->state[s]) { if (m->slots[s].x == x && m->slots[s].y == y) return &m->slots[s].value; s = (s + 1) & mask; }
+    return NULL;
+}
+
 static int64_t key(int64_t i, int64_t seed) { return (i * 7919 + seed) % 1000003; }
 static void filled(IntMap* m, int64_t n, int64_t seed) {
     im_init(m, 16);
@@ -246,6 +282,31 @@ int main(void) {
         end = now();
         check = (int64_t)u.len * 3 + (int64_t)n.len * 5 + (int64_t)d.len * 7;
         im_free(&a); im_free(&b); im_free(&u); im_free(&n); im_free(&d);
+    } else if (!strcmp(name, "map_struct_key") || !strcmp(name, "map_tuple_key")) {
+        PairMap m;
+        pm_init(&m, 16);
+        int64_t sum = 0;
+        start = now();
+        for (int64_t i = 0; i < 100000; i++) pm_put(&m, key(i, seed), i % 7, i);
+        for (int64_t i = 0; i < 500000; i++) { int64_t* v = pm_get(&m, key(i % 200000, seed), i % 200000 % 7); sum += v ? *v : 1; }
+        end = now();
+        check = (int64_t)m.len + sum;
+        pm_free(&m);
+    } else if (!strcmp(name, "map_str_values")) {
+        /* the values are the strings themselves, held by pointer: a C table does not count them */
+        char words[512][32];
+        int64_t lens[512];
+        for (int64_t i = 0; i < 512; i++) { int n = snprintf(words[i], 32, "name%" PRId64 "/item", (i * 37 + seed) % 100000); require(n > 0 && n < 32); lens[i] = n; }
+        IntMap m;
+        im_init(&m, 16);
+        int64_t sum = 0;
+        start = now();
+        for (int64_t i = 0; i < 200000; i++) { int f; *im_slot(&m, key(i % 50000, seed), &f) = (int64_t)(intptr_t)words[i % 512]; }
+        for (int64_t i = 0; i < 500000; i++) { int64_t* v = im_get(&m, key(i % 100000, seed)); sum += v ? (int64_t)strlen((const char*)(intptr_t)*v) : 1; }
+        end = now();
+        (void)lens;
+        check = (int64_t)m.len + sum;
+        im_free(&m);
     } else {
         fputs("maps.c: unknown benchmark\n", stderr);
         return 1;

@@ -98,6 +98,48 @@ fn bench_set_union(seed: Int) -> (Int, Int):
     let elapsed = clock_ns() - start
     (elapsed, len(u) * 3 + len(n) * 5 + len(d) * 7)
 
+type Point = struct(x: Int, y: Int)
+
+fn bench_map_struct_key(seed: Int) -> (Int, Int):
+    var m: Map[Point, Int] = {}
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..100000:
+        m[Point(key(i, seed), i % 7)] = i
+    for i in 0..500000:
+        match m.get(Point(key(i % 200000, seed), i % 200000 % 7)):
+            Some(v) -> sum += v
+            None -> sum += 1
+    let elapsed = clock_ns() - start
+    (elapsed, len(m) + sum)
+
+fn bench_map_tuple_key(seed: Int) -> (Int, Int):
+    var m: Map[(Int, Int), Int] = {}
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..100000:
+        m[(key(i, seed), i % 7)] = i
+    for i in 0..500000:
+        match m.get((key(i % 200000, seed), i % 200000 % 7)):
+            Some(v) -> sum += v
+            None -> sum += 1
+    let elapsed = clock_ns() - start
+    (elapsed, len(m) + sum)
+
+fn bench_map_str_values(seed: Int) -> (Int, Int):
+    let words = names(seed)
+    var m: Map[Int, Str] = {}
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..200000:
+        m[key(i % 50000, seed)] = words[i % 512]
+    for i in 0..500000:
+        match m.get(key(i % 100000, seed)):
+            Some(w) -> sum += len(w)
+            None -> sum += 1
+    let elapsed = clock_ns() - start
+    (elapsed, len(m) + sum)
+
 fn dispatch(name: Str, seed: Int) -> (Int, Int):
     match name:
         "map_insert_int" -> bench_map_insert_int(seed)
@@ -108,6 +150,9 @@ fn dispatch(name: Str, seed: Int) -> (Int, Int):
         "map_count_str" -> bench_map_count_str(seed)
         "set_int" -> bench_set_int(seed)
         "set_union" -> bench_set_union(seed)
+        "map_struct_key" -> bench_map_struct_key(seed)
+        "map_tuple_key" -> bench_map_tuple_key(seed)
+        "map_str_values" -> bench_map_str_values(seed)
         _ -> unreachable("unknown benchmark")
 
 fn main():

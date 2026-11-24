@@ -1302,7 +1302,9 @@ and eq_call fc t a b : string =
           Printf.sprintf "%s(%s, %s)" n a b)
 
 (* The hash of a value, as a uint64_t: SipHash of the bytes of a number or a string, an impl of Hash
-   of the program where there is one, and otherwise the hashes of the parts combined in order. *)
+   of the program where there is one, and otherwise one SipHash over the words of its parts, in
+   order: for a tuple, a struct or a data type its fields (a data type's tag first), for an array
+   its length and elements. A part that is a string or has an impl of its own adds its hash as a word. *)
 and hash_call fc t a : string =
   let st = fc.st in
   match repr t with
@@ -1319,28 +1321,35 @@ and hash_call fc t a : string =
             Hashtbl.replace st.defined n ();
             let c = cty st t in
             pr st.protos "static uint64_t %s(%s x);\n" n c;
-            let fold parts = "uint64_t h = 0; " ^ String.concat " " (List.map (fun p -> Printf.sprintf "h = stn_hash_combine(h, %s);" p) parts) ^ " return h;" in
-            let body =
-              match repr t with
-              | TArray et ->
-                  Printf.sprintf "uint64_t h = stn_hash_u64((uint64_t)x->len); for (int64_t i = 0; i < x->len; i++) { %s e = ((%s*)x->data)[i]; h = stn_hash_combine(h, %s); } return h;"
-                    (cty st et) (cty st et) (hash_call fc et "e")
-              | TTuple ts -> fold (List.mapi (fun i et -> hash_call fc et (Printf.sprintf "x.f%d" i)) ts)
-              | TNamed _ when is_struct st t -> fold (List.map (fun (fnm, et) -> hash_call fc et ("x." ^ fname fnm)) (struct_fields st t))
-              | TNamed _ ->
-                  let arms =
-                    List.map
-                      (fun ((v : variant_info), fs) ->
-                        Printf.sprintf "case %d: { %s break; }" v.vindex
-                          (String.concat " " (List.mapi (fun i (_, et) -> Printf.sprintf "h = stn_hash_combine(h, %s);" (hash_call fc et (variant_field st t v i "x"))) fs)))
-                      (variants st t)
-                  in
-                  Printf.sprintf "uint64_t h = stn_hash_u64((uint64_t)%s); switch (%s) { %s } return h;" (tag_of st t "x") (tag_of st t "x") (String.concat " " arms)
-              | _ -> "return 0;"
-            in
-            pr st.helpers "static uint64_t %s(%s x) { %s }\n" n c body
+            pr st.helpers "static uint64_t %s(%s x) { StnSip s; stn_sip_init(&s); %s return stn_sip_finish(&s); }\n" n c (hash_feed fc t "x")
           end;
           Printf.sprintf "%s(%s)" n a)
+
+(* statements that add the words of a value to the SipHash stream s *)
+and hash_feed fc t a : string =
+  let st = fc.st in
+  match repr t with
+  | TInt _ | TBool | TChar | TDur | TBytes -> Printf.sprintf "stn_sip_word(&s, (uint64_t)(%s));" a
+  | TFloat | TF32 -> Printf.sprintf "{ double _d = (double)(%s); uint64_t _b; if (_d == 0) _d = 0; memcpy(&_b, &_d, 8); stn_sip_word(&s, _b); }" a
+  | TUnit | TNever -> ""
+  | TStr -> Printf.sprintf "stn_sip_word(&s, %s);" (hash_call fc t a)
+  | _ when Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) "Hash" [] "hash" t <> None ->
+      Printf.sprintf "stn_sip_word(&s, %s);" (hash_call fc t a)
+  | TArray et ->
+      Printf.sprintf "stn_sip_word(&s, (uint64_t)(%s)->len); for (int64_t _i = 0; _i < (%s)->len; _i++) { %s _x = ((%s*)(%s)->data)[_i]; %s }"
+        a a (cty st et) (cty st et) a (hash_feed fc et "_x")
+  | TTuple ts -> String.concat " " (List.mapi (fun i et -> hash_feed fc et (Printf.sprintf "(%s).f%d" a i)) ts)
+  | TNamed _ when is_struct st t -> String.concat " " (List.map (fun (fnm, et) -> hash_feed fc et (Printf.sprintf "(%s).%s" a (fname fnm))) (struct_fields st t))
+  | TNamed _ when is_data st t ->
+      let arms =
+        List.map
+          (fun ((v : variant_info), fs) ->
+            Printf.sprintf "case %d: { %s break; }" v.vindex
+              (String.concat " " (List.mapi (fun i (_, et) -> hash_feed fc et (variant_field st t v i a)) fs)))
+          (variants st t)
+      in
+      Printf.sprintf "stn_sip_word(&s, (uint64_t)%s); switch (%s) { %s }" (tag_of st t a) (tag_of st t a) (String.concat " " arms)
+  | _ -> Printf.sprintf "stn_sip_word(&s, %s);" (hash_call fc t a)
 
 (* The table of a Map[K, V] or a Set[K]: how its keys are hashed, compared, counted, and its values. *)
 and map_ops fc (t : ty) : string =
@@ -2792,10 +2801,20 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       unit_ ()
   | "put@Map" ->
       let fin = md 0 in
+      let kt = ts fc (List.hd tys) and vt = ts fc (List.nth tys 1) in
       let k = o 1 in
       let v = o 2 in
       let lv = fin () in
-      line fc "stn_map_put(&%s, &%s, &%s);" lv k v;
+      (match repr kt with
+       | TInt (IInt | I64 | U64) | TDur | TBytes | TStr ->
+           (* an entry that is there already, in a table nothing else holds, is found inline and its
+              value replaced in place; the key given is let go, as stn_map_put would *)
+           let p = fresh st "_p" in
+           line fc "%s* %s = stn_unique(%s) ? (%s*)%s : NULL;" (ct fc vt) p lv (ct fc vt) (map_find_call kt lv k);
+           line fc "if (%s) { %s %s *%s = %s; } else stn_map_put(&%s, &%s, &%s);" p
+             (if needs_rc st kt then drop_stmt st kt k else "")
+             (if needs_rc st vt then drop_stmt st vt ("*" ^ p) else "") p v lv k v
+       | _ -> line fc "stn_map_put(&%s, &%s, &%s);" lv k v);
       unit_ ()
   | "add@Set" ->
       let fin = md 0 in

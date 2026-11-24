@@ -6,6 +6,9 @@ use std::hint::black_box;
 use std::io;
 use std::time::Instant;
 
+#[derive(PartialEq, Eq, Hash)]
+struct Point { x: i64, y: i64 }
+
 fn key(i: i64, seed: i64) -> i64 { (i * 7919 + seed) % 1000003 }
 
 fn filled_map(n: i64, seed: i64) -> HashMap<i64, i64> {
@@ -89,6 +92,38 @@ fn run(name: &str, seed: i64) -> (u128, i64) {
             let d: HashSet<i64> = a.difference(&b).copied().collect();
             let elapsed = start.elapsed().as_nanos();
             (elapsed, u.len() as i64 * 3 + n.len() as i64 * 5 + d.len() as i64 * 7)
+        }
+        "map_struct_key" => {
+            let mut m: HashMap<Point, i64> = HashMap::new();
+            let mut sum = 0i64;
+            let start = Instant::now();
+            for i in 0..100000i64 { m.insert(Point { x: key(i, seed), y: i % 7 }, i); }
+            for i in 0..500000i64 {
+                match m.get(&Point { x: key(i % 200000, seed), y: i % 200000 % 7 }) { Some(v) => sum += *v, None => sum += 1 }
+            }
+            (start.elapsed().as_nanos(), m.len() as i64 + sum)
+        }
+        "map_tuple_key" => {
+            let mut m: HashMap<(i64, i64), i64> = HashMap::new();
+            let mut sum = 0i64;
+            let start = Instant::now();
+            for i in 0..100000i64 { m.insert((key(i, seed), i % 7), i); }
+            for i in 0..500000i64 {
+                match m.get(&(key(i % 200000, seed), i % 200000 % 7)) { Some(v) => sum += *v, None => sum += 1 }
+            }
+            (start.elapsed().as_nanos(), m.len() as i64 + sum)
+        }
+        "map_str_values" => {
+            // the values are shared strings, as Starnite's are: a clone is a count, not a copy
+            let words: Vec<std::rc::Rc<str>> = names(seed).into_iter().map(|w| std::rc::Rc::from(w.as_str())).collect();
+            let mut m: HashMap<i64, std::rc::Rc<str>> = HashMap::new();
+            let mut sum = 0i64;
+            let start = Instant::now();
+            for i in 0..200000i64 { m.insert(key(i % 50000, seed), words[(i % 512) as usize].clone()); }
+            for i in 0..500000i64 {
+                match m.get(&key(i % 100000, seed)) { Some(w) => sum += w.len() as i64, None => sum += 1 }
+            }
+            (start.elapsed().as_nanos(), m.len() as i64 + sum)
         }
         _ => panic!("unknown benchmark"),
     }

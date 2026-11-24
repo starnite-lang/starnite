@@ -6,3 +6,6 @@ map_remove_int
 map_count_str
 set_int
 set_union
+map_struct_key
+map_tuple_key
+map_str_values
