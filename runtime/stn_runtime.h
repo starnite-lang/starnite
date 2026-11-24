@@ -63,13 +63,39 @@ _Noreturn void stn_overflow(const char* file, int line, int col);
 _Noreturn void stn_div_zero(const char* file, int line, int col);
 
 /* ---- strings (section 3.6) ---- */
-/* Milestone 1 stores every string in a counted buffer; the 15-byte inline form arrives
-   with the layout work of milestone 2. */
+/* A Str is 16 bytes. A string of up to 15 bytes is stored inline: its bytes, zero padding, and its
+   length in the last byte. A longer one points to a counted buffer and holds its length, with the
+   top bit of the second word set. The form follows from the length alone, so two equal strings
+   have the same form, and two inline strings are equal exactly when their words are. */
+#if !defined(__BYTE_ORDER__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
+#error "the Str layout assumes a little-endian target"
+#endif
 typedef struct StnStrBuf { stn_header h; int64_t len; char data[]; } StnStrBuf;
-typedef StnStrBuf* StnStr;
+typedef struct StnStr { union { StnStrBuf* buf; uint64_t w0; }; uint64_t w1; } StnStr;
+#define STN_STR_INLINE_MAX 15
+#define STN_STR_HEAP_BIT (UINT64_C(1) << 63)
 
+static inline __attribute__((always_inline)) int stn_str_heap(StnStr s) { return (int)(s.w1 >> 63); }
+static inline __attribute__((always_inline)) int64_t stn_str_len(StnStr s) {
+    return stn_str_heap(s) ? (int64_t)(s.w1 & ~STN_STR_HEAP_BIT) : (int64_t)(s.w1 >> 56);
+}
+/* The bytes of a string; for an inline one they live in the value itself, so the pointer is good
+   only while *s is. */
+static inline __attribute__((always_inline)) const char* stn_str_ptr(const StnStr* s) {
+    return stn_str_heap(*s) ? s->buf->data : (const char*)s;
+}
 void   stn_str_release(void* p);
+static inline __attribute__((always_inline)) StnStr stn_str_dup(StnStr s) {
+    if (stn_str_heap(s)) stn_dup(s.buf);
+    return s;
+}
+static inline __attribute__((always_inline)) void stn_str_drop(StnStr s) {
+    if (stn_str_heap(s)) stn_drop(s.buf, stn_str_release);
+}
+/* Starts a string of len bytes in *s and returns where its bytes go. The caller writes all len. */
+char*  stn_str_start(StnStr* s, int64_t len);
 StnStr stn_str_new(const char* data, int64_t len);
+_Noreturn void stn_trap_str(const char* kind, const char* file, int line, int col, StnStr msg);
 StnStr stn_str_from_bytes(const char* data, int64_t len);   /* makes the bytes valid UTF-8 */
 StnStr stn_str_concat(StnStr a, StnStr b);
 StnStr stn_str_concat_n(int n, StnStr* parts);   /* borrows parts */
@@ -93,36 +119,38 @@ static inline uint64_t stn_load_u64(const char* p) {
 }
 
 static inline __attribute__((always_inline)) int stn_str_eq(StnStr a, StnStr b) {
-    if (a == b) return 1;
-    if (a->len != b->len) return 0;
-    size_t n = (size_t)a->len;
+    if (a.w0 == b.w0 && a.w1 == b.w1) return 1;           /* the same inline bytes, or the same buffer */
+    if (a.w1 != b.w1 || !stn_str_heap(a)) return 0;      /* lengths differ, or inline and unequal */
+    size_t n = (size_t)(a.w1 & ~STN_STR_HEAP_BIT);
+    const char* ad = a.buf->data;
+    const char* bd = b.buf->data;
 #if defined(__SSE2__)
-    if (n >= 16 && n <= 48) {
+    if (n <= 48) {
         __m128i first = _mm_cmpeq_epi8(
-            _mm_loadu_si128((const __m128i_u*)a->data),
-            _mm_loadu_si128((const __m128i_u*)b->data));
+            _mm_loadu_si128((const __m128i_u*)ad),
+            _mm_loadu_si128((const __m128i_u*)bd));
         if ((unsigned)_mm_movemask_epi8(first) != 0xffffu) return 0;
         __m128i last = _mm_cmpeq_epi8(
-            _mm_loadu_si128((const __m128i_u*)(a->data + n - 16)),
-            _mm_loadu_si128((const __m128i_u*)(b->data + n - 16)));
+            _mm_loadu_si128((const __m128i_u*)(ad + n - 16)),
+            _mm_loadu_si128((const __m128i_u*)(bd + n - 16)));
         if (n > 32) {
             __m128i middle = _mm_cmpeq_epi8(
-                _mm_loadu_si128((const __m128i_u*)(a->data + 16)),
-                _mm_loadu_si128((const __m128i_u*)(b->data + 16)));
+                _mm_loadu_si128((const __m128i_u*)(ad + 16)),
+                _mm_loadu_si128((const __m128i_u*)(bd + 16)));
             last = _mm_and_si128(last, middle);
         }
         return (unsigned)_mm_movemask_epi8(last) == 0xffffu;
     }
 #endif
-    return memcmp(a->data, b->data, n) == 0;
+    return memcmp(ad, bd, n) == 0;
 }
 int    stn_str_cmp(StnStr a, StnStr b);
 StnStr stn_str_slice(StnStr s, int64_t lo, int64_t hi, const char* file, int line, int col);
 static inline int64_t stn_str_byte_at_or_end(StnStr s, int64_t i) {
-    return (uint64_t)i < (uint64_t)s->len ? (unsigned char)s->data[i] : -1;
+    return (uint64_t)i < (uint64_t)stn_str_len(s) ? (unsigned char)stn_str_ptr(&s)[i] : -1;
 }
-#define STN_STR_DUP(s) (stn_dup(s), (s))
-#define STN_STR_DROP(s) stn_drop((s), stn_str_release)
+#define STN_STR_DUP(s) stn_str_dup(s)
+#define STN_STR_DROP(s) stn_str_drop(s)
 
 StnStr stn_show_i64(int64_t v);
 StnStr stn_show_u64(uint64_t v);
@@ -263,17 +291,20 @@ StnStr  stn_str_trim(StnStr s);
 uint8_t stn_str_contains_slow(StnStr s, StnStr sub);
 static inline uint8_t stn_str_contains(StnStr s, StnStr sub) {
 #if defined(__SSE2__)
+    int64_t s_len = stn_str_len(s);
+    const char* s_data = stn_str_ptr(&s);
+    const char* sub_data = stn_str_ptr(&sub);
     /* A four-byte needle can be verified without a memcmp call. Scan a
        final overlapping vector so both loads stay inside the string. */
-    if (sub->len == 4 && s->len >= 19 && s->len <= 64) {
+    if (stn_str_len(sub) == 4 && s_len >= 19 && s_len <= 64) {
         uint32_t needle;
-        memcpy(&needle, sub->data, sizeof needle);
-        __m128i first = _mm_set1_epi8(sub->data[0]);
-        __m128i last = _mm_set1_epi8(sub->data[3]);
-        size_t limit = (size_t)s->len - 19;
+        memcpy(&needle, sub_data, sizeof needle);
+        __m128i first = _mm_set1_epi8(sub_data[0]);
+        __m128i last = _mm_set1_epi8(sub_data[3]);
+        size_t limit = (size_t)s_len - 19;
         size_t i = 0;
         for (;;) {
-            const char* start = s->data + i;
+            const char* start = s_data + i;
             __m128i lo = _mm_loadu_si128((const __m128i_u*)start);
             __m128i hi = _mm_loadu_si128((const __m128i_u*)(start + 3));
             unsigned mask = (unsigned)_mm_movemask_epi8(
@@ -293,10 +324,12 @@ static inline uint8_t stn_str_contains(StnStr s, StnStr sub) {
     return stn_str_contains_slow(s, sub);
 }
 static inline uint8_t stn_str_starts_with(StnStr s, StnStr p) {
-    return p->len <= s->len && memcmp(s->data, p->data, (size_t)p->len) == 0;
+    int64_t n = stn_str_len(p);
+    return n <= stn_str_len(s) && memcmp(stn_str_ptr(&s), stn_str_ptr(&p), (size_t)n) == 0;
 }
 static inline uint8_t stn_str_ends_with(StnStr s, StnStr p) {
-    return p->len <= s->len && memcmp(s->data + (s->len - p->len), p->data, (size_t)p->len) == 0;
+    int64_t n = stn_str_len(p), m = stn_str_len(s);
+    return n <= m && memcmp(stn_str_ptr(&s) + (m - n), stn_str_ptr(&p), (size_t)n) == 0;
 }
 StnStr  stn_str_repeat(StnStr s, int64_t n, const char* file, int line, int col);
 int     stn_parse_int(StnStr s, int64_t* out);   /* 0 ok, 1 invalid, 2 out of range */
@@ -392,6 +425,7 @@ static inline uint64_t stn_hash_u64(uint64_t x) {
     return v0 ^ v1 ^ v2 ^ v3;
 }
 uint64_t stn_hash_bytes(const void* p, size_t n);
+static inline uint64_t stn_str_hash(StnStr s) { return stn_hash_bytes(stn_str_ptr(&s), (size_t)stn_str_len(s)); }
 /* equal floats hash alike: -0.0 is 0.0 */
 static inline uint64_t stn_hash_f64(double x) { uint64_t b; if (x == 0) x = 0; memcpy(&b, &x, 8); return stn_hash_u64(b); }
 /* SipHash-1-3 over a stream of 64-bit words, for keys made of several parts (a tuple, a struct,
@@ -458,11 +492,11 @@ static inline void* stn_map_find_i64(const StnMap* m, uint64_t key) {
     }
 }
 
-/* stn_map_find for a table whose keys are Str (STN_KEY_STR), inline. A key that is the very string
-   the table holds is found without comparing its bytes. */
+/* stn_map_find for a table whose keys are Str (STN_KEY_STR), inline. An inline key, or the very
+   string the table holds, is compared as two words. */
 static inline void* stn_map_find_str(const StnMap* m, StnStr key) {
     if (__builtin_expect(!m->ilog, 0)) return NULL;
-    uint64_t h = stn_hash_bytes(key->data, (size_t)key->len);
+    uint64_t h = stn_str_hash(key);
     uint64_t w = h | (uint64_t)(h == 0);
     uint64_t mask = ((uint64_t)1 << m->ilog) - 1, pos = (w >> 7) & mask, step = 0;
     int64_t cap = m->cap;

@@ -1,0 +1,48 @@
+# Strings of up to 15 bytes are stored inline (section 3.6); longer ones in a buffer. Every operation
+# must give the same results on either side of the boundary, and across it.
+fn show_len(s: Str) -> Str:
+    f"{len(s)}:{s}"
+
+fn main():
+    let base = "abcdefghijklmnopqrstuvwxyz"
+    var sizes: Array[Str] = []
+    for n in 13..19:
+        sizes.push(base[0..n])
+    for s in sizes:
+        print(show_len(s))
+
+    # equality and order across the boundary, and between strings built different ways
+    let fifteen = "abcdefghijklmno"
+    let sixteen = "abcdefghijklmnop"
+    print(f"{fifteen == base[0..15]} {sixteen == base[0..16]} {fifteen == sixteen[0..15]} {fifteen < sixteen} {sixteen > fifteen}")
+    print(f"{fifteen + "p" == sixteen} {sixteen[0..15] + "p" == sixteen} {"" == base[3..3]} {"a" + "" == "a"}")
+
+    # concatenation that crosses the boundary in both directions, and repeats
+    print(f"{"abcdefgh" + "ijklmnop"} {repeat("abc", 5)} {len(repeat("abc", 5))} {len(repeat("abc", 6))}")
+    print(join(["seven77", "eight888"], "") + " " + join(["a", "b", "c"], "-"))
+
+    # multibyte characters at the edge: 5 three-byte characters are 15 bytes, 6 are 18
+    let wide = "€€€€€€"
+    print(f"{len(wide)} {wide[0..15]} {len(wide[0..15])} {len(chars(wide))} {wide[3..18]}")
+
+    # trim, split and contains on both forms
+    print(f"[{trim("   fifteen bytes   ")}] [{trim("  sixteen bytes!  ")}] [{trim("noop")}]")
+    let parts = split("one,a much longer second field,,three-is-sixteen", ",")
+    print(f"{parts} {len(parts[1])} {len(parts[3])}")
+    print(f"{contains(sixteen, "nop")} {contains(fifteen, "nop")} {starts_with(sixteen, "abcdefghijklmnop")} {ends_with(fifteen, "jklmno")}")
+
+    # parsing from inline strings, including forms that need the slow path
+    print(f"{parse_int("123456789012345")} {parse_int("-1234567890123456")} {parse_float("1e5")} {parse_float("2.5E-3")}")
+
+    # map keys of both forms, found by keys built separately
+    var m: Map[Str, Int] = {}
+    for s in sizes:
+        m[s] = len(s)
+    m["abc" + "defghijklmnopq"] += 100
+    m[base[0..13]] += 1000
+    print(f"{m}")
+    var seen: Set[Str] = {}
+    for s in sizes:
+        seen.add(s[0..13])
+        seen.add(s)
+    print(f"{len(seen)} {contains(seen, "abcdefghijklmnopqr")} {contains(seen, "abcdefghijklmnopqrs")}")

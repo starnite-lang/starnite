@@ -165,8 +165,8 @@ let rec size_of st t =
   | TFloat | TDur | TBytes -> 8
   | TF32 | TChar -> 4
   | TBool | TUnit | TNever -> 1
-  | TStr | TArray _ | TFn _ -> 8
-  | TErr _ | TAny _ -> 16
+  | TArray _ | TFn _ -> 8
+  | TStr | TErr _ | TAny _ -> 16
   | TTuple ts -> List.fold_left (fun a t -> a + max 8 (size_of st t)) 0 ts
   | TNamed _ when is_struct st t -> List.fold_left (fun a (_, t) -> a + max 1 (size_of st t)) 0 (struct_fields st t)
   | TNamed _ when is_data st t -> if layout st t = LBoxed then 8 else 1 + payload_size st t
@@ -349,7 +349,8 @@ and emit_helpers st t =
 
 and dup_stmt st t e =
   match repr t with
-  | TStr | TArray _ | TFn _ | TNamed (("Map" | "Set"), _) -> Printf.sprintf "stn_dup(%s);" e
+  | TStr -> Printf.sprintf "stn_str_dup(%s);" e
+  | TArray _ | TFn _ | TNamed (("Map" | "Set"), _) -> Printf.sprintf "stn_dup(%s);" e
   | TErr _ -> Printf.sprintf "stn_error_dup(%s);" e
   | _ -> ensure_type st t; Printf.sprintf "dup_%s(%s);" (mangle t) e
 
@@ -369,7 +370,8 @@ let dup_expr st t e =
   if not (needs_rc st t) then e
   else
     match repr t with
-    | TStr | TArray _ | TFn _ | TNamed (("Map" | "Set"), _) -> Printf.sprintf "(stn_dup(%s), %s)" e e
+    | TStr -> Printf.sprintf "stn_str_dup(%s)" e
+    | TArray _ | TFn _ | TNamed (("Map" | "Set"), _) -> Printf.sprintf "(stn_dup(%s), %s)" e e
     | TErr _ -> Printf.sprintf "stn_error_dup(%s)" e
     | _ -> Printf.sprintf "dup_%s(%s)" (mangle t) e
 
@@ -411,9 +413,23 @@ let str_lit st s =
   | None ->
       let n = fresh st "strlit" in
       Hashtbl.replace st.strlits s n;
-      pr st.helpers "static struct { stn_header h; int64_t len; char data[%d]; } %s_obj = { { 1, 0, STN_NOCOUNT, 0 }, %d, %s };\n"
-        (String.length s + 1) n (String.length s) (c_string s);
-      pr st.helpers "#define %s ((StnStr)&%s_obj)\n" n n;
+      let len = String.length s in
+      if len <= 15 then begin
+        (* inline: the bytes in two little-endian words, the length in the last byte *)
+        let word lo hi =
+          let w = ref 0L in
+          for i = hi - 1 downto lo do
+            let b = if i < len then Char.code s.[i] else if i = 15 then len else 0 in
+            w := Int64.logor (Int64.shift_left !w 8) (Int64.of_int b)
+          done;
+          !w
+        in
+        pr st.helpers "#define %s ((StnStr){ .w0 = UINT64_C(0x%016Lx), .w1 = UINT64_C(0x%016Lx) })\n" n (word 0 8) (word 8 16)
+      end else begin
+        pr st.helpers "static struct { stn_header h; int64_t len; char data[%d]; } %s_obj = { { 1, 0, STN_NOCOUNT, 0 }, %d, %s };\n"
+          (len + 1) n len (c_string s);
+        pr st.helpers "#define %s ((StnStr){ .buf = (StnStrBuf*)&%s_obj, .w1 = UINT64_C(%d) | STN_STR_HEAP_BIT })\n" n n len
+      end;
       n
 
 let err_id st t =
@@ -1238,7 +1254,7 @@ and show_call fc t (a : string) : string =
   | TBool -> Printf.sprintf "stn_show_bool(%s)" a
   | TChar -> Printf.sprintf "stn_show_char(%s)" a
   | TUnit | TNever -> "stn_show_unit()"
-  | TStr -> Printf.sprintf "(stn_dup(%s), %s)" a a
+  | TStr -> Printf.sprintf "stn_str_dup(%s)" a
   | TDur -> Printf.sprintf "stn_show_dur(%s)" a
   | TBytes -> Printf.sprintf "stn_show_bytes(%s)" a
   | TErr _ -> Printf.sprintf "stn_show_error(%s)" a
@@ -1316,7 +1332,7 @@ and eq_call fc t a b : string =
 and hash_call fc t a : string =
   let st = fc.st in
   match repr t with
-  | TStr -> Printf.sprintf "stn_hash_bytes((%s)->data, (size_t)(%s)->len)" a a
+  | TStr -> Printf.sprintf "stn_str_hash(%s)" a
   | TInt _ | TBool | TChar | TDur | TBytes -> Printf.sprintf "stn_hash_u64((uint64_t)(%s))" a
   | TFloat | TF32 -> Printf.sprintf "stn_hash_f64((double)(%s))" a
   | TUnit | TNever -> "((uint64_t)0)"
@@ -2615,7 +2631,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       match (arg 0).a.e with
       | XVar v when Hashtbl.mem fc.cached v.vid -> value (snd (Hashtbl.find fc.cached v.vid))
       | _ -> value (Printf.sprintf "stn_len(%s)" (b 0)))
-  | "len@Str" -> value (Printf.sprintf "(%s)->len" (b 0))
+  | "len@Str" -> value (Printf.sprintf "stn_str_len(%s)" (b 0))
   | "push@Array" ->
       let fin = md 0 in
       let x = o 1 in
@@ -2907,7 +2923,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       let x = expr fc (arg 0).a in
       { c = tmp fc t (own fc x t); owned = true }
   | "unreachable@Str" ->
-      line fc "stn_trap(\"unreachable\", %s, (%s)->data);" la (b 0);
+      line fc "stn_trap_str(\"unreachable\", %s, %s);" la (b 0);
       let res = fresh st "_r" in
       line fc "%s %s;" (ct fc t) res;
       line fc "memset(&%s, 0, sizeof %s);" res res;
@@ -2942,14 +2958,10 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       let prefix = name = "starts_with@Str" in
       (match (arg 1).a.e with
        | XLit (LStr literal) ->
-           let s =
-             match (arg 0).a.e with
-             | XVar v when not v.vcell -> var_read fc v
-             | _ -> tmp fc TStr (b 0)
-           in
+           let s = tmp fc TStr (b 0) in
            let n = String.length literal in
-           let offset = if prefix then "" else Printf.sprintf " + (%s->len - %d)" s n in
-           let data = Printf.sprintf "(%s->data%s)" s offset in
+           let offset = if prefix then "" else Printf.sprintf " + (stn_str_len(%s) - %d)" s n in
+           let data = Printf.sprintf "(stn_str_ptr(&%s)%s)" s offset in
            let cmp at width =
              let bytes = c_string (String.sub literal at width) in
              if width = 2 || width = 4 || width = 8 then
@@ -2966,7 +2978,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
                if n = width then cmp 0 width
                else Printf.sprintf "(%s & %s)" (cmp 0 width) (cmp (n - width) width)
            in
-           value (Printf.sprintf "(%s->len >= %d && %s)" s n same)
+           value (Printf.sprintf "(stn_str_len(%s) >= %d && %s)" s n same)
        | _ ->
            let s = tmp fc TStr (b 0) in
            let p = b 1 in
@@ -3164,7 +3176,7 @@ let emit (prog : tprog) ~debug : string =
   if sig_can_fail main_sg then begin
     pr out "  StnUnit r; StnError e;\n  if (%s(&r, &e)) {\n" main_c;
     pr out "    StnStr s = stn_show_error(e);\n    fflush(stdout);\n";
-    pr out "    stn_runtime_flush_for_error();\n    fprintf(stderr, \"error: %%.*s\\n\", (int)s->len, s->data);\n";
+    pr out "    stn_runtime_flush_for_error();\n    fprintf(stderr, \"error: %%.*s\\n\", (int)stn_str_len(s), stn_str_ptr(&s));\n";
     pr out "    STN_STR_DROP(s); stn_error_drop(e);\n    stn_runtime_exit(1);\n  }\n"
   end else pr out "  %s();\n" main_c;
   pr out "  stn_runtime_exit(0);\n  return 0;\n}\n";
