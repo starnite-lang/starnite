@@ -25,6 +25,8 @@ type st = {
   instances : (string, unit) Hashtbl.t;
   queue : (string * string * ty list) Queue.t;
   strlits : (string, string) Hashtbl.t;
+  self_sliced : (int, unit) Hashtbl.t;   (* variables assigned a slice of themselves somewhere *)
+  view_vars : (int, unit) Hashtbl.t;     (* variables that hold only views of strings that outlive them *)
   loops : (string, bool) Hashtbl.t;   (* whether a function loops, itself or through a call *)
   in_main : bool ref;                  (* the body being generated is main's *)
   entries : (string, string * string) Hashtbl.t;  (* entry wrappers that main calls: prototype and definition, by instance *)
@@ -353,10 +355,11 @@ and emit_helpers st t =
 
 and dup_stmt st t e =
   match repr t with
-  | TStr -> Printf.sprintf "stn_str_dup(%s);" e
+  (* a Str is assigned its duplicate: the duplicate of a view is a buffer of its own *)
+  | TStr -> Printf.sprintf "%s = stn_str_dup(%s);" e e
   | TArray _ | TFn _ | TNamed (("Map" | "Set"), _) -> Printf.sprintf "stn_dup(%s);" e
   | TErr _ -> Printf.sprintf "stn_error_dup(%s);" e
-  | _ -> ensure_type st t; Printf.sprintf "dup_%s(%s);" (mangle t) e
+  | _ -> ensure_type st t; Printf.sprintf "%s = dup_%s(%s);" e (mangle t) e
 
 and drop_stmt st t e =
   match repr t with
@@ -569,6 +572,9 @@ let rec writes_nothing (e : texpr) =
   | XSlice (a, lo, hi) -> writes_nothing a && writes_nothing lo && writes_nothing hi
   | XBin (_, a, b) -> writes_nothing a && writes_nothing b
   | XTuple xs | XArray xs | XStruct (_, _, xs) | XVariant (_, _, _, xs) | XFStr xs -> List.for_all writes_nothing xs
+  (* a length is read, whatever it is the length of *)
+  | XCall (CBuiltin (name, _), args, _) when String.length name > 4 && String.sub name 0 4 = "len@" ->
+      List.for_all (fun a -> a.amode = MBorrow && writes_nothing a.a) args
   | _ -> false
 
 (* [first] is a borrowed Str whose use waits for [later], which is about to be generated. Operands
@@ -816,6 +822,10 @@ let rec expr fc (e : texpr) : r =
       let lov = tmp fc (TInt IInt) (expr fc lo).c in
       let hiv = tmp fc (TInt IInt) (expr fc hi).c in
       (match repr (ts fc a.ty) with
+       (* a slice of a string that cannot change while it is in scope is a view of it: nothing
+          is copied until the slice is stored or returned, when its duplicate is a copy *)
+       | TStr when view_source fc a ->
+           { c = tmp fc t (Printf.sprintf "stn_str_view(%s, %s, %s, %s)" (sref fc av) lov hiv (loc_args e.l)); owned = false }
        | TStr -> { c = tmp fc t (Printf.sprintf "stn_str_slice(%s, %s, %s, %s)" (sref fc av) lov hiv (loc_args e.l)); owned = true }
        | _ -> { c = tmp fc t (Printf.sprintf "stn_array_slice(%s, %s, %s, %s)" av lov hiv (loc_args e.l)); owned = true })
   | XTuple es ->
@@ -2548,6 +2558,38 @@ and stable_string_source fc (e : texpr) =
   | XVar v | XIndex ({ e = XVar v; _ }, _) -> immutable v
   | _ -> false
 
+(* The variables of a body whose every assignment is a slice of themselves, `v = v[a..b]` with
+   bounds that write nothing, and which are never passed as mut: candidates to be kept as views. *)
+and note_self_sliced st (body : texpr) =
+  let sliced = Hashtbl.create 8 and spoiled = Hashtbl.create 8 in
+  walk_texpr
+    (fun (x : texpr) -> match x.e with
+       | XCall (_, args, _) ->
+           List.iter (fun a -> if a.amode = MMut then iter_vars (fun v -> Hashtbl.replace spoiled v.vid ()) a.a) args
+       | _ -> ())
+    (fun (s : tstmt) -> match s.st with
+       | SAssign ({ via = None; path = []; root; _ }, { e = XSlice ({ e = XVar src; _ }, lo, hi); _ })
+         when src.vid = root.vid && writes_nothing lo && writes_nothing hi -> Hashtbl.replace sliced root.vid ()
+       | SAssign (p, _) -> Hashtbl.replace spoiled p.root.vid ()
+       | SFor (_, IArray (a, MMut), _) -> iter_vars (fun v -> Hashtbl.replace spoiled v.vid ()) a
+       | _ -> ())
+    body;
+  Hashtbl.iter (fun vid () -> if not (Hashtbl.mem spoiled vid) then Hashtbl.replace st.self_sliced vid ()) sliced
+
+(* A string that a view may point into: a binding that cannot change and lives to the end of its
+   scope, or a variable that is itself kept as a view of one. *)
+and view_source fc (e : texpr) =
+  stable_string_source fc e
+  || (match e.e with
+      | XVar v -> Hashtbl.mem fc.st.view_vars v.vid
+      | _ -> false)
+
+(* A let or var of a slice of such a string keeps the view. *)
+and binds_view fc (v : var) (e : texpr) =
+  match repr (ts fc e.ty), e.e with
+  | TStr, XSlice (a, _, _) when not v.vcell -> view_source fc a
+  | _ -> false
+
 and borrows_array_string fc (v : var) (e : texpr) =
   match repr (ts fc e.ty), e.e with
   | TStr, XIndex _ when not v.vmut && not v.vcell -> stable_string_source fc e
@@ -2597,6 +2639,34 @@ and stmt fc (s : tstmt) =
             Hashtbl.replace fc.vars v.vid (VPtr n)
         | _ -> declare_var ~owned:false fc v (tmp fc e.ty c));
        fc.frames <- { fk = FStmt; owned = [] } :: fc.frames
+   | SLet (TPVar v, e) when binds_view fc v e ->
+       (* the view is the variable: it is not counted, and it cannot outlive what it views *)
+       let c = (expr fc e).c in
+       let f = List.hd fc.frames in
+       fc.frames <- List.tl fc.frames;
+       emit_drops fc f;
+       declare_var ~owned:false fc v c;
+       fc.frames <- { fk = FStmt; owned = [] } :: fc.frames
+   | SVar (v, e) when Hashtbl.mem st.self_sliced v.vid && not v.vcell && repr (ts fc v.vty) = TStr ->
+       (* a variable whose only assignments are slices of itself (`rest = rest[k..]`) is kept as a
+          view, which each of them moves along. It views a string that outlives it: the binding it
+          starts from when that cannot change, otherwise a value held here, beside it, to the end
+          of its scope. *)
+       let x = expr fc e in
+       let borrowed = (not x.owned) && (view_source fc e || binds_view fc v e || (match e.e with XLit _ -> true | _ -> false)) in
+       let f = List.hd fc.frames in
+       fc.frames <- List.tl fc.frames;
+       let from =
+         if borrowed then tmp fc e.ty x.c
+         else begin
+           let held = tmp fc e.ty (own fc x e.ty) in
+           own_in fc held e.ty;   (* in the enclosing scope, where the variable is *)
+           held
+         end in
+       emit_drops fc f;
+       declare_var ~owned:false fc v (Printf.sprintf "stn_str_as_view(%s)" from);
+       Hashtbl.replace st.view_vars v.vid ();
+       fc.frames <- { fk = FStmt; owned = [] } :: fc.frames
    | SLet (TPVar v, e) | SVar (v, e) ->
        let x = expr fc e in
        (* evaluate fully before the statement's temporaries are released *)
@@ -2641,6 +2711,14 @@ and stmt fc (s : tstmt) =
        let rv = tmp fc (TInt IInt) (borrow fc x rhs.ty) in
        let dst = var_read fc root in
        line fc "if (__builtin_add_overflow(%s, %s, &%s)) stn_overflow(%s);" dst rv dst (loc_args e.l)
+   | SAssign ({ via = None; path = []; root; _ }, { e = XSlice ({ e = XVar src; _ }, lo, hi); l; _ })
+     when src.vid = root.vid && not root.vcell && repr (ts fc root.vty) = TStr
+          && (match Hashtbl.find_opt fc.vars root.vid with Some (VDirect _) -> true | _ -> false)
+          && writes_nothing lo && writes_nothing hi ->
+       (* `v = v[a..b]`: a view moves, a buffer of v's own is cut down in place *)
+       let lov = tmp fc (TInt IInt) (expr fc lo).c in
+       let hiv = tmp fc (TInt IInt) (expr fc hi).c in
+       line fc "stn_str_slice_self(&%s, %s, %s, %s);" (var_read fc root) lov hiv (loc_args l)
    | SAssign (p, e) ->
        let x = expr fc e in
        let nv = tmp fc p.pty (own fc x e.ty) in
@@ -3189,6 +3267,7 @@ let compile_instance st cname uname tys =
      the C compiler loses what the restrict parameters of the functions it inlines said (the
      spectral-norm benchmark ran 2.1 times as long) *)
   let is_main = match st.prog.main with Some m -> m = uname | None -> false in
+  note_self_sliced st tf.fbody;
   pr b "%s%s {\n" (if is_main then "" else "STN_HOT ") header;
   (* the entry main calls this through, if it loops: the same parameters, hot, never inlined *)
   if not (is_main || lend) then begin
@@ -3288,7 +3367,7 @@ let emit (prog : tprog) ~debug : string =
     prog; fwd = Buffer.create 1024; typedefs = Buffer.create 4096; boxed_bodies = Buffer.create 1024;
     protos = Buffer.create 4096; helpers = Buffer.create 4096; funcs = Buffer.create 16384;
     defined = Hashtbl.create 64; pending_boxed = Queue.create (); instances = Hashtbl.create 64;
-    queue = Queue.create (); strlits = Hashtbl.create 64; loops = Hashtbl.create 64; in_main = ref false; entries = Hashtbl.create 8; entry_defs = Hashtbl.create 32; errtypes = Hashtbl.create 8;
+    queue = Queue.create (); strlits = Hashtbl.create 64; self_sliced = Hashtbl.create 16; view_vars = Hashtbl.create 16; loops = Hashtbl.create 64; in_main = ref false; entries = Hashtbl.create 8; entry_defs = Hashtbl.create 32; errtypes = Hashtbl.create 8;
     layouts = Hashtbl.create 64; debug; counter = 0 }
   in
   let main_u = match prog.main with Some m -> m | None -> raise (Unsupported ("no main function", Syntax.noloc)) in

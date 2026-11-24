@@ -1,0 +1,78 @@
+# A slice of a string that cannot change is a view of it (section 3.6): no bytes are copied until
+# the slice is stored or returned. A variable that is only ever cut down, `rest = rest[k..]`, is
+# kept as a view too, and one that owns its buffer is cut down in place. None of it can be seen:
+# every result here is what copying gives.
+type Token = struct(text: Str, at: Int)
+
+fn first_word(s: Str) -> Str:
+    var i = 0
+    while i < len(s) and byte_at_or_end(s, i) != 32:
+        i += 1
+    s[0..i]
+
+fn keep(mut out: Array[Str], s: Str):
+    out.push(s)
+
+fn words_of(text: Str) -> Array[Token]:
+    var out: Array[Token] = []
+    var rest = text
+    var at = 0
+    while len(rest) > 0:
+        var i = 0
+        while i < len(rest) and byte_at_or_end(rest, i) != 32:
+            i += 1
+        if i > 0:
+            out.push(Token(rest[0..i], at))
+        let step = if i < len(rest): i + 1 else: i
+        rest = rest[step..len(rest)]
+        at += step
+    out
+
+fn grow_then_cut(seed: Str) -> Str:
+    var s = seed + " and a tail long enough to live in a buffer of its own"
+    s = s[4..len(s)]
+    s = s[0..len(s) - 5]
+    let other = s
+    s = s[2..len(s)]
+    f"{s}|{other}"
+
+fn main():
+    let line = "the quick brown fox jumps over the lazy dog, again and again and again"
+    let head = line[0..19]
+    let tail = line[20..len(line)]
+    let inner = tail[6..30]
+    print(f"[{head}] [{tail}] [{inner}]")
+    print(f"{len(head)} {head == "the quick brown fox"} {inner < tail} {contains(tail, inner)} {starts_with(inner, "over")}")
+
+    # views that escape: returned, stored in an array and a struct, used as a map key
+    print(first_word("supercalifragilisticexpialidocious and more"))
+    var kept: Array[Str] = []
+    keep(mut kept, line[4..35])
+    kept.push(tail)
+    kept.push(inner)
+    var counts: Map[Str, Int] = {}
+    counts[line[0..25]] += 1
+    counts[line[0..25]] += 1
+    counts[inner] += 5
+    print(f"{kept} {counts}")
+
+    # a variable cut down from the front, the tokens taken from it stored as they go
+    for t in words_of("alpha  beta gamma-is-a-longer-token-than-fifteen-bytes delta"):
+        print(f"{t.at}:{t.text}")
+
+    # a buffer of its own is cut down in place, and left alone once it is shared
+    print(grow_then_cut("abc"))
+
+    # a view var that starts from a value of its own, and numbers parsed from views
+    var digits = repeat("1234567890.5 ", 4)
+    var sum = 0.0
+    while len(digits) > 0:
+        sum = sum + parse_float(digits[0..12])
+        digits = digits[13..len(digits)]
+    let big = "value=123456789012345678 and 2.5e3 trailing"
+    print(f"{sum} {parse_int(big[6..24])} {parse_float(big[29..34])} {(try parse_int(big[0..20])).is_ok()}")
+
+    # multibyte text, and a slice that does not fall on a character
+    let wide = "€€€€€€€€€€ wide"
+    let w = wide[3..27]
+    print(f"{w} {len(w)} {len(chars(w))} {(try parse_int(w)).is_ok()}")

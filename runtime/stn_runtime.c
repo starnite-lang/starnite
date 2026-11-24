@@ -242,6 +242,60 @@ StnStr stn_str_slice(const StnStr* s, int64_t lo, int64_t hi, const char* file, 
     return stn_str_new(d + lo, hi - lo);
 }
 
+static void stn_slice_check(const char* d, int64_t n, int64_t lo, int64_t hi, const char* file, int line, int col) {
+    if (lo < 0 || hi > n || lo > hi) {
+        char buf[96];
+        snprintf(buf, sizeof buf, "slice %lld..%lld, length %lld", (long long)lo, (long long)hi, (long long)n);
+        stn_trap("index out of range", file, line, col, buf);
+    }
+    if (!stn_boundary(d, n, lo) || !stn_boundary(d, n, hi))
+        stn_trap("index out of range", file, line, col, "slice does not fall on character boundaries");
+}
+
+/* the bytes at d, n of them and more than fit inline, as a view */
+static inline StnStr stn_view_of(const char* d, int64_t n) {
+    StnStr v;
+    v.buf = (StnStrBuf*)(void*)((char*)(uintptr_t)d - offsetof(StnStrBuf, data));
+    v.w1 = (uint64_t)n | STN_STR_HEAP_BIT | STN_STR_VIEW_BIT;
+    return v;
+}
+
+_Noreturn void stn_slice_trap(int64_t n, int64_t lo, int64_t hi, const char* file, int line, int col) {
+    if (lo < 0 || hi > n || lo > hi) {
+        char buf[96];
+        snprintf(buf, sizeof buf, "slice %lld..%lld, length %lld", (long long)lo, (long long)hi, (long long)n);
+        stn_trap("index out of range", file, line, col, buf);
+    }
+    stn_trap("index out of range", file, line, col, "slice does not fall on character boundaries");
+}
+
+/* s = s[lo..hi]. A view moves along its bytes; a buffer nothing else holds is cut down in place;
+   a shared one is left to its other holders. */
+void stn_str_slice_self(StnStr* s, int64_t lo, int64_t hi, const char* file, int line, int col) {
+    int64_t n;
+    const char* d = stn_str_span(s, &n);
+    stn_slice_check(d, n, lo, hi, file, line, col);
+    int64_t k = hi - lo;
+    if (k == n) return;
+    if (k <= STN_STR_INLINE_MAX) {
+        StnStr t = stn_str_small(d + lo, k);
+        stn_str_drop(*s);
+        *s = t;
+    } else if (s->w1 & STN_STR_VIEW_BIT) {
+        *s = stn_view_of(d + lo, k);
+    } else if (stn_unique(s->buf)) {
+        StnStrBuf* b = s->buf;
+        if (lo) memmove(b->data, b->data + lo, (size_t)k);
+        b->data[k] = 0;
+        b->len = k;
+        s->w1 = (uint64_t)k | STN_STR_HEAP_BIT;
+    } else {
+        StnStr t = stn_str_new_heap(d + lo, k);
+        stn_str_drop(*s);
+        *s = t;
+    }
+}
+
 StnStr stn_show_i64(int64_t v) { char b[32]; int n = snprintf(b, sizeof b, "%lld", (long long)v); return stn_str_new(b, n); }
 StnStr stn_show_u64(uint64_t v) { char b[32]; int n = snprintf(b, sizeof b, "%llu", (unsigned long long)v); return stn_str_new(b, n); }
 
@@ -1578,12 +1632,25 @@ int stn_parse_float(const StnStr* s, double* out) {
         char c = d[i];
         if (!((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E')) return 1;
     }
-    /* strtod needs a terminator: a heap buffer has one, inline bytes are copied out */
-    char text[STN_STR_INLINE_MAX + 1];
-    if (!stn_str_heap(*s)) { memcpy(text, d, (size_t)n); text[n] = 0; d = text; }
+    /* strtod needs a terminator, which only a buffer of the string's own has: inline bytes and
+       the bytes of a view are copied out */
+    char text[64];
+    char* copy = NULL;
+    if (!stn_str_heap(*s) || (s->w1 & STN_STR_VIEW_BIT)) {
+        char* to = text;
+        if ((size_t)n >= sizeof text) {
+            copy = to = malloc((size_t)n + 1);
+            if (!to) stn_trap("out of memory", "<runtime>", 0, 0, "could not copy a number");
+        }
+        memcpy(to, d, (size_t)n);
+        to[n] = 0;
+        d = to;
+    }
     char* end;
     *out = strtod(d, &end);
-    return end != d + n;
+    int bad = end != d + n;
+    free(copy);
+    return bad;
 }
 
 void stn_runtime_flush_for_error(void) { stn_flush(); }
