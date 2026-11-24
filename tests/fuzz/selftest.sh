@@ -115,23 +115,25 @@ fault_split_stdout() { split_fault split-stdout; }
 # the message is compared as it is, whatever it says. Status 2 without that header first is an
 # uncaught exception of the compiler, which begins with a header of its own, and is not alike.
 same_run() {
-    "$starnite" run --interp "$1" > "$tmp/s.out" 2> "$tmp/s.err"; s1=$?
-    "$starnite" run --interp "$2" > "$tmp/o.out" 2> "$tmp/o.err"; s2=$?
+    # the checks run at the same time: the files are the caller's own, named by its third argument
+    w="$tmp/same-$3"
+    "$starnite" run --interp "$1" > "$w.s.out" 2> "$w.s.err"; s1=$?
+    "$starnite" run --interp "$2" > "$w.o.out" 2> "$w.o.err"; s2=$?
     [ "$s1" = "$s2" ] || return 1
     case $s1 in
         0) ;;
         2) for f in s o; do
-               first=$(head -n 1 "$tmp/$f.err")
+               first=$(head -n 1 "$w.$f.err")
                # a stack overflow has no place, and is compared as it is
                [ "$first" = 'trap: stack overflow' ] && continue
                # the place is the last `:LINE:COL` of the line; the path before it may hold spaces
                printf '%s\n' "$first" | grep -q '^trap: .* at ..*:[0-9][0-9]*:[0-9][0-9]*$' || return 1
                # the kind of a trap holds no ` at `, so the first one on the line begins the place
-               sed '1s/ at .*$//' "$tmp/$f.err" > "$tmp/$f.cut" && mv "$tmp/$f.cut" "$tmp/$f.err"
+               sed '1s/ at .*$//' "$w.$f.err" > "$w.$f.cut" && mv "$w.$f.cut" "$w.$f.err"
            done ;;
         *) return 1 ;;
     esac
-    cmp -s "$tmp/s.out" "$tmp/o.out" && cmp -s "$tmp/s.err" "$tmp/o.err"
+    cmp -s "$w.s.out" "$w.o.out" && cmp -s "$w.s.err" "$w.o.err"
 }
 split_fault() {
     fault=$1
@@ -140,14 +142,14 @@ split_fault() {
         if [ "$("$fuzz" --print --seed "$s" | head -1)" = '# module' ]; then seed=$s; break; fi
     done
     if [ -z "$seed" ]; then bad "fault $fault: none of 50 programs is split across a module"; return; fi
-    d="$tmp/split"
+    d="$tmp/split-$fault"
     out=$(with_fault "$fault" --no-negative --seed "$seed" --count 1 --shrink --keep "$d" 2>&1); status=$?
     m="$d/case$seed.min.stn"
     if [ $status != 1 ] || ! printf '%s\n' "$out" | grep -q "split across a module"; then
         bad "fault $fault: the fuzzer did not report a difference (seed $seed)"; printf '%s\n' "$out" | tail -10
     elif [ ! -f "$m" ] || [ "$(head -1 "$m")" != '# module' ]; then bad "fault $fault: the shrunk program is not split (seed $seed)"
     elif [ "$(lines "$m")" -gt 40 ]; then bad "fault $fault: the shrunk program has $(lines "$m") lines"
-    elif ! same_run "$d/case$seed.min.split/main.stn" "$m"; then
+    elif ! same_run "$d/case$seed.min.split/main.stn" "$m" "$fault"; then
         bad "fault $fault: the real compiler does not run the shrunk program alike in two files and in one"
     else ok "fault $fault: $(lines "$d/case$seed.stn") lines shrunk to $(lines "$m")"; fi
 }
