@@ -76,3 +76,11 @@ fn main():
     let wide = "€€€€€€€€€€ wide"
     let w = wide[3..27]
     print(f"{w} {len(w)} {len(chars(w))} {(try parse_int(w)).is_ok()}")
+
+    # views at offsets of every alignment into a buffer of the program's own
+    let owner = repeat("abcdefghij", 3)
+    var seen = ""
+    for at in 1..9:
+        let piece = owner[at..at + 17]
+        seen = seen + f"{piece[0..1]}{len(piece)}{piece == owner[at..at + 17]} "
+    print(f"{owner[1..25]} {seen}")

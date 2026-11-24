@@ -125,7 +125,7 @@ char* stn_str_start(StnStr* s, int64_t len) {
     StnStrBuf* b = (StnStrBuf*)stn_alloc(sizeof(StnStrBuf) + (size_t)len + 1);
     b->len = len;
     b->data[len] = 0;
-    s->buf = b;
+    s->ptr = b->data;
     s->w1 = (uint64_t)len | STN_STR_HEAP_BIT;
     return b->data;
 }
@@ -255,7 +255,7 @@ static void stn_slice_check(const char* d, int64_t n, int64_t lo, int64_t hi, co
 /* the bytes at d, n of them and more than fit inline, as a view */
 static inline StnStr stn_view_of(const char* d, int64_t n) {
     StnStr v;
-    v.buf = (StnStrBuf*)(void*)((char*)(uintptr_t)d - offsetof(StnStrBuf, data));
+    v.ptr = d;
     v.w1 = (uint64_t)n | STN_STR_HEAP_BIT | STN_STR_VIEW_BIT;
     return v;
 }
@@ -283,8 +283,8 @@ void stn_str_slice_self(StnStr* s, int64_t lo, int64_t hi, const char* file, int
         *s = t;
     } else if (s->w1 & STN_STR_VIEW_BIT) {
         *s = stn_view_of(d + lo, k);
-    } else if (stn_unique(s->buf)) {
-        StnStrBuf* b = s->buf;
+    } else if (stn_unique(stn_str_buf(*s))) {
+        StnStrBuf* b = stn_str_buf(*s);
         if (lo) memmove(b->data, b->data + lo, (size_t)k);
         b->data[k] = 0;
         b->len = k;
@@ -921,7 +921,7 @@ StnStr stn_read_all(const char* file, int line, int col) {
     s->len = (int64_t)len;
     s->data[len] = 0;
     StnStr text;
-    text.buf = s;
+    text.ptr = s->data;
     text.w1 = (uint64_t)len | STN_STR_HEAP_BIT;
     return text;
 }

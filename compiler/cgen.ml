@@ -435,7 +435,7 @@ let str_lit st s =
       end else begin
         pr st.helpers "static struct { stn_header h; int64_t len; char data[%d]; } %s_obj = { { 1, 0, STN_NOCOUNT, 0 }, %d, %s };\n"
           (len + 1) n len (c_string s);
-        pr st.helpers "#define %s ((StnStr){ .buf = (StnStrBuf*)&%s_obj, .w1 = UINT64_C(%d) | STN_STR_HEAP_BIT })\n" n n len
+        pr st.helpers "#define %s ((StnStr){ .ptr = %s_obj.data, .w1 = UINT64_C(%d) | STN_STR_HEAP_BIT })\n" n n len
       end;
       n
 
