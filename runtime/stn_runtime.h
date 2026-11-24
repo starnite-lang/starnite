@@ -328,11 +328,14 @@ typedef struct StnMap {
     int64_t cap;          /* entries there is room for */
     uint32_t ilog;        /* the index has 1 << ilog slots; 0 while nothing is allocated */
     uint32_t stride;      /* bytes per entry: 8 of hash word, the key, the value */
+    uint32_t koff;        /* offset of the key in an entry: 8 after the hash word, or 0 for 64-bit integer keys,
+                             whose hash is worked out again when it is needed */
     uint32_t voff;        /* offset of the value in an entry */
     const StnMapOps* ops;
     uint8_t* index;       /* the control bytes of the slots, then the places they name */
     uint8_t* places;
     char* entries;
+    uint64_t* dead;       /* with no hash word: a bit for each removed entry, or NULL when there is none */
 } StnMap;
 
 void     stn_map_release(void* p);
@@ -350,11 +353,17 @@ void*    stn_map_slot_ref(StnMap** pm, const void* key, int* fresh);
 /* takes the key out; its value moves to out when out is not NULL, and is dropped otherwise */
 int      stn_map_remove(StnMap** pm, const void* key, void* out);
 void     stn_map_clear(StnMap** pm);
-/* entries in insertion order: start with *pos = 0; NULL at the end. The key is at entry + 8. */
+/* whether the entry at place i has been removed */
+static inline int stn_map_dead(const StnMap* m, int64_t i, const char* e) {
+    if (m->koff) return *(const uint64_t*)e == 0;
+    return m->dead && ((m->dead[i >> 6] >> (i & 63)) & 1);
+}
+/* entries in insertion order: start with *pos = 0; NULL at the end. The key is at entry + koff. */
 static inline char* stn_map_next(const StnMap* m, int64_t* pos) {
     while (*pos < m->used) {
-        char* e = m->entries + (size_t)(*pos)++ * m->stride;
-        if (*(const uint64_t*)e) return e;
+        int64_t i = (*pos)++;
+        char* e = m->entries + (size_t)i * m->stride;
+        if (!stn_map_dead(m, i, e)) return e;
     }
     return NULL;
 }
@@ -417,8 +426,9 @@ static inline void* stn_map_find_i64(const StnMap* m, uint64_t key) {
             }
             char* e = m->entries + (size_t)place * m->stride;
             uint64_t k;
-            memcpy(&k, e + 8, 8);
-            if (*(const uint64_t*)e == w && k == key) return e + m->voff;
+            memcpy(&k, e, 8);
+            /* a removed entry keeps its key, but its control byte no longer matches */
+            if (k == key) return e + m->voff;
         }
         if (unused_free) return NULL;
         step += 16;

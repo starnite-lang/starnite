@@ -2057,9 +2057,9 @@ and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) ?pop_array ?i
         if source = "entries@Map" then begin
           let vt = List.nth tys 1 in
           let pair = TTuple [ kt; vt ] in
-          (pair, tmp fc pair (Printf.sprintf "(%s){ *(%s*)(%s + 8), *(%s*)(%s + %s->voff) }" (ct fc pair) (ct fc kt) e (ct fc vt) e mv))
+          (pair, tmp fc pair (Printf.sprintf "(%s){ *(%s*)(%s + %s->koff), *(%s*)(%s + %s->voff) }" (ct fc pair) (ct fc kt) e mv (ct fc vt) e mv))
         end
-        else (kt, tmp fc kt (Printf.sprintf "*(%s*)(%s + 8)" (ct fc kt) e))
+        else (kt, tmp fc kt (Printf.sprintf "*(%s*)(%s + %s->koff)" (ct fc kt) e mv))
       in
       let _, binds = pat_test fc et p x in
       bind_pattern fc binds;
@@ -2700,7 +2700,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       let a = tmp fc (TArray pair) (Printf.sprintf "stn_array_new(%s, (%s)->len > 0 ? (%s)->len : 1)" (elem_ops st pair) m m) in
       let pos = fresh st "_pos" and e = fresh st "_e" in
       line fc "{ int64_t %s = 0; for (char* %s; (%s = stn_map_next(%s, &%s)); ) {" pos e e m pos;
-      line fc "  %s _k = *(%s*)(%s + 8); %s _v = *(%s*)(%s + (%s)->voff);" (cty st kt) (cty st kt) e (cty st vt) (cty st vt) e m;
+      line fc "  %s _k = *(%s*)(%s + (%s)->koff); %s _v = *(%s*)(%s + (%s)->voff);" (cty st kt) (cty st kt) e m (cty st vt) (cty st vt) e m;
       line fc "  ((%s*)%s->data)[%s->len++] = (%s){ %s, %s };" (cty st pair) a a (cty st pair) (dup_expr st kt "_k") (dup_expr st vt "_v");
       line fc "} }";
       { c = a; owned = true }
@@ -2710,7 +2710,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       let a = tmp fc (TArray kt) (Printf.sprintf "stn_array_new(%s, (%s)->len > 0 ? (%s)->len : 1)" (elem_ops st kt) m m) in
       let pos = fresh st "_pos" and e = fresh st "_e" in
       line fc "{ int64_t %s = 0; for (char* %s; (%s = stn_map_next(%s, &%s)); ) {" pos e e m pos;
-      line fc "  %s _k = *(%s*)(%s + 8);" (cty st kt) (cty st kt) e;
+      line fc "  %s _k = *(%s*)(%s + (%s)->koff);" (cty st kt) (cty st kt) e m;
       line fc "  ((%s*)%s->data)[%s->len++] = %s;" (cty st kt) a a (dup_expr st kt "_k");
       line fc "} }";
       { c = a; owned = true }
@@ -2768,7 +2768,12 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       let k = tmp fc (ts fc (List.hd tys)) (b 1) in
       let lv = fin () in
       let fresh_ = fresh st "_fresh" and p = fresh st "_p" in
-      line fc "int %s; %s* %s = (%s*)stn_map_slot_ref(&%s, &%s, &%s);" fresh_ (ct fc vt) p (ct fc vt) lv k fresh_;
+      (match repr (ts fc (List.hd tys)) with
+       | TInt (IInt | I64 | U64) | TDur | TBytes ->
+           (* an integer key that is there already is found inline, in a table nothing else holds *)
+           line fc "int %s = 0; %s* %s = stn_unique(%s) ? (%s*)stn_map_find_i64(%s, (uint64_t)%s) : NULL;" fresh_ (ct fc vt) p lv (ct fc vt) lv k;
+           line fc "if (__builtin_expect(!%s, 0)) %s = (%s*)stn_map_slot_ref(&%s, &%s, &%s);" p p (ct fc vt) lv k fresh_
+       | _ -> line fc "int %s; %s* %s = (%s*)stn_map_slot_ref(&%s, &%s, &%s);" fresh_ (ct fc vt) p (ct fc vt) lv k fresh_);
       line fc "if (%s) {" fresh_;
       fc.ind <- fc.ind + 1;
       let sv = expr fc start in
