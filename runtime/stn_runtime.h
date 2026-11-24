@@ -303,6 +303,200 @@ int     stn_parse_int(StnStr s, int64_t* out);   /* 0 ok, 1 invalid, 2 out of ra
 int     stn_parse_float(StnStr s, double* out);  /* 0 ok, 1 invalid */
 void    stn_check_char(int64_t c, const char* file, int line, int col);
 
+/* ---- maps and sets (section 3.6) ---- */
+/* One table serves both: a set is a map whose values take no room. Entries sit in a dense array in
+   insertion order; a sparse index of control bytes and of 1-, 2-, 4- or 8-byte places finds them
+   by hash. */
+typedef struct StnMapOps {
+    size_t ksize, vsize;                     /* vsize 0 for a set */
+    uint64_t (*hash)(const void* key);
+    int (*eq)(const void* a, const void* b); /* keys */
+    void (*kdup)(void* key);                 /* NULL for Copy kind */
+    void (*kdrop)(void* key);
+    void (*vdup)(void* value);
+    void (*vdrop)(void* value);
+    int (*veq)(const void* a, const void* b);/* values, for ==; NULL when V has no Eq */
+    int kind;                                /* STN_KEY_I64 or STN_KEY_STR where the key is one, else 0 */
+} StnMapOps;
+#define STN_KEY_I64 1
+#define STN_KEY_STR 2
+
+typedef struct StnMap {
+    stn_header h;
+    int64_t len;          /* live entries */
+    int64_t used;         /* entries written, tombstones included */
+    int64_t cap;          /* entries there is room for */
+    uint32_t ilog;        /* the index has 1 << ilog slots; 0 while nothing is allocated */
+    uint32_t stride;      /* bytes per entry: 8 of hash word, the key, the value */
+    uint32_t koff;        /* offset of the key in an entry: 8 after the hash word, or 0 for 64-bit integer keys,
+                             whose hash is worked out again when it is needed */
+    uint32_t voff;        /* offset of the value in an entry */
+    const StnMapOps* ops;
+    uint8_t* index;       /* the control bytes of the slots, then the places they name */
+    uint8_t* places;
+    char* entries;
+    uint64_t* dead;       /* with no hash word: a bit for each removed entry, or NULL when there is none */
+} StnMap;
+
+void     stn_map_release(void* p);
+/* a write to an entry in place needs the table unshared (section 4.5) */
+void     stn_map_make_unique_for_write(StnMap** pm);
+StnMap*  stn_map_new(const StnMapOps* ops);
+StnMap*  stn_map_with_capacity(const StnMapOps* ops, int64_t n);
+/* the value of the key (for a set, any address that is not NULL), or NULL */
+void*    stn_map_find(const StnMap* m, const void* key);
+/* takes the key and the value; an equal key keeps its place and its own key, and gets the new value */
+void     stn_map_put(StnMap** pm, const void* key, const void* value);
+/* the value of the key, which is put if it is missing: *fresh says so, and the value is then the
+   caller's to write. Takes the key as put does. */
+void*    stn_map_slot(StnMap** pm, const void* key, int* fresh);
+/* the same with the key borrowed: a copy of it is counted and kept only when it is put */
+void*    stn_map_slot_ref(StnMap** pm, const void* key, int* fresh);
+/* takes the key out; its value moves to out when out is not NULL, and is dropped otherwise */
+int      stn_map_remove(StnMap** pm, const void* key, void* out);
+void     stn_map_clear(StnMap** pm);
+/* whether the entry at place i has been removed */
+static inline int stn_map_dead(const StnMap* m, int64_t i, const char* e) {
+    if (m->koff) return *(const uint64_t*)e == 0;
+    return m->dead && ((m->dead[i >> 6] >> (i & 63)) & 1);
+}
+/* entries in insertion order: start with *pos = 0; NULL at the end. The key is at entry + koff. */
+static inline char* stn_map_next(const StnMap* m, int64_t* pos) {
+    while (*pos < m->used) {
+        int64_t i = (*pos)++;
+        char* e = m->entries + (size_t)i * m->stride;
+        if (!stn_map_dead(m, i, e)) return e;
+    }
+    return NULL;
+}
+int      stn_map_eq(const StnMap* a, const StnMap* b);
+StnMap*  stn_set_union(const StnMap* a, const StnMap* b);
+StnMap*  stn_set_intersection(const StnMap* a, const StnMap* b);
+StnMap*  stn_set_difference(const StnMap* a, const StnMap* b);
+/* SipHash-1-3 under a key drawn once per process */
+extern uint64_t stn_hash_k0, stn_hash_k1;
+#define STN_ROTL(x, b) (((x) << (b)) | ((x) >> (64 - (b))))
+#define STN_SIPROUND do { \
+        v0 += v1; v1 = STN_ROTL(v1, 13); v1 ^= v0; v0 = STN_ROTL(v0, 32); \
+        v2 += v3; v3 = STN_ROTL(v3, 16); v3 ^= v2; \
+        v0 += v3; v3 = STN_ROTL(v3, 21); v3 ^= v0; \
+        v2 += v1; v1 = STN_ROTL(v1, 17); v1 ^= v2; v2 = STN_ROTL(v2, 32); } while (0)
+/* SipHash-1-3 of one 64-bit word: inline, since an integer key is hashed on every lookup */
+static inline uint64_t stn_hash_u64(uint64_t x) {
+    uint64_t v0 = stn_hash_k0 ^ UINT64_C(0x736f6d6570736575), v1 = stn_hash_k1 ^ UINT64_C(0x646f72616e646f6d);
+    uint64_t v2 = stn_hash_k0 ^ UINT64_C(0x6c7967656e657261), v3 = stn_hash_k1 ^ UINT64_C(0x7465646279746573);
+    v3 ^= x; STN_SIPROUND; v0 ^= x;
+    const uint64_t b = (uint64_t)8 << 56;
+    v3 ^= b; STN_SIPROUND; v0 ^= b;
+    v2 ^= 0xff; STN_SIPROUND; STN_SIPROUND; STN_SIPROUND;
+    return v0 ^ v1 ^ v2 ^ v3;
+}
+uint64_t stn_hash_bytes(const void* p, size_t n);
+/* equal floats hash alike: -0.0 is 0.0 */
+static inline uint64_t stn_hash_f64(double x) { uint64_t b; if (x == 0) x = 0; memcpy(&b, &x, 8); return stn_hash_u64(b); }
+/* SipHash-1-3 over a stream of 64-bit words, for keys made of several parts (a tuple, a struct,
+   a data type, an array): one hash for the whole key, as if its parts were laid out in a row */
+typedef struct { uint64_t v0, v1, v2, v3, n; } StnSip;
+static inline void stn_sip_init(StnSip* s) {
+    s->v0 = stn_hash_k0 ^ UINT64_C(0x736f6d6570736575); s->v1 = stn_hash_k1 ^ UINT64_C(0x646f72616e646f6d);
+    s->v2 = stn_hash_k0 ^ UINT64_C(0x6c7967656e657261); s->v3 = stn_hash_k1 ^ UINT64_C(0x7465646279746573);
+    s->n = 0;
+}
+static inline void stn_sip_word(StnSip* s, uint64_t m) {
+    uint64_t v0 = s->v0, v1 = s->v1, v2 = s->v2, v3 = s->v3;
+    v3 ^= m; STN_SIPROUND; v0 ^= m;
+    s->v0 = v0; s->v1 = v1; s->v2 = v2; s->v3 = v3; s->n += 8;
+}
+static inline uint64_t stn_sip_finish(StnSip* s) {
+    uint64_t v0 = s->v0, v1 = s->v1, v2 = s->v2, v3 = s->v3;
+    uint64_t b = s->n << 56;
+    v3 ^= b; STN_SIPROUND; v0 ^= b;
+    v2 ^= 0xff; STN_SIPROUND; STN_SIPROUND; STN_SIPROUND;
+    return v0 ^ v1 ^ v2 ^ v3;
+}
+static inline uint64_t stn_hash_combine(uint64_t h, uint64_t x) { return stn_hash_u64(h ^ (x + UINT64_C(0x9E3779B97F4A7C15) + (h << 6) + (h >> 2))); }
+
+/* stn_map_find for a table whose keys are 64-bit integers (STN_KEY_I64), inline: the layout of
+   the index is the one stn_runtime.c describes. */
+static inline void* stn_map_find_i64(const StnMap* m, uint64_t key) {
+    if (__builtin_expect(!m->ilog, 0)) return NULL;
+    uint64_t h = stn_hash_u64(key);
+    uint64_t w = h | (uint64_t)(h == 0);
+    uint64_t mask = ((uint64_t)1 << m->ilog) - 1, pos = (w >> 7) & mask, step = 0;
+    int64_t cap = m->cap;
+    unsigned width = cap <= 256 ? 1 : cap <= 65536 ? 2 : cap <= INT64_C(4294967296) ? 4 : 8;
+    const uint8_t* ctrl = m->index;
+    for (;;) {
+        const uint8_t* g = ctrl + pos;
+        unsigned hits, unused_free;
+#if defined(__SSE2__)
+        __m128i grp = _mm_loadu_si128((const __m128i_u*)g);
+        hits = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(grp, _mm_set1_epi8((char)(w & 0x7F))));
+        unused_free = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(grp, _mm_set1_epi8((char)0xFF)));
+#else
+        hits = 0; unused_free = 0;
+        for (unsigned i = 0; i < 16; i++) { hits |= (unsigned)(g[i] == (uint8_t)(w & 0x7F)) << i; unused_free |= (unsigned)(g[i] == 0xFF) << i; }
+#endif
+        for (; hits; hits &= hits - 1) {
+            uint64_t s = (pos + (unsigned)__builtin_ctz(hits)) & mask;
+            uint64_t place;
+            switch (width) {
+                case 1: place = m->places[s]; break;
+                case 2: { uint16_t v; memcpy(&v, m->places + s * 2, 2); place = v; break; }
+                case 4: { uint32_t v; memcpy(&v, m->places + s * 4, 4); place = v; break; }
+                default: memcpy(&place, m->places + s * 8, 8);
+            }
+            char* e = m->entries + (size_t)place * m->stride;
+            uint64_t k;
+            memcpy(&k, e, 8);
+            /* a removed entry keeps its key, but its control byte no longer matches */
+            if (k == key) return e + m->voff;
+        }
+        if (unused_free) return NULL;
+        step += 16;
+        pos = (pos + step) & mask;
+    }
+}
+
+/* stn_map_find for a table whose keys are Str (STN_KEY_STR), inline. A key that is the very string
+   the table holds is found without comparing its bytes. */
+static inline void* stn_map_find_str(const StnMap* m, StnStr key) {
+    if (__builtin_expect(!m->ilog, 0)) return NULL;
+    uint64_t h = stn_hash_bytes(key->data, (size_t)key->len);
+    uint64_t w = h | (uint64_t)(h == 0);
+    uint64_t mask = ((uint64_t)1 << m->ilog) - 1, pos = (w >> 7) & mask, step = 0;
+    int64_t cap = m->cap;
+    unsigned width = cap <= 256 ? 1 : cap <= 65536 ? 2 : cap <= INT64_C(4294967296) ? 4 : 8;
+    const uint8_t* ctrl = m->index;
+    for (;;) {
+        const uint8_t* g = ctrl + pos;
+        unsigned hits, unused_free;
+#if defined(__SSE2__)
+        __m128i grp = _mm_loadu_si128((const __m128i_u*)g);
+        hits = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(grp, _mm_set1_epi8((char)(w & 0x7F))));
+        unused_free = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(grp, _mm_set1_epi8((char)0xFF)));
+#else
+        hits = 0; unused_free = 0;
+        for (unsigned i = 0; i < 16; i++) { hits |= (unsigned)(g[i] == (uint8_t)(w & 0x7F)) << i; unused_free |= (unsigned)(g[i] == 0xFF) << i; }
+#endif
+        for (; hits; hits &= hits - 1) {
+            uint64_t s = (pos + (unsigned)__builtin_ctz(hits)) & mask;
+            uint64_t place;
+            switch (width) {
+                case 1: place = m->places[s]; break;
+                case 2: { uint16_t v; memcpy(&v, m->places + s * 2, 2); place = v; break; }
+                case 4: { uint32_t v; memcpy(&v, m->places + s * 4, 4); place = v; break; }
+                default: memcpy(&place, m->places + s * 8, 8);
+            }
+            char* e = m->entries + (size_t)place * m->stride;
+            if (*(const uint64_t*)e == w && stn_str_eq(*(const StnStr*)(e + 8), key)) return e + m->voff;
+        }
+        if (unused_free) return NULL;
+        step += 16;
+        pos = (pos + step) & mask;
+    }
+}
+
 /* Generated functions are compiled for speed wherever they end up being inlined. Only an optimized
    release build asks for it: Clang honours the attribute even at -O0, which makes a debug build
    several times slower to compile. */

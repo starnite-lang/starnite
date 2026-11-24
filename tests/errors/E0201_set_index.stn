@@ -1,0 +1,4 @@
+# expect: E0201 4:14
+fn main():
+    let s = {1, 2}
+    print(f"{s[0]}")

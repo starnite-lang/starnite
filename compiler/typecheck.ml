@@ -396,7 +396,9 @@ and derive tb ~bounds trait self =
             match d.dbody with
             | DStruct fs -> List.for_all (fun fi -> f (subst s fi.fty)) fs
             | DData vs -> List.for_all (fun v -> List.for_all (fun fi -> f (subst s fi.fty)) v.vfields) vs
-            | DAlias _ -> false)
+            | DAlias _ -> false
+            (* a Map or a Set is equal to another when its keys and values are; neither is hashed *)
+            | DBuiltin -> trait = "Eq" && List.for_all f args)
         | None -> false)
     | _ -> false
   in
@@ -826,6 +828,9 @@ let int_fits k (s : string) l =
 
 (* ---------- expressions ---------- *)
 
+(* m[k] as the place of an assignment: the place of the Map, the key, and the expression m[k] *)
+exception Map_place of place * Syntax.expr * Syntax.expr
+
 let rec is_place (e : Syntax.expr) =
   match e.d with
   | Name _ -> true
@@ -850,6 +855,8 @@ let ensure_const : (tables -> string -> unit) ref = ref (fun _ _ -> ())
 (* Some m when [te] calls a lend function (lend mut when m) *)
 let lend_of tb (te : texpr) : bool option =
   match te.e with
+  (* m[k] inside a longer place, as in m[k].x = v: the entry is lent out of the Map (section 3.6) *)
+  | XCall (CBuiltin ("entry@Map", _), _, _) -> Some true
   | XCall (CFn (u, _), _, _) -> (match Hashtbl.find_opt tb.fns u with Some sg -> sg.slend | None -> None)
   | XCall (CTrait (tr, _, m, _, _), _, _) -> (
       match Hashtbl.find_opt tb.traits tr with
@@ -1121,7 +1128,44 @@ and check_or_infer c (e : Syntax.expr) (expected : ty option) : texpr =
       List.iter (fun _ -> ()) tcs;
       pop_frame c;
       mk (XComp (tb, tcs)) (TArray tb.ty) l
-  | BraceLit _ | MapLit _ -> err "E0201" l "Map and Set literals arrive in milestone 2"
+  | MapComp (kb, vb, comps) ->
+      (* a comprehension over a Map is the array comprehension of its pairs, put in order: a later
+         pair with an equal key replaces the value and keeps the place (section 3.6) *)
+      let k, v = match exp with Some (TNamed ("Map", [ k; v ])) -> (k, v) | _ -> (fresh (), fresh ()) in
+      push_frame c ();
+      let tcs = List.map (fun cp -> check_comp c cp) comps in
+      let tk = check c kb k in
+      let tv = check c vb v in
+      pop_frame c;
+      need_key c l k;
+      let pair = TTuple [ k; v ] in
+      let pairs = mk (XComp (mk (XTuple [ tk; tv ]) pair l, tcs)) (TArray pair) l in
+      mk (XCall (CBuiltin ("from_pairs@Map", [ k; v ]), [ { amode = MBorrow; a = pairs } ], [])) (TNamed ("Map", [ k; v ])) l
+  | SetComp (body, comps) ->
+      let k = match exp with Some (TNamed ("Set", [ k ])) -> k | _ -> fresh () in
+      push_frame c ();
+      let tcs = List.map (fun cp -> check_comp c cp) comps in
+      let tb = check c body k in
+      pop_frame c;
+      need_key c l k;
+      let items = mk (XComp (tb, tcs)) (TArray k) l in
+      mk (XCall (CBuiltin ("from_items@Set", [ k ]), [ { amode = MBorrow; a = items } ], [])) (TNamed ("Set", [ k ])) l
+  | MapLit pairs ->
+      let k, v = match exp with Some (TNamed ("Map", [ k; v ])) -> (k, v) | _ -> (fresh (), fresh ()) in
+      let args = List.concat_map (fun (ke, ve) -> let tk = check c ke k in let tv = check c ve v in [ tk; tv ]) pairs in
+      need_key c l k;
+      mk (XCall (CBuiltin ("lit@Map", [ k; v ]), List.map (fun a -> { amode = MBorrow; a }) args, [])) (TNamed ("Map", [ k; v ])) l
+  | BraceLit [] -> (
+      (* {} alone is a Map or a Set as the expected type says (section 3.6) *)
+      match exp with
+      | Some (TNamed ("Map", [ k; v ])) -> mk (XCall (CBuiltin ("lit@Map", [ k; v ]), [], [])) (TNamed ("Map", [ k; v ])) l
+      | Some (TNamed ("Set", [ k ])) -> mk (XCall (CBuiltin ("lit@Set", [ k ]), [], [])) (TNamed ("Set", [ k ])) l
+      | _ -> err "E0210" l "{} is a Map or a Set only where the expected type says which; add an annotation, or write Map() or Set()")
+  | BraceLit es ->
+      let k = match exp with Some (TNamed ("Set", [ k ])) -> k | _ -> fresh () in
+      let tes = List.map (fun e -> check c e k) es in
+      need_key c l k;
+      mk (XCall (CBuiltin ("lit@Set", [ k ]), List.map (fun a -> { amode = MBorrow; a }) tes, [])) (TNamed ("Set", [ k ])) l
   | IfE (cnd, a, b) ->
       let tc = check c cnd TBool in
       let ta = match exp with Some t -> check c a t | None -> infer c a in
@@ -1176,9 +1220,18 @@ and check_iter c (it : Syntax.expr) mode : titer * ty =
   | _ ->
       let te = infer c it in
       (match repr te.ty with
-       | TArray t -> (IArray (te, mode), t)
+       | TArray t -> (IArray ((if mode = MMut then as_mut_place te else te), mode), t)
+       (* a Map is visited as its (key, value) pairs and a Set as its keys, both in insertion order
+          (section 3.6): the loop runs over what the collection held when it started *)
+       | TNamed ("Map", [ k; v ]) ->
+           if mode = MMut then err "E0201" it.loc "the entries of a Map cannot be visited with mut; assign m[k] in the loop";
+           let pair = TTuple [ k; v ] in
+           (IArray (mk (XCall (CBuiltin ("entries@Map", [ k; v ]), [ { amode = MBorrow; a = te } ], [])) (TArray pair) it.loc, MBorrow), pair)
+       | TNamed ("Set", [ k ]) ->
+           if mode = MMut then err "E0201" it.loc "the keys of a Set cannot be visited with mut";
+           (IArray (mk (XCall (CBuiltin ("items@Set", [ k ]), [ { amode = MBorrow; a = te } ], [])) (TArray k) it.loc, MBorrow), k)
        | TStr -> err "E0201" it.loc "iterate over chars(s) to visit the characters of a Str"
-       | t -> err "E0204" it.loc "%s cannot be iterated; for loops take an Array or a range" (show_ty t))
+       | t -> err "E0204" it.loc "%s cannot be iterated; for loops take an Array, a Map, a Set or a range" (show_ty t))
 
 and infer_name c l n exp : texpr =
   match lookup c n with
@@ -1296,6 +1349,17 @@ and match_args c l (params : (mode * string * ty * Syntax.expr option) list) (ar
     named;
   res
 
+(* A mut argument that reads an entry of a Map, as in m[k].push(x) or f(mut m[k].xs), passes the
+   entry itself, lent out of the Map, so that what the call does to it stays in the Map. *)
+and as_mut_place (te : texpr) : texpr =
+  match te.e with
+  | XCall (CBuiltin ("index@Map", tys), [ m; k ], cv) ->
+      { te with e = XCall (CBuiltin ("entry@Map", tys), [ { amode = MMut; a = as_mut_place m.a }; k ], cv) }
+  | XField (b, i, f) -> { te with e = XField (as_mut_place b, i, f) }
+  | XTupleGet (b, i) -> { te with e = XTupleGet (as_mut_place b, i) }
+  | XIndex (b, i) -> { te with e = XIndex (as_mut_place b, i) }
+  | _ -> te
+
 and mutable_place c (e : Syntax.expr) : bool =
   let rec root (e : Syntax.expr) =
     match e.d with
@@ -1333,7 +1397,7 @@ and args_check c l (st : args_state) (slots : int list) : targ list =
         match st.a_params with
         | (m, _, t, _) :: _ ->
             (* a mut argument is the place itself: boxing it would write to a copy *)
-            let r = if m = MMut then (unify_at r.l t r.ty; r) else coerce c r t in
+            let r = if m = MMut then (unify_at r.l t r.ty; as_mut_place r) else coerce c r t in
             { amode = m; a = r }
         | [] -> err "E0203" l "this function takes no arguments")
     | _ -> (
@@ -1358,7 +1422,7 @@ and args_check c l (st : args_state) (slots : int list) : targ list =
              | Some MTake, XVar v -> c.moved <- (v.vid, a.aloc) :: c.moved
              | Some MTake, _ -> err "E0302" a.aloc "'take' moves a variable; write it before a variable name"
              | _ -> ());
-            { amode = m; a = te }
+            { amode = m; a = (if m = MMut then as_mut_place te else te) }
         | None -> (
             match d with
             | Some d ->
@@ -1624,6 +1688,14 @@ and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
           in
           mk (XFail te) TNever l
       | _ -> err "E0203" l "fail takes one argument")
+  | Name ("Map" | "Set" as n) when args = [] && lookup c n = None ->
+      (* an empty Map or Set; what it holds comes from the expected type or from its uses *)
+      let t = if n = "Map" then TNamed ("Map", [ fresh (); fresh () ]) else TNamed ("Set", [ fresh () ]) in
+      (match exp with Some e -> (try unify e t with _ -> ()) | None -> ());
+      let tys = match t with TNamed (_, ts) -> ts | _ -> [] in
+      List.iter (fun x -> c.unsolved <- (x, l, Printf.sprintf "what this %s holds is never settled; add an annotation" n) :: c.unsolved) tys;
+      need_key c l (List.hd tys);
+      mk (XCall (CBuiltin ((if n = "Map" then "lit@Map" else "lit@Set"), tys), [], [])) t l
   | Name n when lookup c n = None && List.mem_assoc n prim_names && n <> "Unit" -> (
       (* numeric conversion: Float(n), I32(x) (section 17.1) *)
       let target = List.assoc n prim_names in
@@ -1996,6 +2068,10 @@ and trait_call c l tn trargs m (sg : fsig) self (receiver : texpr option) args e
   let convs = add_eff c l { sg.seff with errs = List.map (subst s) sg.seff.errs } @ List.concat_map (add_eff c l) poly in
   mk (XCall (CTrait (tn, ta, m, self, List.map snd own_vars), targs, convs)) ret l
 
+(* the key type of a Map or a Set is hashed and compared (section 3.6) *)
+and need_key c l (k : ty) =
+  c.obligations <- (k, "Hash", [], l) :: (k, "Eq", [], l) :: c.obligations
+
 and infer_bracket c l (b : Syntax.expr) (args : Syntax.barg list) exp : texpr =
   (* explicit type arguments: parse[Int](text) are handled by the call; here: indexing *)
   match args with
@@ -2016,6 +2092,12 @@ and infer_bracket c l (b : Syntax.expr) (args : Syntax.barg list) exp : texpr =
               let ti = check c i (TInt IInt) in
               mk (XIndex (tb, ti)) t l
           | TStr -> err "E0201" l "index a Str through chars(s)[i], or slice it with s[a..b]"
+          | TNamed ("Map", [ k; v ]) ->
+              (* m[k] traps on a key that is missing; m.get(k) gives an option (section 3.6) *)
+              need_key c l k;
+              let tk = check c i k in
+              mk (XCall (CBuiltin ("index@Map", [ k; v ]), [ { amode = MBorrow; a = tb }; { amode = MBorrow; a = tk } ], [])) v l
+          | TNamed ("Set", _) -> err "E0201" l "a Set has no elements to index; ask s.contains(x)"
           | _ -> index_call c l ~mut_:false tb i)
   | [ BType t ] -> err "E0102" (ty_loc t) "type in brackets after a name that is not generic"
   | _ -> err "E0201" l "indexing takes one index"
@@ -2102,11 +2184,20 @@ and infer_binop c l op a b exp : texpr =
             match repr ta.ty with
             | TInt _ | TFloat | TF32 | TBool | TChar | TStr | TDur | TBytes when op <> "*" || not (ta.ty = TDur) -> check c b ta.ty
             | TNamed ("Option", _) when (match b.d with Name "None" -> true | _ -> false) -> check c b ta.ty
+            | TNamed ("Set", _) when List.mem op [ "|"; "&"; "-" ] -> check c b ta.ty
             | _ -> infer c b
           in
           (ta, tb)
       in
       let t = repr ta.ty in
+      match t with
+      | TNamed ("Set", [ k ]) when List.mem op [ "|"; "&"; "-" ] ->
+          (* union, intersection and difference of sets (section 3.6) *)
+          unify_at tb.l ta.ty tb.ty;
+          need_key c l k;
+          let name = match op with "|" -> "union@Set" | "&" -> "intersection@Set" | _ -> "difference@Set" in
+          mk (XCall (CBuiltin (name, [ k ]), [ { amode = MBorrow; a = ta }; { amode = MBorrow; a = tb } ], [])) t l
+      | _ ->
       let prim = match t with TInt _ | TFloat | TF32 | TBool | TChar | TStr | TDur | TBytes | TUnit -> true | _ -> false in
       let arith = [ ("+", Add); ("-", Sub); ("*", Mul); ("/", Div); ("%", Mod); ("+%", AddW); ("-%", SubW); ("*%", MulW) ] in
       let cmp = [ ("==", Eq); ("!=", Ne); ("<", Lt); ("<=", Le); (">", Gt); (">=", Ge) ] in
@@ -2143,7 +2234,7 @@ and infer_binop c l op a b exp : texpr =
         let bop =
           match List.assoc_opt op cmp with
           | Some b -> b
-          | None -> err "E0204" l "'%s' is not defined on %s (the set operators arrive with sets, in milestone 2)" op (show_ty t)
+          | None -> err "E0204" l "'%s' is not defined on %s" op (show_ty t)
         in
         unify_at tb.l ta.ty tb.ty;
         let eqop = bop = Eq || bop = Ne in
@@ -2161,7 +2252,11 @@ and infer_binop c l op a b exp : texpr =
 
 (* ---------- places and assignment ---------- *)
 
-and place_of c (e : Syntax.expr) : place =
+and place_of c (e : Syntax.expr) : place = place_of_raw c e
+
+(* With ~map_top, a place that is m[k] itself is left to the caller (it puts the entry); inside a
+   longer place, m[k] is the entry of the key, lent out of the Map, which traps if it is missing. *)
+and place_of_raw ?(map_top = false) c (top : Syntax.expr) : place =
   let rec go (e : Syntax.expr) : place =
     match e.d with
     | Name n -> (
@@ -2202,13 +2297,23 @@ and place_of c (e : Syntax.expr) : place =
         let p = go b in
         match repr p.pty with
         | TArray t -> { p with path = p.path @ [ PIndex (check c i (TInt IInt)) ]; pty = t }
+        | TNamed ("Map", [ k; v ]) ->
+            if map_top && e == top then raise (Map_place (p, i, e));
+            need_key c e.loc k;
+            let map_place = fix_place_types c (place_expr p e.loc) in
+            let tk = check c i k in
+            let call =
+              mk (XCall (CBuiltin ("entry@Map", [ k; v ]), [ { amode = MMut; a = map_place }; { amode = MBorrow; a = tk } ], [])) v e.loc
+            in
+            { root = p.root; via = Some call; path = []; pty = v }
+        | TNamed ("Set", _) -> err "E0201" e.loc "a Set has no elements to assign; use s.add(x)"
         | _ ->
             (* the base place is lent to IndexMut.at_mut, which lends the element back *)
             let call = index_call c e.loc ~mut_:true (fix_place_types c (place_expr p e.loc)) i in
             { root = p.root; via = Some call; path = []; pty = call.ty })
     | _ -> err "E0103" e.loc "the left side of an assignment must be a variable, field or element"
   in
-  go e
+  go top
 
 and place_expr (p : place) l : texpr =
   List.fold_left
@@ -2236,7 +2341,9 @@ and fix_place_types c (te : texpr) : texpr =
 
 and check_assign c l (lhs : Syntax.expr) op (rhs : Syntax.expr) : tstmt =
   if not (is_place lhs) then err "E0103" lhs.loc "the left side of an assignment must be a variable, field or element";
-  let p = place_of c lhs in
+  match place_of_raw ~map_top:true c lhs with
+  | exception Map_place (mp, key, _) -> map_assign c l mp key op rhs
+  | p ->
   if op = "=" then begin
     let rhs = check c rhs p.pty in
     (* assigning the whole variable gives it a value again *)
@@ -2252,6 +2359,41 @@ and check_assign c l (lhs : Syntax.expr) op (rhs : Syntax.expr) : tstmt =
     let tr = infer_binop_typed c l bop cur rhs in
     { st = SAssign (p, tr); sl = l }
   end
+
+(* m[k] = v puts the entry, in the place its key already has or at the end. m[k] += v starts from
+   Default.default() when the key is missing (section 3.6). As for an element of an array, the right
+   side of = is evaluated before the key; the key is evaluated once. *)
+and map_assign c l (mp : place) (key : Syntax.expr) op (rhs : Syntax.expr) : tstmt =
+  let k, v = match repr mp.pty with TNamed ("Map", [ k; v ]) -> (k, v) | _ -> assert false in
+  if List.mem_assoc mp.root.vid c.moved then err "E0302" l "'%s' is used after it was moved by 'take'" mp.root.vname;
+  need_key c l k;
+  let map_place = fix_place_types c (place_expr mp l) in
+  let var_of name (t : ty) = new_var name t false VLocal in
+  let use (x : var) = mk (XVar x) x.vty l in
+  let put tk tv =
+    mk (XCall (CBuiltin ("put@Map", [ k; v ]), [ { amode = MMut; a = map_place }; { amode = MTake; a = tk }; { amode = MTake; a = tv } ], [])) TUnit l
+  in
+  let body =
+    if op = "=" then begin
+      let tv = check c rhs v in
+      let tk = check c key k in
+      let held = var_of "$value" v in
+      [ { st = SLet (TPVar held, tv); sl = l }; { st = SExpr (put tk (use held)); sl = l } ]
+    end
+    else begin
+      let tk = check c key k in
+      let held = var_of "$key" k in
+      c.obligations <- (v, "Default", [], l) :: c.obligations;
+      let start = mk (XCall (CTrait ("Default", [], "default", v, []), [], [])) v l in
+      let cur =
+        mk (XCall (CBuiltin ("index_or@Map", [ k; v ]),
+                   [ { amode = MBorrow; a = map_place }; { amode = MBorrow; a = use held }; { amode = MBorrow; a = start } ], [])) v l
+      in
+      let next = infer_binop_typed c l (String.sub op 0 1) cur rhs in
+      [ { st = SLet (TPVar held, tk); sl = l }; { st = SExpr (put (use held) next); sl = l } ]
+    end
+  in
+  { st = SExpr (mk (XBlock (body, unit_e l)) TUnit l); sl = l }
 
 and infer_binop_typed c l op (ta : texpr) (b : Syntax.expr) : texpr =
   let t = repr ta.ty in
@@ -2822,6 +2964,7 @@ let declare_type_bodies tb modname (items : item list) =
                        { vname_ = v.vname; vfields = conv_fields fs; vnamed = List.for_all (fun f -> f.fdname <> None) fs; vindex = i })
                      vs)
             | BAlias t -> DAlias (conv_ty tb ps None t)
+            | BNone when modname = "core" -> DBuiltin
             | BNone -> err "E0100" td.tloc "type '%s' needs a definition" td.tname
           in
           d.dbody <- body

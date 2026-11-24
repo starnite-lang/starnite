@@ -21,6 +21,8 @@ type value =
   | VFn of string * ty list
   | VErr of ty * value           (* a member of an error union *)
   | VAny of ty * value           (* a trait value: the hidden type and the value (section 3.4) *)
+  | VMap of (value * value) array   (* entries in insertion order; never mutated in place (section 3.6) *)
+  | VSet of value array
 
 exception Failed of ty * value
 exception Partial of value list * exn
@@ -69,6 +71,14 @@ let as_bool = function VBool b -> b | _ -> failwith "bool"
 let as_str = function VStr s -> s | _ -> failwith "str"
 let as_arr = function VArr a -> a | _ -> failwith "array"
 
+let find_index (f : 'a -> bool) (xs : 'a array) : int option =
+  let n = Array.length xs in
+  let rec go i = if i >= n then None else if f xs.(i) then Some i else go (i + 1) in
+  go 0
+
+let without (xs : 'a array) (i : int) : 'a array =
+  Array.append (Array.sub xs 0 i) (Array.sub xs (i + 1) (Array.length xs - i - 1))
+
 let rec values_equal a b =
   match (a, b) with
   | VFloat x, VFloat y -> x = y
@@ -76,6 +86,11 @@ let rec values_equal a b =
       Array.length xs = Array.length ys && Array.for_all2 values_equal xs ys
   | VVariant (i, xs), VVariant (j, ys) -> i = j && Array.for_all2 values_equal xs ys
   | VErr (t, x), VErr (u, y) -> ty_equal t u && values_equal x y
+  (* a Map or a Set equals another with the same entries, in whatever order each was built *)
+  | VMap xs, VMap ys ->
+      Array.length xs = Array.length ys
+      && Array.for_all (fun (k, v) -> Array.exists (fun (k', v') -> values_equal k k' && values_equal v v') ys) xs
+  | VSet xs, VSet ys -> Array.length xs = Array.length ys && Array.for_all (fun k -> Array.exists (values_equal k) ys) xs
   | _ -> a = b
 
 let compare_values (t : ty) a b =
@@ -315,7 +330,7 @@ and eval_call env (cl : callee) (targs : targ list) convs loc : value =
 and prim_trait env tr m self vals loc : value =
   match (tr, vals) with
   | "Show", [ v ] -> VStr (show_value env self v)
-  | "Eq", [ a; b ] -> VBool (values_equal a b)
+  | "Eq", [ a; b ] -> VBool (typed_equal env self a b)
   | "Ord", [ a; b ] -> VInt (Int64.of_int (compare_values self a b))
   | "Hash", [ v ] -> VInt (Int64.of_int (Hashtbl.hash v))
   | "Default", [] -> (
@@ -366,6 +381,18 @@ and hold_busy env (e : texpr) =
 
 and place_of_expr env (e : texpr) : (unit -> value) * (value -> unit) =
   match e.e with
+  | XCall (CBuiltin ("entry@Map", tys), [ m; key ], _) ->
+      (* the entry of a key that must be there, in a Map that is a place *)
+      let get, set = place_of_expr env m.a in
+      let k = eval env key.a in
+      let kt = List.hd tys in
+      let find () =
+        match get () with
+        | VMap es -> (match map_find env kt es k with Some i -> (es, i) | None -> trap "missing key" e.l "the Map has no entry for this key")
+        | _ -> failwith "entry of a non-map"
+      in
+      ( (fun () -> let es, i = find () in snd es.(i)),
+        fun x -> let es, i = find () in let es = Array.copy es in es.(i) <- (fst es.(i), x); set (VMap es) )
   | XCall (cl, targs, _) when lend_target env cl <> None -> lend_place env (Option.get (lend_target env cl)) targs
   | _ ->
   (match cell_root env e with
@@ -696,6 +723,60 @@ and describe_assert env (e : texpr) : string =
       Printf.sprintf "assertion failed: left = %s, right = %s" (show_value env t (eval env a.a)) (show_value env t (eval env b.a))
   | _ -> "assertion failed"
 
+(* ---------- maps and sets ---------- *)
+
+(* Keys are compared as == compares them: by the Eq of their type, an impl of the program included. *)
+and key_equal env (k : ty) a b : bool = typed_equal env k a b
+
+(* a == b at the type t, as the C backend compares: by the Eq of the program where a type has one,
+   and otherwise part by part at the types of the parts, so that an Eq of the program on a key,
+   a field or an element is honored wherever it sits. Maps and Sets are equal when each entry of
+   one has an equal key in the other with an equal value, in whatever order each was built. *)
+and typed_equal env (t : ty) a b : bool =
+  let t = tsub env t in
+  match resolve env "Eq" [] "eq" t with
+  | Some (f, ftys) ->
+      let tf = Hashtbl.find env.prog.fns f in
+      let sub = List.combine (List.map fst tf.fsig.stparams) ftys in
+      as_bool (fst (invoke env tf sub [ a; b ]))
+  | None -> (
+      match (repr t, a, b) with
+      | TNamed ("Map", [ kt; vt ]), VMap xs, VMap ys ->
+          Array.length xs = Array.length ys
+          && Array.for_all
+               (fun (k, v) -> match map_find env kt ys k with Some i -> typed_equal env vt v (snd ys.(i)) | None -> false)
+               xs
+      | TNamed ("Set", [ kt ]), VSet xs, VSet ys ->
+          Array.length xs = Array.length ys && Array.for_all (fun k -> set_find env kt ys k <> None) xs
+      | TArray et, VArr xs, VArr ys -> Array.length xs = Array.length ys && Array.for_all2 (typed_equal env et) xs ys
+      | TTuple ts, VTuple xs, VTuple ys -> List.for_all2 (fun t (x, y) -> typed_equal env t x y) ts (List.combine (Array.to_list xs) (Array.to_list ys))
+      | TNamed (n, args), VStruct xs, VStruct ys -> (
+          match Hashtbl.find_opt env.prog.decls n with
+          | Some { dbody = DStruct fs; dparams; _ } ->
+              let s = List.combine dparams args in
+              List.for_all2 (fun (f : field_info) (x, y) -> typed_equal env (subst s f.fty) x y) fs (List.combine (Array.to_list xs) (Array.to_list ys))
+          | _ -> values_equal a b)
+      | TNamed (n, args), VVariant (i, xs), VVariant (j, ys) -> (
+          i = j
+          &&
+          match Hashtbl.find_opt env.prog.decls n with
+          | Some { dbody = DData vs; dparams; _ } ->
+              let s = List.combine dparams args in
+              let v = List.nth vs i in
+              List.for_all2 (fun (f : field_info) (x, y) -> typed_equal env (subst s f.fty) x y) v.vfields (List.combine (Array.to_list xs) (Array.to_list ys))
+          | _ -> values_equal a b)
+      | _ -> values_equal a b)
+
+and map_find env k (es : (value * value) array) key = find_index (fun (k', _) -> key_equal env k k' key) es
+and set_find env k (ks : value array) key = find_index (fun k' -> key_equal env k k' key) ks
+
+and map_put env k es key v =
+  match map_find env k es key with
+  | Some i -> let es = Array.copy es in es.(i) <- (fst es.(i), v); es
+  | None -> Array.append es [| (key, v) |]
+
+and set_add env k ks key = match set_find env k ks key with Some _ -> ks | None -> Array.append ks [| key |]
+
 (* ---------- built-in functions ---------- *)
 
 and builtin env name (tys : ty list) (vals : value list) loc : value * value list =
@@ -740,6 +821,59 @@ and builtin env name (tys : ty list) (vals : value list) loc : value * value lis
       if Int64.compare n 0L < 0 then trap "index out of range" loc "negative length";
       if Int64.compare n max_alloc > 0 then too_large loc;
       pure (VArr (Array.make (Int64.to_int n) x))
+  (* ---- maps and sets (section 3.6): entries stay in insertion order; an entry that is put again
+     keeps its place, and one that is removed and put again goes to the end ---- *)
+  | "lit@Map", kvs ->
+      let k = List.hd tys in
+      let rec go acc = function
+        | key :: v :: rest -> go (map_put env k acc key v) rest
+        | _ -> acc
+      in
+      pure (VMap (go [||] kvs))
+  | "lit@Set", ks -> let k = List.hd tys in pure (VSet (List.fold_left (fun acc x -> set_add env k acc x) [||] ks))
+  | "from_pairs@Map", [ VArr ps ] ->
+      let k = List.hd tys in
+      pure (VMap (Array.fold_left (fun acc p -> match p with VTuple [| key; v |] -> map_put env k acc key v | _ -> acc) [||] ps))
+  | "from_items@Set", [ VArr xs ] -> let k = List.hd tys in pure (VSet (Array.fold_left (fun acc x -> set_add env k acc x) [||] xs))
+  | "entries@Map", [ VMap es ] -> pure (VArr (Array.map (fun (k, v) -> VTuple [| k; v |]) es))
+  | "items@Set", [ VSet ks ] -> pure (VArr ks)
+  | "len@Map", [ VMap es ] -> pure (VInt (Int64.of_int (Array.length es)))
+  | "len@Set", [ VSet ks ] -> pure (VInt (Int64.of_int (Array.length ks)))
+  | "index@Map", [ VMap es; key ] -> (
+      match map_find env (List.hd tys) es key with
+      | Some i -> pure (snd es.(i))
+      | None -> trap "missing key" loc "the Map has no entry for this key")
+  | "entry@Map", [ VMap es; key ] -> (
+      match map_find env (List.hd tys) es key with
+      | Some i -> pure (snd es.(i))
+      | None -> trap "missing key" loc "the Map has no entry for this key")
+  | "index_or@Map", [ VMap es; key; start ] -> (
+      match map_find env (List.hd tys) es key with Some i -> pure (snd es.(i)) | None -> pure start)
+  | "get@Map", [ VMap es; key ] -> (
+      match map_find env (List.hd tys) es key with
+      | Some i -> pure (VVariant (1, [| snd es.(i) |]))
+      | None -> pure (VVariant (0, [||])))
+  | "contains@Map", [ VMap es; key ] -> pure (VBool (map_find env (List.hd tys) es key <> None))
+  | "contains@Set", [ VSet ks; key ] -> pure (VBool (set_find env (List.hd tys) ks key <> None))
+  | "put@Map", [ VMap es; key; v ] -> (VUnit, [ VMap (map_put env (List.hd tys) es key v); key; v ])
+  | "remove@Map", [ VMap es; key ] -> (
+      match map_find env (List.hd tys) es key with
+      | Some i -> (VVariant (1, [| snd es.(i) |]), [ VMap (without es i); key ])
+      | None -> (VVariant (0, [||]), vals))
+  | "clear@Map", [ VMap _ ] -> (VUnit, [ VMap [||] ])
+  | "add@Set", [ VSet ks; key ] -> (VUnit, [ VSet (set_add env (List.hd tys) ks key); key ])
+  | "remove@Set", [ VSet ks; key ] -> (
+      match set_find env (List.hd tys) ks key with
+      | Some i -> (VBool true, [ VSet (without ks i); key ])
+      | None -> (VBool false, vals))
+  | "clear@Set", [ VSet _ ] -> (VUnit, [ VSet [||] ])
+  | "union@Set", [ VSet a; VSet b ] -> let k = List.hd tys in pure (VSet (Array.fold_left (fun acc x -> set_add env k acc x) a b))
+  | "intersection@Set", [ VSet a; VSet b ] ->
+      let k = List.hd tys in
+      pure (VSet (Array.of_list (List.filter (fun x -> set_find env k b x <> None) (Array.to_list a))))
+  | "difference@Set", [ VSet a; VSet b ] ->
+      let k = List.hd tys in
+      pure (VSet (Array.of_list (List.filter (fun x -> set_find env k b x = None) (Array.to_list a))))
   | "copy@T", [ x ] -> pure x
   | "unreachable@Str", [ VStr m ] -> trap "unreachable" loc m
   | "byte_at_or_end@Str", [ VStr s; VInt i ] ->

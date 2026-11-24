@@ -1,0 +1,14 @@
+# Division and remainder by a literal (section 17.1): a divisor other than 0 and -1 cannot trap, so
+# the C is plain division, signed for every literal, the most negative one included.
+fn main():
+    let x: Int = -1
+    let y: Int = 9223372036854775807
+    let z: Int = -9223372036854775807 - 1
+    print(f"{x / -9223372036854775808} {x % -9223372036854775808} {y / -9223372036854775808} {y % -9223372036854775808}")
+    print(f"{z / -9223372036854775808} {z % -9223372036854775808} {z / 2} {z % 2} {-7 / 2} {-7 % 2} {7 / -2} {7 % -2}")
+    let a: I8 = -128
+    let b: I8 = 127
+    let c: U8 = 255
+    let d: I32 = -2147483648
+    print(f"{a / 2} {a % 3} {b / -128} {b % -128} {c / 2} {c % 7} {d / -2147483648} {d / 7} {d % 7}")
+    print(f"{z / -1}")

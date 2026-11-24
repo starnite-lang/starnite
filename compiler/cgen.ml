@@ -203,6 +203,7 @@ let sig_can_fail_sg (sg : fsig) =
 let rec needs_rc st t =
   match repr t with
   | TStr | TArray _ | TFn _ | TErr _ | TAny _ -> true
+  | TNamed (("Map" | "Set"), _) -> true
   | TTuple ts -> List.exists (needs_rc st) ts
   | TNamed _ when is_struct st t -> List.exists (fun (_, t) -> needs_rc st t) (struct_fields st t)
   | TNamed _ when is_data st t -> layout st t = LBoxed || List.exists (fun (_, fs) -> List.exists (fun (_, t) -> needs_rc st t) fs) (variants st t)
@@ -218,6 +219,7 @@ let rec cty st t : string =
   | TStr -> "StnStr"
   | TDur | TBytes -> "int64_t"
   | TArray _ -> "StnArray*"
+  | TNamed (("Map" | "Set"), _) -> "StnMap*"
   | TFn _ -> "StnClosure*"
   | TErr _ -> "StnError"
   | TTuple _ | TNamed _ | TAny _ -> ensure_type st t; "stn_" ^ mangle t
@@ -347,7 +349,7 @@ and emit_helpers st t =
 
 and dup_stmt st t e =
   match repr t with
-  | TStr | TArray _ | TFn _ -> Printf.sprintf "stn_dup(%s);" e
+  | TStr | TArray _ | TFn _ | TNamed (("Map" | "Set"), _) -> Printf.sprintf "stn_dup(%s);" e
   | TErr _ -> Printf.sprintf "stn_error_dup(%s);" e
   | _ -> ensure_type st t; Printf.sprintf "dup_%s(%s);" (mangle t) e
 
@@ -358,6 +360,7 @@ and drop_stmt st t e =
   | TNamed ("__array_length", _) -> e ^ ";"
   | TStr -> Printf.sprintf "STN_STR_DROP(%s);" e
   | TArray _ -> Printf.sprintf "stn_drop(%s, stn_array_release);" e
+  | TNamed (("Map" | "Set"), _) -> Printf.sprintf "stn_drop(%s, stn_map_release);" e
   | TFn _ -> Printf.sprintf "stn_closure_drop(%s);" e
   | TErr _ -> Printf.sprintf "stn_error_drop(%s);" e
   | _ -> ensure_type st t; Printf.sprintf "drop_%s(%s);" (mangle t) e
@@ -366,7 +369,7 @@ let dup_expr st t e =
   if not (needs_rc st t) then e
   else
     match repr t with
-    | TStr | TArray _ | TFn _ -> Printf.sprintf "(stn_dup(%s), %s)" e e
+    | TStr | TArray _ | TFn _ | TNamed (("Map" | "Set"), _) -> Printf.sprintf "(stn_dup(%s), %s)" e e
     | TErr _ -> Printf.sprintf "stn_error_dup(%s)" e
     | _ -> Printf.sprintf "dup_%s(%s)" (mangle t) e
 
@@ -592,7 +595,9 @@ let int_suffix k s =
   | U64 -> Printf.sprintf "UINT64_C(%s)" s
   | U32 -> Printf.sprintf "UINT32_C(%s)" s
   | IInt | I64 ->
-      if s = "9223372036854775808" then "INT64_MIN" else Printf.sprintf "INT64_C(%s)" s
+      (* the most negative Int has no decimal literal in C: its magnitude does not fit int64_t *)
+      if s = "9223372036854775808" || s = "-9223372036854775808" then "INT64_MIN" else Printf.sprintf "INT64_C(%s)" s
+  | I32 when s = "-2147483648" -> "INT32_MIN"
   | _ -> s
 
 let float_lit f =
@@ -609,6 +614,7 @@ let unsigned_of = function
 (* Some m when [e] calls a lend function (section 4.6) *)
 let lend_sig fc (e : texpr) : bool option =
   match e.e with
+  | XCall (CBuiltin ("entry@Map", _), _, _) -> Some true
   | XCall (CFn (u, _), _, _) -> (Hashtbl.find fc.st.prog.fns u).fsig.slend
   | XCall (CTrait (tr, ta, m, self, _), _, _) -> (
       match Typecheck.impl_method_in (Typecheck.rtab_of_prog fc.st.prog) tr (List.map (ts fc) ta) m (ts fc self) with
@@ -855,12 +861,18 @@ let rec expr fc (e : texpr) : r =
       (* the result grows by doubling; sizing it up front from the source would evaluate
          the source twice *)
       line fc "StnArray* %s = stn_array_new(%s, 4);" a (elem_ops st elt);
+      comp_loops fc comps (fun () ->
+          let v = own fc (expr fc body) body.ty in
+          let n = tmp fc elt v in
+          line fc "STN_PUSH(&%s, %s, %s);" a (cty st elt) n);
+      { c = a; owned = true }
+
+(* the loops of a comprehension, with [sink] run for each element, in a statement frame of its own *)
+and comp_loops fc (comps : tcomp list) (sink : unit -> unit) =
       let rec go = function
         | [] ->
             push fc FStmt;
-            let v = own fc (expr fc body) body.ty in
-            let n = tmp fc elt v in
-            line fc "STN_PUSH(&%s, %s, %s);" a (cty st elt) n;
+            sink ();
             pop fc
         | cp :: rest ->
             loop_over fc cp.csrc cp.cvar (fun () ->
@@ -877,8 +889,7 @@ let rec expr fc (e : texpr) : r =
                     line fc "}"
                 | None -> go rest)
       in
-      go comps;
-      { c = a; owned = true }
+      go comps
 
 and lit fc t (l : lit) : r =
   match l with
@@ -1264,6 +1275,7 @@ and eq_call fc t a b : string =
   | TStr -> Printf.sprintf "stn_str_eq(%s, %s)" a b
   | TInt _ | TFloat | TF32 | TBool | TChar | TDur | TBytes -> Printf.sprintf "((%s) == (%s))" a b
   | TUnit | TNever -> "1"
+  | TNamed (("Map" | "Set"), _) -> Printf.sprintf "((uint8_t)stn_map_eq(%s, %s))" a b
   | _ -> (
       match Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) "Eq" [] "eq" t with
       | Some (f, ftys) -> Printf.sprintf "%s(%s, %s)" (!request_instance st f ftys) a b
@@ -1296,6 +1308,104 @@ and eq_call fc t a b : string =
             pr st.helpers "static uint8_t %s(%s x, %s y) { %s }\n" n c c body
           end;
           Printf.sprintf "%s(%s, %s)" n a b)
+
+(* The hash of a value, as a uint64_t: SipHash of the bytes of a number or a string, an impl of Hash
+   of the program where there is one, and otherwise one SipHash over the words of its parts, in
+   order: for a tuple, a struct or a data type its fields (a data type's tag first), for an array
+   its length and elements. A part that is a string or has an impl of its own adds its hash as a word. *)
+and hash_call fc t a : string =
+  let st = fc.st in
+  match repr t with
+  | TStr -> Printf.sprintf "stn_hash_bytes((%s)->data, (size_t)(%s)->len)" a a
+  | TInt _ | TBool | TChar | TDur | TBytes -> Printf.sprintf "stn_hash_u64((uint64_t)(%s))" a
+  | TFloat | TF32 -> Printf.sprintf "stn_hash_f64((double)(%s))" a
+  | TUnit | TNever -> "((uint64_t)0)"
+  | _ -> (
+      match Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) "Hash" [] "hash" t with
+      | Some (f, ftys) -> Printf.sprintf "stn_hash_u64((uint64_t)%s(%s))" (!request_instance st f ftys) a
+      | None ->
+          let n = "hash_" ^ mangle t in
+          if not (Hashtbl.mem st.defined n) then begin
+            Hashtbl.replace st.defined n ();
+            let c = cty st t in
+            pr st.protos "static uint64_t %s(%s x);\n" n c;
+            pr st.helpers "static uint64_t %s(%s x) { StnSip s; stn_sip_init(&s); %s return stn_sip_finish(&s); }\n" n c (hash_feed fc t "x")
+          end;
+          Printf.sprintf "%s(%s)" n a)
+
+(* statements that add the words of a value to the SipHash stream s *)
+and hash_feed fc t a : string =
+  let st = fc.st in
+  match repr t with
+  | TInt _ | TBool | TChar | TDur | TBytes -> Printf.sprintf "stn_sip_word(&s, (uint64_t)(%s));" a
+  | TFloat | TF32 -> Printf.sprintf "{ double _d = (double)(%s); uint64_t _b; if (_d == 0) _d = 0; memcpy(&_b, &_d, 8); stn_sip_word(&s, _b); }" a
+  | TUnit | TNever -> ""
+  | TStr -> Printf.sprintf "stn_sip_word(&s, %s);" (hash_call fc t a)
+  | _ when Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) "Hash" [] "hash" t <> None ->
+      Printf.sprintf "stn_sip_word(&s, %s);" (hash_call fc t a)
+  | TArray et ->
+      (* names of their own at each level: an element may be an array too *)
+      let i = fresh st "_hi" and x = fresh st "_hx" in
+      Printf.sprintf "stn_sip_word(&s, (uint64_t)(%s)->len); for (int64_t %s = 0; %s < (%s)->len; %s++) { %s %s = ((%s*)(%s)->data)[%s]; %s }"
+        a i i a i (cty st et) x (cty st et) a i (hash_feed fc et x)
+  | TTuple ts -> String.concat " " (List.mapi (fun i et -> hash_feed fc et (Printf.sprintf "(%s).f%d" a i)) ts)
+  | TNamed _ when is_struct st t -> String.concat " " (List.map (fun (fnm, et) -> hash_feed fc et (Printf.sprintf "(%s).%s" a (fname fnm))) (struct_fields st t))
+  | TNamed _ when is_data st t ->
+      let arms =
+        List.map
+          (fun ((v : variant_info), fs) ->
+            Printf.sprintf "case %d: { %s break; }" v.vindex
+              (String.concat " " (List.mapi (fun i (_, et) -> hash_feed fc et (variant_field st t v i a)) fs)))
+          (variants st t)
+      in
+      Printf.sprintf "stn_sip_word(&s, (uint64_t)%s); switch (%s) { %s }" (tag_of st t a) (tag_of st t a) (String.concat " " arms)
+  | _ -> Printf.sprintf "stn_sip_word(&s, %s);" (hash_call fc t a)
+
+(* The table of a Map[K, V] or a Set[K]: how its keys are hashed, compared, counted, and its values. *)
+and map_ops fc (t : ty) : string =
+  let st = fc.st in
+  let k, v = match repr t with TNamed ("Map", [ k; v ]) -> (k, Some v) | TNamed ("Set", [ k ]) -> (k, None) | _ -> failwith "cgen: map_ops" in
+  let name = "mapops_" ^ mangle t in
+  if not (Hashtbl.mem st.defined name) then begin
+    Hashtbl.replace st.defined name ();
+    let m = mangle t in
+    let kc = cty st k in
+    pr st.protos "static uint64_t mhash_%s(const void* p);\nstatic int meq_%s(const void* a, const void* b);\nstatic const StnMapOps %s;\n" m m name;
+    pr st.helpers "static uint64_t mhash_%s(const void* p) { return %s; }\n" m (hash_call fc k (Printf.sprintf "(*(const %s*)p)" kc));
+    pr st.helpers "static int meq_%s(const void* a, const void* b) { return %s; }\n" m
+      (eq_call fc k (Printf.sprintf "(*(const %s*)a)" kc) (Printf.sprintf "(*(const %s*)b)" kc));
+    let counted (x : ty) = if needs_rc st x then (ignore (elem_ops st x); let xm = mangle x in ("eldup_" ^ xm, "eldrop_" ^ xm)) else ("NULL", "NULL") in
+    let kd, kr = counted k in
+    let vsize, vd, vr, veq =
+      match v with
+      | None -> ("0", "NULL", "NULL", "NULL")
+      | Some v ->
+          let vc = cty st v in
+          let vd, vr = counted v in
+          let has_eq = Typecheck.find_impl (Typecheck.rtab_of_prog st.prog) "Eq" [] v <> None in
+          let veq =
+            if has_eq then begin
+              pr st.protos "static int mveq_%s(const void* a, const void* b);\n" m;
+              pr st.helpers "static int mveq_%s(const void* a, const void* b) { return %s; }\n" m
+                (eq_call fc v (Printf.sprintf "(*(const %s*)a)" vc) (Printf.sprintf "(*(const %s*)b)" vc));
+              "mveq_" ^ m
+            end else "NULL"
+          in
+          (Printf.sprintf "sizeof(%s)" vc, vd, vr, veq)
+    in
+    (* a key of 64 bits that is compared as a number, or a Str with no Eq of the program's, is hashed
+       and compared inside the runtime *)
+    let kind = match repr k with TInt (IInt | I64 | U64) | TDur | TBytes -> "STN_KEY_I64" | TStr -> "STN_KEY_STR" | _ -> "0" in
+    pr st.helpers "static const StnMapOps %s = { sizeof(%s), %s, mhash_%s, meq_%s, %s, %s, %s, %s, %s, %s };\n" name kc vsize m m kd kr vd vr veq kind
+  end;
+  "&" ^ name
+
+(* a lookup of the key k in the table m, inline when the key is a 64-bit integer *)
+and map_find_call (kt : ty) m k =
+  match repr kt with
+  | TInt (IInt | I64 | U64) | TDur | TBytes -> Printf.sprintf "stn_map_find_i64(%s, (uint64_t)%s)" m k
+  | TStr -> Printf.sprintf "stn_map_find_str(%s, %s)" m k
+  | _ -> Printf.sprintf "stn_map_find(%s, &%s)" m k
 
 and cmp_call fc t a b : string =
   let st = fc.st in
@@ -1355,6 +1465,16 @@ and binop fc (e : texpr) op (a : texpr) (b : texpr) : r =
         | _ -> "uint64_t"
       in
       { c = Printf.sprintf "((int64_t)((%s)(%s) %% (%s)(%s)))" uint ab uint bb; owned = false }
+  | (Div | Mod), TInt k
+    when (match b.e with
+          | XLit (LInt lit) -> (let d = Values.parse_int_lit lit in d <> 0L && d <> -1L)
+          | _ -> false) ->
+      (* a divisor that is a literal other than 0 and -1 can neither be zero nor overflow the
+         quotient, so the division is plain C, which the C compiler turns into shifts and multiplies *)
+      (* both operands are converted to the type first: a literal such as INT64_C(-9223372036854775808)
+         can be unsigned in C, which would make the division unsigned *)
+      let ct = cty fc.st (TInt k) in
+      { c = Printf.sprintf "((%s)((%s)(%s) %s (%s)(%s)))" ct ct ab (if op = Div then "/" else "%") ct bb; owned = false }
   | (Add | Sub | Mul | Div | Mod), (TInt k) ->
       let f = match op with Add -> "add" | Sub -> "sub" | Mul -> "mul" | Div -> "div" | _ -> "rem" in
       { c = Printf.sprintf "stn_%s_%s(%s, %s, %s)" f (kname k) ab bb la; owned = false }
@@ -1948,6 +2068,37 @@ and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) ?pop_array ?i
           line fc "}";
           pop fc
       | _ -> unsupported a.l "for ... in mut with a pattern")
+  | IArray ({ e = XCall (CBuiltin (("entries@Map" | "items@Set" as source), tys), [ src ], _); _ }, _) ->
+      (* a Map or a Set is walked where it is, entry by entry in insertion order, with no array of
+         its entries made first. The loop holds a reference of its own, so a write in the body makes
+         the variable a table of its own and the walk goes on over the one it started with. *)
+      let tys = List.map (ts fc) tys in
+      let mt = ts fc src.a.ty in
+      let mv = tmp fc mt (own fc (expr fc src.a) mt) in
+      own_in fc mv mt;
+      let pos = fresh st "_pos" and e = fresh st "_e" in
+      before ();
+      line fc "int64_t %s = 0;" pos;
+      line fc "for (char* %s; (%s = stn_map_next(%s, &%s)); ) {" e e mv pos;
+      fc.ind <- fc.ind + 1;
+      push fc FLoop;
+      let kt = List.hd tys in
+      let et, x =
+        if source = "entries@Map" then begin
+          let vt = List.nth tys 1 in
+          let pair = TTuple [ kt; vt ] in
+          (pair, tmp fc pair (Printf.sprintf "(%s){ *(%s*)(%s + %s->koff), *(%s*)(%s + %s->voff) }" (ct fc pair) (ct fc kt) e mv (ct fc vt) e mv))
+        end
+        else (kt, tmp fc kt (Printf.sprintf "*(%s*)(%s + %s->koff)" (ct fc kt) e mv))
+      in
+      let _, binds = pat_test fc et p x in
+      bind_pattern fc binds;
+      push fc FScope;
+      body ();
+      pop fc;
+      pop fc;
+      fc.ind <- fc.ind - 1;
+      line fc "}"
   | IArray (a, _) ->
       let et = match repr (ts fc a.ty) with TArray et -> et | _ -> assert false in
       (* the loop holds its own reference, so the body may change the variable freely *)
@@ -2540,6 +2691,218 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       (match repr (elt ()) with
        | TInt (IInt | I64) -> owned (Printf.sprintf "stn_array_filled_i64(%s, %s, %s, %s)" (elem_ops st (elt ())) n xt la)
        | _ -> owned (Printf.sprintf "stn_array_filled(%s, %s, &%s, %s)" (elem_ops st (elt ())) n xt la))
+  (* ---- maps and sets (section 3.6) ---- *)
+  | "lit@Map" | "lit@Set" ->
+      let is_map = name = "lit@Map" in
+      let mt = TNamed ((if is_map then "Map" else "Set"), tys) in
+      let step = if is_map then 2 else 1 in
+      let n = List.length targs / step in
+      let m = tmp fc mt (Printf.sprintf "stn_map_with_capacity(%s, %d)" (map_ops fc mt) n) in
+      own_in fc m mt;
+      for i = 0 to n - 1 do
+        let k = o (i * step) in
+        if is_map then begin
+          let v = o (i * step + 1) in
+          line fc "stn_map_put(&%s, &%s, &%s);" m k v
+        end else line fc "stn_map_put(&%s, &%s, NULL);" m k
+      done;
+      { c = dup_expr st mt m; owned = true }
+  | ("from_pairs@Map" | "from_items@Set")
+    when (match (arg 0).a.e with XComp (body, _) -> (name = "from_items@Set" || (match body.e with XTuple [ _; _ ] -> true | _ -> false)) | _ -> false) ->
+      (* a comprehension into a Map or a Set puts each element as it is made, with no array first *)
+      let is_map = name = "from_pairs@Map" in
+      let mt = TNamed ((if is_map then "Map" else "Set"), tys) in
+      let body, comps = match (arg 0).a.e with XComp (b, cs) -> (b, cs) | _ -> assert false in
+      let m = fresh st "_t" in
+      line fc "StnMap* %s = stn_map_new(%s);" m (map_ops fc mt);
+      comp_loops fc comps (fun () ->
+          match body.e with
+          | XTuple [ ke; ve ] when is_map ->
+              let k = tmp fc ke.ty (own fc (expr fc ke) ke.ty) in
+              let v = tmp fc ve.ty (own fc (expr fc ve) ve.ty) in
+              line fc "stn_map_put(&%s, &%s, &%s);" m k v
+          | _ ->
+              let k = tmp fc body.ty (own fc (expr fc body) body.ty) in
+              line fc "stn_map_put(&%s, &%s, NULL);" m k);
+      { c = m; owned = true }
+  | "from_pairs@Map" | "from_items@Set" ->
+      (* the array of the comprehension is owned here: its elements move into the table, and it is
+         freed without dropping them *)
+      let is_map = name = "from_pairs@Map" in
+      let mt = TNamed ((if is_map then "Map" else "Set"), tys) in
+      let et = if is_map then TTuple tys else List.hd tys in
+      let a = o 0 in
+      let m = tmp fc mt (Printf.sprintf "stn_map_with_capacity(%s, %s->len)" (map_ops fc mt) a) in
+      let i = fresh st "_i" in
+      line fc "for (int64_t %s = 0; %s < %s->len; %s++) {" i i a i;
+      line fc "  %s _x = ((%s*)%s->data)[%s];" (cty st et) (cty st et) a i;
+      if is_map then line fc "  stn_map_put(&%s, &_x.f0, &_x.f1);" m else line fc "  stn_map_put(&%s, &_x, NULL);" m;
+      line fc "}";
+      line fc "if (stn_unique(%s)) stn_free(%s); else { for (int64_t %s = 0; %s < %s->len; %s++) { %s } stn_drop(%s, stn_array_release); }" a a i i a i
+        (if needs_rc st et then dup_stmt st et (Printf.sprintf "((%s*)%s->data)[%s]" (cty st et) a i) else "") a;
+      { c = m; owned = true }
+  | "entries@Map" ->
+      let kt, vt = (List.nth tys 0, List.nth tys 1) in
+      let pair = TTuple [ kt; vt ] in
+      let m = tmp fc (TNamed ("Map", tys)) (b 0) in
+      let a = tmp fc (TArray pair) (Printf.sprintf "stn_array_new(%s, (%s)->len > 0 ? (%s)->len : 1)" (elem_ops st pair) m m) in
+      let pos = fresh st "_pos" and e = fresh st "_e" in
+      line fc "{ int64_t %s = 0; for (char* %s; (%s = stn_map_next(%s, &%s)); ) {" pos e e m pos;
+      line fc "  %s _k = *(%s*)(%s + (%s)->koff); %s _v = *(%s*)(%s + (%s)->voff);" (cty st kt) (cty st kt) e m (cty st vt) (cty st vt) e m;
+      line fc "  ((%s*)%s->data)[%s->len++] = (%s){ %s, %s };" (cty st pair) a a (cty st pair) (dup_expr st kt "_k") (dup_expr st vt "_v");
+      line fc "} }";
+      { c = a; owned = true }
+  | "items@Set" ->
+      let kt = List.hd tys in
+      let m = tmp fc (TNamed ("Set", tys)) (b 0) in
+      let a = tmp fc (TArray kt) (Printf.sprintf "stn_array_new(%s, (%s)->len > 0 ? (%s)->len : 1)" (elem_ops st kt) m m) in
+      let pos = fresh st "_pos" and e = fresh st "_e" in
+      line fc "{ int64_t %s = 0; for (char* %s; (%s = stn_map_next(%s, &%s)); ) {" pos e e m pos;
+      line fc "  %s _k = *(%s*)(%s + (%s)->koff);" (cty st kt) (cty st kt) e m;
+      line fc "  ((%s*)%s->data)[%s->len++] = %s;" (cty st kt) a a (dup_expr st kt "_k");
+      line fc "} }";
+      { c = a; owned = true }
+  | "len@Map" | "len@Set" -> value (Printf.sprintf "((%s)->len)" (b 0))
+  | "index@Map" | "index_or@Map" | "get@Map" ->
+      let kt, vt = (List.nth tys 0, List.nth tys 1) in
+      let m = tmp fc (TNamed ("Map", tys)) (b 0) in
+      let k = tmp fc kt (b 1) in
+      let start = if name = "index_or@Map" then Some (o 2) else None in
+      let p = fresh st "_p" in
+      line fc "%s* %s = (%s*)%s;" (cty st vt) p (cty st vt) (map_find_call (List.hd tys) m k);
+      (match name, start with
+       | "index@Map", _ ->
+           line fc "if (!%s) stn_trap(\"missing key\", %s, \"the Map has no entry for this key\");" p la;
+           { c = tmp fc vt (dup_expr st vt ("*" ^ p)); owned = true }
+       | "index_or@Map", Some start ->
+           let res = fresh st "_r" in
+           line fc "%s %s;" (cty st vt) res;
+           line fc "if (%s) { %s = %s; %s } else %s = %s;" p res (dup_expr st vt ("*" ^ p))
+             (if needs_rc st vt then drop_stmt st vt start else "") res start;
+           { c = res; owned = true }
+       | _ ->
+           let res = fresh st "_r" in
+           line fc "%s %s;" (ct fc t) res;
+           line fc "if (%s) {" p;
+           let held = tmp fc vt (dup_expr st vt ("*" ^ p)) in
+           let sv = construct fc t 1 [ held ] in
+           line fc "  %s = %s;" res sv.c;
+           line fc "} else {";
+           let nv = construct fc t 0 [] in
+           line fc "  %s = %s;" res nv.c;
+           line fc "}";
+           { c = res; owned = true })
+  | "contains@Map" | "contains@Set" ->
+      let mt = TNamed ((if name = "contains@Map" then "Map" else "Set"), tys) in
+      let m = tmp fc mt (b 0) in
+      let k = tmp fc (List.hd tys) (b 1) in
+      value (tmp fc TBool (Printf.sprintf "(%s != NULL)" (map_find_call (List.hd tys) m k)))
+  | "put@Map"
+    when (match (arg 0).a.e, (arg 1).a.e, (arg 2).a.e with
+          | XVar root, XVar key, XBin ((Add | Sub | Mul | Div | Mod), { e = XCall (CBuiltin ("index_or@Map", _), [ { a = { e = XVar root'; _ }; _ }; { a = { e = XVar key'; _ }; _ }; _ ], _); _ }, rhs) ->
+              (* m[k] op= e where e is a literal or another variable: nothing in it can reach the Map *)
+              root.vid = root'.vid && key.vid = key'.vid
+              && (match rhs.e with XLit _ -> true | XVar w -> w.vid <> root.vid && not w.vcell | _ -> false)
+          | _ -> false) ->
+      (* the entry is found once, or made with the default of its type, and updated where it is *)
+      let vt = ts fc (List.nth tys 1) in
+      let op, start, rhs =
+        match (arg 2).a.e with
+        | XBin (op, { e = XCall (_, [ _; _; start ], _); _ }, rhs) -> (op, start.a, rhs)
+        | _ -> assert false
+      in
+      let fin = md 0 in
+      (* the key is borrowed: it is counted again only if a new entry keeps it *)
+      let k = tmp fc (ts fc (List.hd tys)) (b 1) in
+      let lv = fin () in
+      let fresh_ = fresh st "_fresh" and p = fresh st "_p" in
+      (match repr (ts fc (List.hd tys)) with
+       | TInt (IInt | I64 | U64) | TDur | TBytes | TStr ->
+           (* a key of 64 bits or a Str that is there already is found inline, in a table nothing else holds *)
+           line fc "int %s = 0; %s* %s = stn_unique(%s) ? (%s*)%s : NULL;" fresh_ (ct fc vt) p lv (ct fc vt) (map_find_call (ts fc (List.hd tys)) lv k);
+           line fc "if (__builtin_expect(!%s, 0)) %s = (%s*)stn_map_slot_ref(&%s, &%s, &%s);" p p (ct fc vt) lv k fresh_
+       | _ -> line fc "int %s; %s* %s = (%s*)stn_map_slot_ref(&%s, &%s, &%s);" fresh_ (ct fc vt) p (ct fc vt) lv k fresh_);
+      line fc "if (%s) {" fresh_;
+      fc.ind <- fc.ind + 1;
+      let sv = expr fc start in
+      line fc "*%s = %s;" p (own fc sv start.ty);
+      fc.ind <- fc.ind - 1;
+      line fc "}";
+      (* the value in the entry stands in for a variable of the operation *)
+      let cur = new_var "$entry" vt false VLocal in
+      Hashtbl.replace fc.vars cur.vid (VDirect (Printf.sprintf "(*%s)" p));
+      let next = expr fc { e = XBin (op, { e = XVar cur; ty = vt; l = e.l }, rhs); ty = vt; l = (arg 2).a.l } in
+      let nv = tmp fc vt (own fc next vt) in
+      Hashtbl.remove fc.vars cur.vid;
+      if needs_rc st vt then line fc "%s" (drop_stmt st vt (Printf.sprintf "(*%s)" p));
+      line fc "*%s = %s;" p nv;
+      unit_ ()
+  | "put@Map" ->
+      let fin = md 0 in
+      let kt = ts fc (List.hd tys) and vt = ts fc (List.nth tys 1) in
+      let k = o 1 in
+      let v = o 2 in
+      let lv = fin () in
+      (match repr kt with
+       | TInt (IInt | I64 | U64) | TDur | TBytes | TStr ->
+           (* an entry that is there already, in a table nothing else holds, is found inline and its
+              value replaced in place; the key given is let go, as stn_map_put would *)
+           let p = fresh st "_p" in
+           line fc "%s* %s = stn_unique(%s) ? (%s*)%s : NULL;" (ct fc vt) p lv (ct fc vt) (map_find_call kt lv k);
+           line fc "if (%s) { %s %s *%s = %s; } else stn_map_put(&%s, &%s, &%s);" p
+             (if needs_rc st kt then drop_stmt st kt k else "")
+             (if needs_rc st vt then drop_stmt st vt ("*" ^ p) else "") p v lv k v
+       | _ -> line fc "stn_map_put(&%s, &%s, &%s);" lv k v);
+      unit_ ()
+  | "entry@Map" ->
+      (* the place of the value of a key that is there, in a table made unshared first; a key that
+         is missing traps, as m[k] does *)
+      let kt = ts fc (List.hd tys) and vt = ts fc (List.nth tys 1) in
+      let fin = md 0 in
+      let k = tmp fc kt (b 1) in
+      let lv = fin () in
+      let p = fresh st "_entry" in
+      line fc "stn_map_make_unique_for_write(&%s);" lv;
+      line fc "%s* %s = (%s*)%s;" (ct fc vt) p (ct fc vt) (map_find_call kt lv k);
+      line fc "if (!%s) stn_trap(\"missing key\", %s, \"the Map has no entry for this key\");" p la;
+      value (Printf.sprintf "(*%s)" p)
+  | "add@Set" ->
+      let fin = md 0 in
+      let k = o 1 in
+      let lv = fin () in
+      line fc "stn_map_put(&%s, &%s, NULL);" lv k;
+      unit_ ()
+  | "remove@Map" ->
+      let vt = List.nth tys 1 in
+      let fin = md 0 in
+      let k = tmp fc (List.hd tys) (b 1) in
+      let lv = fin () in
+      let out = fresh st "_x" and res = fresh st "_r" in
+      line fc "%s %s; %s %s;" (cty st vt) out (ct fc t) res;
+      line fc "if (stn_map_remove(&%s, &%s, &%s)) {" lv k out;
+      let sv = construct fc t 1 [ out ] in
+      line fc "  %s = %s;" res sv.c;
+      line fc "} else {";
+      let nv = construct fc t 0 [] in
+      line fc "  %s = %s;" res nv.c;
+      line fc "}";
+      { c = res; owned = true }
+  | "remove@Set" ->
+      let fin = md 0 in
+      let k = tmp fc (List.hd tys) (b 1) in
+      let lv = fin () in
+      value (tmp fc TBool (Printf.sprintf "((uint8_t)stn_map_remove(&%s, &%s, NULL))" lv k))
+  | "clear@Map" | "clear@Set" ->
+      let lv = m 0 in
+      line fc "stn_map_clear(&%s);" lv;
+      unit_ ()
+  | "union@Set" | "intersection@Set" | "difference@Set" ->
+      let st_ = TNamed ("Set", tys) in
+      ignore (map_ops fc st_);
+      let a = tmp fc st_ (b 0) in
+      let bb = tmp fc st_ (b 1) in
+      let f = match name with "union@Set" -> "stn_set_union" | "intersection@Set" -> "stn_set_intersection" | _ -> "stn_set_difference" in
+      owned (Printf.sprintf "%s(%s, %s)" f a bb)
   | "copy@T" ->
       let x = expr fc (arg 0).a in
       { c = tmp fc t (own fc x t); owned = true }
@@ -2670,7 +3033,11 @@ let compile_instance st cname uname tys =
   (* A C compiler guesses how often each block runs, and treats the late arms of a long chain of
      tests as cold: a loop inlined there is then compiled for size, without the conditional moves
      it would get anywhere else. Every Starnite function is compiled for speed instead. *)
-  pr b "STN_HOT %s {\n" header;
+  (* main is left out: it runs once, and made hot it has the whole program inlined into it, where
+     the C compiler loses what the restrict parameters of the functions it inlines said (the
+     spectral-norm benchmark ran 2.1 times as long) *)
+  let is_main = match st.prog.main with Some m -> m = uname | None -> false in
+  pr b "%s%s {\n" (if is_main then "" else "STN_HOT ") header;
   push fc FFun;
   List.iter
     (fun (v, m, t) ->

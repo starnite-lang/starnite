@@ -1,0 +1,34 @@
+# Map and Set equality honors an Eq of the program on keys and values, wherever they sit, and
+# does not depend on whether two Maps share storage; keys that are nested arrays hash in C (3.6).
+type Tagged = struct(id: Int, label: Str)
+
+impl Eq for Tagged:
+    fn eq(a: Tagged, b: Tagged) -> Bool:
+        a.id == b.id
+
+impl Hash for Tagged:
+    fn hash(t: Tagged) -> Int:
+        t.id
+
+type Box = struct(m: Map[Tagged, Int])
+
+fn main():
+    let a = {Tagged(1, "a"): 10, Tagged(2, "b"): 20}
+    let b = {Tagged(2, "y"): 20, Tagged(1, "x"): 10}
+    let c = {Tagged(1, "a"): 11, Tagged(2, "b"): 20}
+    let s = {Tagged(1, "a"), Tagged(2, "b")}
+    let t = {Tagged(2, "q"), Tagged(1, "p")}
+    print(f"{a == b} {a == c} {s == t} {Box(a) == Box(b)} {[a] == [b]} {(a, 1) == (b, 1)} {Some(s) == Some(t)}")
+    let nan = 0.0 / 0.0
+    let m = {"x": nan}
+    let copy = m
+    let built = {"x": nan}
+    let ns = {nan}
+    let nsc = ns
+    print(f"{m == copy} {m == built} {m == m} {ns == nsc}")
+    var deep: Map[Array[Array[Int]], Int] = {}
+    deep[[[1]]] = 1
+    deep[[[1], [2, 3]]] = 2
+    deep[[[1]]] += 5
+    let three: Map[Array[Array[Array[Int]]], Str] = {[[[7]]]: "x"}
+    print(f"{deep} {deep[[[1], [2, 3]]]} {three[[[[7]]]]} {len(three)}")

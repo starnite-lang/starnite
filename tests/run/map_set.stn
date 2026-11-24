@@ -1,0 +1,174 @@
+# Map and Set (section 3.6): insertion-ordered hash tables with value semantics.
+type Point = struct(x: Int, y: Int)
+type Colour = Red | Green | Rgb(r: Int, g: Int, b: Int)
+type Shelf = struct(name: Str, books: Map[Str, Int], tags: Set[Str])
+
+# a key type with its own Eq and Hash: letters compare without their case
+type Word = struct(text: Str)
+
+fn lower(s: Str) -> Str:
+    var out = ""
+    for c in chars(s):
+        let n = Int(c)
+        if n >= 65 and n <= 90:
+            out = out + f"{Char(n + 32)}"
+        else:
+            out = out + f"{c}"
+    out
+
+impl Eq for Word:
+    fn eq(a: Word, b: Word) -> Bool:
+        lower(a.text) == lower(b.text)
+
+impl Hash for Word:
+    fn hash(w: Word) -> Int:
+        len(lower(w.text))
+
+fn count_words(text: Str) -> Map[Str, Int]:
+    var counts: Map[Str, Int] = {}
+    for w in words(text):
+        counts[w] += 1
+    counts
+
+fn bump(mut m: Map[Str, Int], k: Str):
+    m[k] += 100
+
+fn total(m: Map[Str, Int]) -> Int:
+    var t = 0
+    for (_, v) in m:
+        t += v
+    t
+
+fn main():
+    # literals, the empty forms, and order of insertion
+    var m: Map[Str, Int] = {}
+    m["b"] = 2
+    m["a"] = 1
+    m["b"] = 20
+    let n = {"x": 1, "y": 2, "x": 3}
+    let e: Map[Int, Int] = Map()
+    print(f"{m} {n} {e} {len(m)} {len(n)} {len(e)}")
+    # lookups
+    print(f"{m["b"]} {m.get("a")} {m.get("zz")} {m.contains("a")} {contains(m, "q")}")
+    # a missing key starts from the default of the value type
+    var tally: Map[Str, Float] = {}
+    tally["pi"] += 3.5
+    tally["pi"] *= 2.0
+    var texts: Map[Int, Str] = {}
+    texts[7] += "se"
+    texts[7] += "ven"
+    print(f"{tally} {texts} {count_words("the cat and the hat and the bat")}")
+    # removal: the entry goes, the order of the rest stays, and a key put again goes to the end
+    var r = {"one": 1, "two": 2, "three": 3}
+    let gone = r.remove("two")
+    let none = r.remove("two")
+    r["two"] = 22
+    print(f"{gone} {none} {r}")
+    # value semantics: a copy is not changed by a write to the other
+    var a = {"k": [1, 2]}
+    let b = a
+    a["k"] = [9]
+    a["j"] = []
+    var c = b
+    c.clear()
+    print(f"{a} {b} {c} {len(c)}")
+    bump(mut m, "a")
+    bump(mut m, "new")
+    print(f"{m} {total(m)}")
+    # keys: integers, booleans, characters, floats, tuples, structs, data types, arrays
+    var ints: Map[Int, Str] = {-1: "neg", 0: "zero", 9223372036854775807: "max"}
+    ints[-1] = "minus"
+    let bools = {true: 1, false: 0}
+    let letters = {'a': 1, 'é': 2}
+    let reals = {0.5: "half", -0.0: "zero"}
+    print(f"{ints} {bools} {letters} {reals} {reals[0.0]}")
+    var grid: Map[(Int, Int), Str] = {}
+    grid[(0, 0)] = "origin"
+    grid[(1, -1)] = "se"
+    grid[(0, 0)] = "centre"
+    var pts: Map[Point, Int] = {Point(1, 2): 12}
+    pts[Point(1, 2)] += 1
+    pts[Point(2, 1)] += 1
+    let cols = {Red: "r", Rgb(1, 2, 3): "x", Green: "g", Rgb(1, 2, 3): "y"}
+    let rows = {[1, 2]: "a", []: "b", [1, 2]: "c"}
+    print(f"{grid} {len(pts)} {pts[Point(1, 2)]} {pts[Point(2, 1)]} {len(cols)} {cols[Rgb(1, 2, 3)]} {rows}")
+    # a key type with an Eq and a Hash of its own
+    var seen: Map[Word, Int] = {}
+    seen[Word("Hello")] += 1
+    seen[Word("HELLO")] += 1
+    seen[Word("world")] += 1
+    print(f"{len(seen)} {seen[Word("hello")]} {seen.contains(Word("WORLD"))} {seen.contains(Word("word"))}")
+    # nested collections
+    var index: Map[Str, Array[Int]] = {}
+    index["evens"] = [2, 4]
+    var deep: Map[Str, Map[Str, Int]] = {"in": {"a": 1}}
+    var inner = deep["in"]
+    inner["b"] = 2
+    deep["in2"] = inner
+    let shelf = Shelf("top", {"dune": 1}, {"sf", "classic"})
+    let opt: Map[Str, Int]? = Some({"o": 1})
+    print(f"{index} {deep} {shelf.books} {shelf.tags} {opt}")
+    # iteration visits what the collection held when the loop started
+    var grow = {"a": 1, "b": 2}
+    for (k, v) in grow:
+        grow[k + k] = v * 10
+    print(f"{grow} {[k for (k, _) in grow]} {[v for (_, v) in grow if v > 5]}")
+    # equality does not depend on order
+    print(f"{{"a": 1, "b": 2} == {"b": 2, "a": 1}} {{"a": 1} == {"a": 2}} {{"a": 1} != {"a": 1, "b": 1}}")
+    # sets
+    var s = {3, 1, 2, 3, 1}
+    s.add(9)
+    s.add(1)
+    let had = s.remove(3)
+    let not_had = s.remove(42)
+    let empty: Set[Str] = Set()
+    print(f"{s} {len(s)} {had} {not_had} {s.contains(9)} {s.contains(3)} {empty} {len(empty)}")
+    let u = s | {7, 1}
+    let i = s & {1, 9, 5}
+    let d = s - {1}
+    print(f"{u} {i} {d} {s == {9, 2, 1}} {s == {1, 2}} {(s | s) == s} {s - s}")
+    var names: Set[Str] = {}
+    for w in words("b a b c a"):
+        names.add(w)
+    let pairs = {(1, 2), (2, 1), (1, 2)}
+    print(f"{names} {pairs} {[x * 2 for x in s]}")
+    # enough entries to grow the table several times, with removals along the way
+    var big: Map[Int, Int] = {}
+    for k in 0..3000:
+        big[k * 7 % 3001] = k
+    for k in 0..3000:
+        if k % 3 == 0:
+            let _ = big.remove(k)
+    var sum = 0
+    for (k, v) in big:
+        sum += k - v
+    var bs: Set[Int] = {}
+    for k in 0..2000:
+        bs.add(k * k % 1009)
+    print(f"{len(big)} {sum} {big[1]} {big.get(3)} {len(bs)}")
+    # comprehensions: a later pair with an equal key replaces the value and keeps the place
+    let ws = words("pear fig apple fig kiwi")
+    let lengths = {w: len(w) for w in ws}
+    let firsts = {chars(w)[0] for w in ws}
+    let squares = {k: k * k for k in 0..5 if k % 2 == 0}
+    let swapped = {v: k for (k, v) in {"a": 1, "b": 2, "c": 1}}
+    let names_of: Map[Int, Array[Str]] = {n: [w for w in ws if len(w) == n] for n in [3, 4, 5]}
+    let nothing: Set[Int] = {x for x in 0..3 if x > 9}
+    print(f"{lengths} {firsts} {squares} {swapped} {names_of} {nothing} {len(nothing)}")
+    # an entry is a place inside a longer one: a field, an element, a mut argument, a loop
+    var shelves = {"top": Shelf("t", {"a": 1}, {"x"}), "low": Shelf("l", {}, {})}
+    let snap = shelves
+    shelves["top"].name = "T"
+    shelves["top"].books["b"] = 2
+    shelves["top"].books["a"] += 10
+    shelves["low"].tags.add("y")
+    var lists: Map[Str, Array[Int]] = {"p": [], "q": [5, 6]}
+    lists["p"].push(1)
+    lists["q"][0] = 50
+    for x in mut lists["q"]:
+        x = x + 1
+    var levels = {"o": {"i": 1}}
+    levels["o"]["i"] += 1
+    levels["o"]["j"] = 7
+    print(f"{shelves["top"].name} {shelves["top"].books} {shelves["low"].tags} {snap["top"].name} {snap["top"].books} {lists} {levels}")
+    print(f"{m["missing"]}")

@@ -1,0 +1,6 @@
+# expect: E0323 5:16
+type P = struct(x: Int)
+fn main():
+    var m = {"a": P(1), "b": P(2)}
+    m["a"].x = m["b"].x
+    print("x")

@@ -49,6 +49,8 @@ and expr_d =
   | ArrayLit of expr list
   | ArrayRepeat of expr * expr                   (* [x; n]: n copies of x *)
   | Comp of expr * comp list
+  | MapComp of expr * expr * comp list           (* {k: v for ...} *)
+  | SetComp of expr * comp list                  (* {x for ...} *)
   | BraceLit of expr list                        (* set literal (milestone 2) *)
   | MapLit of (expr * expr) list                 (* map literal (milestone 2) *)
   | IfE of expr * expr * expr

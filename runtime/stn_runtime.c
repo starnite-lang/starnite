@@ -791,6 +791,446 @@ int64_t stn_clock_ns(void) {
     return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
+/* ---- maps and sets (section 3.6) ---- */
+uint64_t stn_hash_k0 = UINT64_C(0x0706050403020100), stn_hash_k1 = UINT64_C(0x0f0e0d0c0b0a0908);
+
+/* The key of the hash is drawn once, when the program starts, so that chosen keys cannot be made to
+   collide. Nothing a program can observe depends on it: iteration follows insertion. */
+static void stn_hash_init(void) {
+    uint64_t k[2];
+    int got = 0;
+    FILE* f = fopen("/dev/urandom", "rb");
+    if (f) { got = fread(k, sizeof k, 1, f) == 1; fclose(f); }
+    if (!got) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        k[0] = (uint64_t)ts.tv_nsec ^ ((uint64_t)ts.tv_sec << 20) ^ (uint64_t)(uintptr_t)&k;
+        k[1] = (uint64_t)getpid() * UINT64_C(0x9E3779B97F4A7C15) ^ (uint64_t)(uintptr_t)&stn_hash_init;
+    }
+    stn_hash_k0 = k[0]; stn_hash_k1 = k[1];
+}
+
+uint64_t stn_hash_bytes(const void* p, size_t n) {
+    const unsigned char* in = (const unsigned char*)p;
+    uint64_t v0 = stn_hash_k0 ^ UINT64_C(0x736f6d6570736575), v1 = stn_hash_k1 ^ UINT64_C(0x646f72616e646f6d);
+    uint64_t v2 = stn_hash_k0 ^ UINT64_C(0x6c7967656e657261), v3 = stn_hash_k1 ^ UINT64_C(0x7465646279746573);
+    size_t i = 0;
+    for (; n - i >= 8; i += 8) {
+        uint64_t m;
+        memcpy(&m, in + i, 8);
+        v3 ^= m; STN_SIPROUND; v0 ^= m;
+    }
+    /* the last 0 to 7 bytes, in at most two loads that may overlap: a byte read twice lands on
+       the same bits both times */
+    uint64_t b = (uint64_t)n << 56;
+    size_t r = n - i;
+    if (r >= 4) {
+        uint32_t lo, hi;
+        memcpy(&lo, in + i, 4);
+        memcpy(&hi, in + i + r - 4, 4);
+        b |= (uint64_t)lo | ((uint64_t)hi << ((r - 4) * 8));
+    } else if (r >= 2) {
+        uint16_t lo;
+        memcpy(&lo, in + i, 2);
+        b |= (uint64_t)lo | ((uint64_t)in[i + r - 1] << ((r - 1) * 8));
+    } else if (r == 1) b |= in[i];
+    v3 ^= b; STN_SIPROUND; v0 ^= b;
+    v2 ^= 0xff; STN_SIPROUND; STN_SIPROUND; STN_SIPROUND;
+    return v0 ^ v1 ^ v2 ^ v3;
+}
+
+/* The hash word of an entry: never 0, which marks a tombstone. */
+static inline uint64_t stn_map_word(uint64_t h) { return h | (uint64_t)(h == 0); }
+
+/* The two key types that most tables have are hashed and compared in place; any other goes
+   through the functions of its table. */
+static inline uint64_t stn_key_word(const StnMapOps* ops, const void* key) {
+    if (ops->kind == STN_KEY_I64) return stn_map_word(stn_hash_u64(*(const uint64_t*)key));
+    if (ops->kind == STN_KEY_STR) { StnStr s = *(const StnStr*)key; return stn_map_word(stn_hash_bytes(s->data, (size_t)s->len)); }
+    return stn_map_word(ops->hash(key));
+}
+static inline int stn_key_eq(const StnMapOps* ops, const void* a, const void* b) {
+    if (ops->kind == STN_KEY_I64) return *(const uint64_t*)a == *(const uint64_t*)b;
+    if (ops->kind == STN_KEY_STR) return stn_str_eq(*(const StnStr*)a, *(const StnStr*)b);
+    return ops->eq(a, b);
+}
+
+/* The index has a power of two of slots, 16 or more. Each slot has a control byte: STN_FREE, or
+   STN_DEAD for a slot whose entry was removed, or the low seven bits of the hash of the entry it
+   names. The control bytes are searched a group of sixteen at a time, and only a slot whose byte
+   matches has its entry looked at, so a key that is not there is mostly settled within the control
+   bytes, which are small enough to stay in the cache. Beside them, each slot has the place of its
+   entry in the dense array, in 1, 2, 4 or 8 bytes as the capacity needs. */
+#define STN_FREE 0xFF
+#define STN_DEAD 0x80
+#define STN_GROUP 16
+
+static inline unsigned stn_place_width(int64_t cap) { return cap <= 256 ? 1 : cap <= 65536 ? 2 : cap <= INT64_C(4294967296) ? 4 : 8; }
+static inline uint64_t stn_place_get(const uint8_t* places, unsigned width, uint64_t i) {
+    switch (width) {
+        case 1: return places[i];
+        case 2: { uint16_t v; memcpy(&v, places + i * 2, 2); return v; }
+        case 4: { uint32_t v; memcpy(&v, places + i * 4, 4); return v; }
+        default: { uint64_t v; memcpy(&v, places + i * 8, 8); return v; }
+    }
+}
+static inline void stn_place_set(uint8_t* places, unsigned width, uint64_t i, uint64_t v) {
+    switch (width) {
+        case 1: places[i] = (uint8_t)v; break;
+        case 2: { uint16_t x = (uint16_t)v; memcpy(places + i * 2, &x, 2); break; }
+        case 4: { uint32_t x = (uint32_t)v; memcpy(places + i * 4, &x, 4); break; }
+        default: memcpy(places + i * 8, &v, 8);
+    }
+}
+/* the slots of a group whose control byte is this tag, and those that are free or dead, as bits */
+static inline unsigned stn_group_match(const uint8_t* g, uint8_t tag) {
+#if defined(__SSE2__)
+    return (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_loadu_si128((const __m128i_u*)g), _mm_set1_epi8((char)tag)));
+#else
+    unsigned bits = 0;
+    for (unsigned i = 0; i < STN_GROUP; i++) bits |= (unsigned)(g[i] == tag) << i;
+    return bits;
+#endif
+}
+static inline unsigned stn_group_unused(const uint8_t* g) {
+#if defined(__SSE2__)
+    return (unsigned)_mm_movemask_epi8(_mm_loadu_si128((const __m128i_u*)g));
+#else
+    unsigned bits = 0;
+    for (unsigned i = 0; i < STN_GROUP; i++) bits |= (unsigned)(g[i] >> 7) << i;
+    return bits;
+#endif
+}
+/* the first sixteen control bytes are kept again after the last, so a group that starts near the
+   end reads on without wrapping */
+static inline void stn_ctrl_set(uint8_t* ctrl, uint64_t mask, uint64_t i, uint8_t c) {
+    ctrl[i] = c;
+    if (i < STN_GROUP) ctrl[mask + 1 + i] = c;
+}
+/* entries the index of this size takes before it grows: seven eighths of its slots */
+static inline int64_t stn_map_room(uint32_t ilog) { return (int64_t)(((uint64_t)1 << ilog) / 8 * 7); }
+static inline size_t stn_index_bytes(uint32_t ilog, unsigned width) {
+    size_t slots = (size_t)1 << ilog;
+    return slots + STN_GROUP + slots * width;
+}
+
+StnMap* stn_map_new(const StnMapOps* ops) {
+    StnMap* m = (StnMap*)stn_alloc(sizeof(StnMap));
+    m->len = 0; m->used = 0; m->cap = 0; m->ilog = 0; m->ops = ops;
+    m->koff = ops->kind == STN_KEY_I64 ? 0 : 8;
+    m->voff = (uint32_t)(m->koff + ((ops->ksize + 7) & ~(size_t)7));
+    m->stride = (uint32_t)(m->voff + ((ops->vsize + 7) & ~(size_t)7));
+    m->index = NULL; m->places = NULL; m->entries = NULL; m->dead = NULL;
+    return m;
+}
+
+/* the hash word of an entry, stored or worked out again from its key */
+static inline uint64_t stn_entry_word(const StnMap* m, const char* e) {
+    if (m->koff) return *(const uint64_t*)e;
+    return stn_key_word(m->ops, e);
+}
+
+_Noreturn static void stn_map_oom(void) { fputs("trap: out of memory\n", stderr); exit(2); }
+
+/* The slot for a new entry with this hash word: the first one free or dead on its path. */
+static inline uint64_t stn_map_free_slot(const uint8_t* ctrl, uint64_t mask, uint64_t w) {
+    uint64_t pos = (w >> 7) & mask, step = 0;
+    for (;;) {
+        unsigned unused = stn_group_unused(ctrl + pos);
+        if (unused) return (pos + (unsigned)__builtin_ctz(unused)) & mask;
+        step += STN_GROUP;
+        pos = (pos + step) & mask;
+    }
+}
+
+/* Gives the table an index of 1 << ilog slots and room for the entries that go with it. The live
+   entries close up over the tombstones, in their order and in the buffer they are in, which then
+   grows or shrinks in place where the allocator can; the index is made anew from their hashes. */
+static void stn_map_rebuild(StnMap* m, uint32_t ilog) {
+    if (ilog > 40) stn_too_large("<runtime>", 0, 0);
+    uint64_t slots = (uint64_t)1 << ilog, mask = slots - 1;
+    int64_t cap = stn_map_room(ilog);
+    unsigned width = stn_place_width(cap);
+    if (m->used != m->len) {
+        int64_t n = 0;
+        for (int64_t i = 0; i < m->used; i++) {
+            char* e = m->entries + (size_t)i * m->stride;
+            if (stn_map_dead(m, i, e)) continue;
+            if (i != n) memcpy(m->entries + (size_t)n * m->stride, e, m->stride);
+            n++;
+        }
+        m->used = n;
+    }
+    free(m->dead); m->dead = NULL;
+    char* entries = (char*)realloc(m->entries, (size_t)cap * m->stride);
+    uint8_t* index = (uint8_t*)malloc(stn_index_bytes(ilog, width));
+    if (!index || !entries) stn_map_oom();
+    memset(index, STN_FREE, slots + STN_GROUP);
+    uint8_t* places = index + slots + STN_GROUP;
+    for (int64_t i = 0; i < m->used; i++) {
+        uint64_t w = m->koff ? *(const uint64_t*)(entries + (size_t)i * m->stride) : stn_key_word(m->ops, entries + (size_t)i * m->stride);
+        uint64_t s = stn_map_free_slot(index, mask, w);
+        stn_ctrl_set(index, mask, s, (uint8_t)(w & 0x7F));
+        stn_place_set(places, width, s, (uint64_t)i);
+    }
+    free(m->index);
+    m->index = index; m->places = places; m->entries = entries; m->ilog = ilog; m->cap = cap;
+}
+
+static uint32_t stn_map_ilog_for(int64_t n) {
+    uint32_t ilog = 4;
+    while (stn_map_room(ilog) < n) ilog++;
+    return ilog;
+}
+
+StnMap* stn_map_with_capacity(const StnMapOps* ops, int64_t n) {
+    StnMap* m = stn_map_new(ops);
+    if (n > 0) {
+        if (n > STN_MAX_ALLOC) stn_too_large("<runtime>", 0, 0);
+        stn_map_rebuild(m, stn_map_ilog_for(n));
+    }
+    return m;
+}
+
+void stn_map_release(void* p) {
+    StnMap* m = (StnMap*)p;
+    const StnMapOps* ops = m->ops;
+    if (ops->kdrop || ops->vdrop)
+        for (int64_t i = 0; i < m->used; i++) {
+            char* e = m->entries + (size_t)i * m->stride;
+            if (stn_map_dead(m, i, e)) continue;
+            if (ops->kdrop) ops->kdrop(e + m->koff);
+            if (ops->vdrop) ops->vdrop(e + m->voff);
+        }
+    free(m->index); free(m->entries); free(m->dead);
+    stn_free(m);
+}
+
+/* A write needs the box unshared (section 4.5): the copy keeps the order and shares nothing. */
+static void stn_map_copy_for_write(StnMap** pm) {
+    StnMap* m = *pm;
+    const StnMapOps* ops = m->ops;
+    StnMap* c = stn_map_new(ops);
+    if (m->ilog) {
+        size_t ibytes = stn_index_bytes(m->ilog, stn_place_width(m->cap)), ebytes = (size_t)m->cap * m->stride;
+        c->index = (uint8_t*)malloc(ibytes);
+        c->entries = (char*)malloc(ebytes);
+        if (!c->index || !c->entries) stn_map_oom();
+        memcpy(c->index, m->index, ibytes);
+        c->places = c->index + ((size_t)1 << m->ilog) + STN_GROUP;
+        memcpy(c->entries, m->entries, (size_t)m->used * m->stride);
+        c->ilog = m->ilog; c->cap = m->cap; c->used = m->used; c->len = m->len;
+        if (m->dead) {
+            size_t dbytes = (size_t)((m->cap + 63) / 64) * 8;
+            c->dead = (uint64_t*)malloc(dbytes);
+            if (!c->dead) stn_map_oom();
+            memcpy(c->dead, m->dead, dbytes);
+        }
+        if (ops->kdup || ops->vdup)
+            for (int64_t i = 0; i < c->used; i++) {
+                char* e = c->entries + (size_t)i * c->stride;
+                if (stn_map_dead(c, i, e)) continue;
+                if (ops->kdup) ops->kdup(e + c->koff);
+                if (ops->vdup) ops->vdup(e + c->voff);
+            }
+    }
+    stn_drop(m, stn_map_release);
+    *pm = c;
+}
+static inline void stn_map_make_unique(StnMap** pm) {
+    if (__builtin_expect(!stn_unique(*pm), 0)) stn_map_copy_for_write(pm);
+}
+void stn_map_make_unique_for_write(StnMap** pm) { stn_map_make_unique(pm); }
+
+/* The entry of the key, or NULL. When it is there and slot is given, *slot is the slot of the
+   index that names it. */
+static inline char* stn_map_lookup(const StnMap* m, const void* key, uint64_t w, uint64_t* slot) {
+    if (__builtin_expect(!m->ilog, 0)) return NULL;
+    const StnMapOps* ops = m->ops;
+    const uint8_t* ctrl = m->index;
+    unsigned width = stn_place_width(m->cap);
+    uint64_t mask = ((uint64_t)1 << m->ilog) - 1, pos = (w >> 7) & mask, step = 0;
+    uint8_t tag = (uint8_t)(w & 0x7F);
+    for (;;) {
+        const uint8_t* g = ctrl + pos;
+        for (unsigned hits = stn_group_match(g, tag); hits; hits &= hits - 1) {
+            uint64_t s = (pos + (unsigned)__builtin_ctz(hits)) & mask;
+            char* e = m->entries + (size_t)stn_place_get(m->places, width, s) * m->stride;
+            if ((!m->koff || *(const uint64_t*)e == w) && stn_key_eq(ops, e + m->koff, key)) { if (slot) *slot = s; return e; }
+        }
+        /* a free slot in the group ends the path: the key would have been put there or before */
+#if defined(__SSE2__)
+        if (_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_loadu_si128((const __m128i_u*)g), _mm_set1_epi8((char)STN_FREE)))) return NULL;
+#else
+        if (stn_group_match(g, STN_FREE)) return NULL;
+#endif
+        step += STN_GROUP;
+        pos = (pos + step) & mask;
+    }
+}
+
+void* stn_map_find(const StnMap* m, const void* key) {
+    char* e = stn_map_lookup(m, key, stn_key_word(m->ops, key), NULL);
+    return e ? e + m->voff : NULL;
+}
+
+/* Appends an entry for a key that is known to be absent, and returns it. */
+static inline char* stn_map_append(StnMap* m, uint64_t w, const void* key) {
+    if (__builtin_expect(m->used == m->cap, 0)) {
+        if (m->len >= STN_MAX_ALLOC) stn_too_large("<runtime>", 0, 0);
+        /* mostly tombstones: the same index, emptied of them; otherwise twice the index */
+        uint32_t ilog = !m->ilog ? 4 : (m->len * 2 <= m->cap ? m->ilog : m->ilog + 1);
+        stn_map_rebuild(m, ilog);
+    }
+    uint64_t mask = ((uint64_t)1 << m->ilog) - 1;
+    uint64_t s = stn_map_free_slot(m->index, mask, w);
+    char* e = m->entries + (size_t)m->used * m->stride;
+    if (m->koff) *(uint64_t*)e = w;
+    if (m->ops->ksize == 8) memcpy(e + m->koff, key, 8); else memcpy(e + m->koff, key, m->ops->ksize);
+    stn_ctrl_set(m->index, mask, s, (uint8_t)(w & 0x7F));
+    stn_place_set(m->places, stn_place_width(m->cap), s, (uint64_t)m->used++);
+    m->len++;
+    return e;
+}
+
+void* stn_map_slot(StnMap** pm, const void* key, int* fresh) {
+    stn_map_make_unique(pm);
+    StnMap* m = *pm;
+    const StnMapOps* ops = m->ops;
+    uint64_t w = stn_key_word(ops, key);
+    char* e = stn_map_lookup(m, key, w, NULL);
+    if (e) {
+        /* the key that is there stays; the one given is let go */
+        if (ops->kdrop) ops->kdrop((void*)key);
+        *fresh = 0;
+        return e + m->voff;
+    }
+    *fresh = 1;
+    return stn_map_append(m, w, key) + m->voff;
+}
+
+void* stn_map_slot_ref(StnMap** pm, const void* key, int* fresh) {
+    stn_map_make_unique(pm);
+    StnMap* m = *pm;
+    const StnMapOps* ops = m->ops;
+    uint64_t w = stn_key_word(ops, key);
+    char* e = stn_map_lookup(m, key, w, NULL);
+    if (e) { *fresh = 0; return e + m->voff; }
+    *fresh = 1;
+    e = stn_map_append(m, w, key);
+    if (ops->kdup) ops->kdup(e + m->koff);
+    return e + m->voff;
+}
+
+void stn_map_put(StnMap** pm, const void* key, const void* value) {
+    int fresh;
+    void* v = stn_map_slot(pm, key, &fresh);
+    const StnMapOps* ops = (*pm)->ops;
+    if (!ops->vsize) return;
+    if (!fresh && ops->vdrop) ops->vdrop(v);
+    if (ops->vsize == 8) memcpy(v, value, 8); else memcpy(v, value, ops->vsize);
+}
+
+int stn_map_remove(StnMap** pm, const void* key, void* out) {
+    StnMap* m = *pm;
+    const StnMapOps* ops = m->ops;
+    uint64_t w = stn_key_word(ops, key), s = 0;
+    char* e = stn_map_lookup(m, key, w, &s);
+    if (!e) return 0;
+    if (!stn_unique(m)) {
+        stn_map_copy_for_write(pm);
+        m = *pm;
+        e = stn_map_lookup(m, key, w, &s);
+    }
+    if (ops->kdrop) ops->kdrop(e + m->koff);
+    if (out) { if (ops->vsize) memcpy(out, e + m->voff, ops->vsize); }
+    else if (ops->vdrop) ops->vdrop(e + m->voff);
+    uint64_t mask = ((uint64_t)1 << m->ilog) - 1;
+    if (m->koff) *(uint64_t*)e = 0;
+    else {
+        if (!m->dead) {
+            m->dead = (uint64_t*)calloc((size_t)((m->cap + 63) / 64), 8);
+            if (!m->dead) stn_map_oom();
+        }
+        int64_t i = (e - m->entries) / m->stride;
+        m->dead[i >> 6] |= (uint64_t)1 << (i & 63);
+    }
+    m->len--;
+    if (m->len == 0) {
+        memset(m->index, STN_FREE, (size_t)mask + 1 + STN_GROUP);
+        m->used = 0;
+        free(m->dead); m->dead = NULL;
+    } else {
+        /* the slot stays taken for the paths that pass it, until the index is made anew. Tombstones
+           are closed up when the table next runs out of room, which costs nothing extra since it
+           rebuilds then anyway, or here when they are three quarters of the entries, so that a
+           table that shrinks gives its memory back and a walk over it stays short. */
+        stn_ctrl_set(m->index, mask, s, STN_DEAD);
+        if ((m->used - m->len) * 4 > m->used * 3 && m->used >= 16) {
+            uint32_t ilog = stn_map_ilog_for(m->len);
+            stn_map_rebuild(m, ilog > m->ilog ? m->ilog : ilog);
+        }
+    }
+    return 1;
+}
+
+void stn_map_clear(StnMap** pm) {
+    StnMap* m = *pm;
+    if (m->len == 0 && m->used == 0) return;
+    StnMap* fresh = stn_map_new(m->ops);
+    stn_drop(m, stn_map_release);
+    *pm = fresh;
+}
+
+/* Equal as collections: the same keys, with equal values, in whatever order each was built. */
+int stn_map_eq(const StnMap* a, const StnMap* b) {
+    /* a table is not taken to equal itself: a NaN key or value is unequal to itself, and the
+       answer must not depend on whether two Maps share storage */
+    if (a->len != b->len) return 0;
+    const StnMapOps* ops = a->ops;
+    int64_t pos = 0;
+    for (const char* e; (e = stn_map_next(a, &pos)); ) {
+        const char* f = stn_map_lookup(b, e + a->koff, stn_entry_word(a, e), NULL);
+        if (!f) return 0;
+        if (ops->vsize && !ops->veq(e + a->voff, f + b->voff)) return 0;
+    }
+    return 1;
+}
+
+/* Adds the key of an entry of another set, which brings its hash with it. r is not shared. */
+static inline void stn_set_take(StnMap* r, const char* e) {
+    const StnMapOps* ops = r->ops;
+    uint64_t w = stn_entry_word(r, e);
+    if (stn_map_lookup(r, e + r->koff, w, NULL)) return;
+    char* n = stn_map_append(r, w, e + r->koff);
+    if (ops->kdup) ops->kdup(n + r->koff);
+}
+
+StnMap* stn_set_union(const StnMap* a, const StnMap* b) {
+    StnMap* r = stn_map_with_capacity(a->ops, a->len > b->len ? a->len : b->len);
+    int64_t pos = 0;
+    for (const char* e; (e = stn_map_next(a, &pos)); ) stn_set_take(r, e);
+    pos = 0;
+    for (const char* e; (e = stn_map_next(b, &pos)); ) stn_set_take(r, e);
+    return r;
+}
+
+StnMap* stn_set_intersection(const StnMap* a, const StnMap* b) {
+    StnMap* r = stn_map_new(a->ops);
+    int64_t pos = 0;
+    for (const char* e; (e = stn_map_next(a, &pos)); )
+        if (stn_map_lookup(b, e + a->koff, stn_entry_word(a, e), NULL)) stn_set_take(r, e);
+    return r;
+}
+
+StnMap* stn_set_difference(const StnMap* a, const StnMap* b) {
+    StnMap* r = stn_map_new(a->ops);
+    int64_t pos = 0;
+    for (const char* e; (e = stn_map_next(a, &pos)); )
+        if (!stn_map_lookup(b, e + a->koff, stn_entry_word(a, e), NULL)) stn_set_take(r, e);
+    return r;
+}
+
 /* ---- string built-ins ---- */
 StnArray* stn_str_chars(StnStr s, const StnElemOps* ops) {
     StnArray* a = stn_array_new(ops, s->len > 0 ? s->len : 1);
@@ -1056,6 +1496,7 @@ static void stn_on_fault(int sig, siginfo_t* si, void* ctx) {
     raise(sig);
 }
 void stn_runtime_init(void) {
+    stn_hash_init();
     struct rlimit rl;
     char here;
     stn_stack_high = (uintptr_t)&here;
@@ -1074,7 +1515,7 @@ void stn_runtime_init(void) {
     sigaction(SIGBUS, &sa, NULL);
 }
 #else
-void stn_runtime_init(void) {}
+void stn_runtime_init(void) { stn_hash_init(); }
 #endif
 
 void stn_runtime_exit(int status) {

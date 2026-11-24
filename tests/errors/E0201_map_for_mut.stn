@@ -1,0 +1,5 @@
+# expect: E0201 4:23
+fn main():
+    var m = {"a": 1}
+    for (k, v) in mut m:
+        print(k)

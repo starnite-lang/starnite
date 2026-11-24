@@ -1,0 +1,4 @@
+# expect: E0201 3:34
+fn main():
+    let m: Map[Str, Int] = {"a": "b"}
+    print(f"{len(m)}")
