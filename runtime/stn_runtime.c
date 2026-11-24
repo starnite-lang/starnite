@@ -791,6 +791,309 @@ int64_t stn_clock_ns(void) {
     return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
+/* ---- maps and sets (section 3.6) ---- */
+static uint64_t stn_hash_k0 = UINT64_C(0x0706050403020100), stn_hash_k1 = UINT64_C(0x0f0e0d0c0b0a0908);
+
+/* The key of the hash is drawn once, when the program starts, so that chosen keys cannot be made to
+   collide. Nothing a program can observe depends on it: iteration follows insertion. */
+static void stn_hash_init(void) {
+    uint64_t k[2];
+    int got = 0;
+    FILE* f = fopen("/dev/urandom", "rb");
+    if (f) { got = fread(k, sizeof k, 1, f) == 1; fclose(f); }
+    if (!got) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        k[0] = (uint64_t)ts.tv_nsec ^ ((uint64_t)ts.tv_sec << 20) ^ (uint64_t)(uintptr_t)&k;
+        k[1] = (uint64_t)getpid() * UINT64_C(0x9E3779B97F4A7C15) ^ (uint64_t)(uintptr_t)&stn_hash_init;
+    }
+    stn_hash_k0 = k[0]; stn_hash_k1 = k[1];
+}
+
+#define STN_ROTL(x, b) (((x) << (b)) | ((x) >> (64 - (b))))
+#define STN_SIPROUND do { \
+        v0 += v1; v1 = STN_ROTL(v1, 13); v1 ^= v0; v0 = STN_ROTL(v0, 32); \
+        v2 += v3; v3 = STN_ROTL(v3, 16); v3 ^= v2; \
+        v0 += v3; v3 = STN_ROTL(v3, 21); v3 ^= v0; \
+        v2 += v1; v1 = STN_ROTL(v1, 17); v1 ^= v2; v2 = STN_ROTL(v2, 32); } while (0)
+
+uint64_t stn_hash_u64(uint64_t x) {
+    uint64_t v0 = stn_hash_k0 ^ UINT64_C(0x736f6d6570736575), v1 = stn_hash_k1 ^ UINT64_C(0x646f72616e646f6d);
+    uint64_t v2 = stn_hash_k0 ^ UINT64_C(0x6c7967656e657261), v3 = stn_hash_k1 ^ UINT64_C(0x7465646279746573);
+    v3 ^= x; STN_SIPROUND; v0 ^= x;
+    uint64_t b = (uint64_t)8 << 56;
+    v3 ^= b; STN_SIPROUND; v0 ^= b;
+    v2 ^= 0xff; STN_SIPROUND; STN_SIPROUND; STN_SIPROUND;
+    return v0 ^ v1 ^ v2 ^ v3;
+}
+
+uint64_t stn_hash_bytes(const void* p, size_t n) {
+    const unsigned char* in = (const unsigned char*)p;
+    uint64_t v0 = stn_hash_k0 ^ UINT64_C(0x736f6d6570736575), v1 = stn_hash_k1 ^ UINT64_C(0x646f72616e646f6d);
+    uint64_t v2 = stn_hash_k0 ^ UINT64_C(0x6c7967656e657261), v3 = stn_hash_k1 ^ UINT64_C(0x7465646279746573);
+    size_t i = 0;
+    for (; n - i >= 8; i += 8) {
+        uint64_t m;
+        memcpy(&m, in + i, 8);
+        v3 ^= m; STN_SIPROUND; v0 ^= m;
+    }
+    uint64_t b = (uint64_t)n << 56;
+    for (size_t j = 0; i + j < n; j++) b |= (uint64_t)in[i + j] << (8 * j);
+    v3 ^= b; STN_SIPROUND; v0 ^= b;
+    v2 ^= 0xff; STN_SIPROUND; STN_SIPROUND; STN_SIPROUND;
+    return v0 ^ v1 ^ v2 ^ v3;
+}
+
+/* The hash word of an entry: never 0, which marks a tombstone. */
+static inline uint64_t stn_map_word(uint64_t h) { return h | ((uint64_t)1 << 63); }
+
+/* A slot of the index holds the place of an entry plus one, or 0 when it is free. Its width
+   follows the size of the index, so a small table keeps a small index. */
+static inline unsigned stn_index_width(uint32_t ilog) { return ilog <= 8 ? 1 : ilog <= 16 ? 2 : ilog <= 32 ? 4 : 8; }
+static inline uint64_t stn_index_get(const uint8_t* index, unsigned width, uint64_t i) {
+    switch (width) {
+        case 1: return index[i];
+        case 2: { uint16_t v; memcpy(&v, index + i * 2, 2); return v; }
+        case 4: { uint32_t v; memcpy(&v, index + i * 4, 4); return v; }
+        default: { uint64_t v; memcpy(&v, index + i * 8, 8); return v; }
+    }
+}
+static inline void stn_index_set(uint8_t* index, unsigned width, uint64_t i, uint64_t v) {
+    switch (width) {
+        case 1: index[i] = (uint8_t)v; break;
+        case 2: { uint16_t x = (uint16_t)v; memcpy(index + i * 2, &x, 2); break; }
+        case 4: { uint32_t x = (uint32_t)v; memcpy(index + i * 4, &x, 4); break; }
+        default: memcpy(index + i * 8, &v, 8);
+    }
+}
+/* entries the index of this size takes before it grows: two thirds of its slots, and for the
+   narrowest index no more than a slot can name */
+static inline int64_t stn_map_room(uint32_t ilog) {
+    int64_t room = (int64_t)(((uint64_t)1 << ilog) / 3 * 2);
+    return ilog == 8 && room > 255 ? 255 : room;
+}
+
+StnMap* stn_map_new(const StnMapOps* ops) {
+    StnMap* m = (StnMap*)stn_alloc(sizeof(StnMap));
+    m->len = 0; m->used = 0; m->cap = 0; m->ilog = 0; m->ops = ops;
+    m->voff = (uint32_t)(8 + ((ops->ksize + 7) & ~(size_t)7));
+    m->stride = (uint32_t)(m->voff + ((ops->vsize + 7) & ~(size_t)7));
+    m->index = NULL; m->entries = NULL;
+    return m;
+}
+
+_Noreturn static void stn_map_oom(void) { fputs("trap: out of memory\n", stderr); exit(2); }
+
+/* Gives the table an index of 1 << ilog slots and room for its entries, and moves the live
+   entries over in their order, leaving the tombstones behind. */
+static void stn_map_rebuild(StnMap* m, uint32_t ilog) {
+    if (ilog > 40) stn_too_large("<runtime>", 0, 0);
+    unsigned width = stn_index_width(ilog);
+    uint64_t slots = (uint64_t)1 << ilog, mask = slots - 1;
+    int64_t cap = stn_map_room(ilog);
+    uint8_t* index = (uint8_t*)calloc(slots, width);
+    char* entries = (char*)malloc((size_t)cap * m->stride);
+    if (!index || !entries) stn_map_oom();
+    int64_t n = 0;
+    for (int64_t i = 0; i < m->used; i++) {
+        const char* e = m->entries + (size_t)i * m->stride;
+        uint64_t w = *(const uint64_t*)e;
+        if (!w) continue;
+        memcpy(entries + (size_t)n * m->stride, e, m->stride);
+        uint64_t s = w & mask;
+        while (stn_index_get(index, width, s)) s = (s + 1) & mask;
+        stn_index_set(index, width, s, (uint64_t)++n);
+    }
+    free(m->index); free(m->entries);
+    m->index = index; m->entries = entries; m->ilog = ilog; m->cap = cap; m->used = n;
+}
+
+static uint32_t stn_map_ilog_for(int64_t n) {
+    uint32_t ilog = 3;
+    while (stn_map_room(ilog) < n) ilog++;
+    return ilog;
+}
+
+StnMap* stn_map_with_capacity(const StnMapOps* ops, int64_t n) {
+    StnMap* m = stn_map_new(ops);
+    if (n > 0) {
+        if (n > STN_MAX_ALLOC) stn_too_large("<runtime>", 0, 0);
+        stn_map_rebuild(m, stn_map_ilog_for(n));
+    }
+    return m;
+}
+
+void stn_map_release(void* p) {
+    StnMap* m = (StnMap*)p;
+    const StnMapOps* ops = m->ops;
+    if (ops->kdrop || ops->vdrop)
+        for (int64_t i = 0; i < m->used; i++) {
+            char* e = m->entries + (size_t)i * m->stride;
+            if (!*(uint64_t*)e) continue;
+            if (ops->kdrop) ops->kdrop(e + 8);
+            if (ops->vdrop) ops->vdrop(e + m->voff);
+        }
+    free(m->index); free(m->entries);
+    stn_free(m);
+}
+
+/* A write needs the box unshared (section 4.5): the copy keeps the order and shares nothing. */
+static void stn_map_make_unique(StnMap** pm) {
+    StnMap* m = *pm;
+    if (stn_unique(m)) return;
+    const StnMapOps* ops = m->ops;
+    StnMap* c = stn_map_new(ops);
+    if (m->ilog) {
+        unsigned width = stn_index_width(m->ilog);
+        size_t ibytes = ((size_t)1 << m->ilog) * width, ebytes = (size_t)m->cap * m->stride;
+        c->index = (uint8_t*)malloc(ibytes);
+        c->entries = (char*)malloc(ebytes);
+        if (!c->index || !c->entries) stn_map_oom();
+        memcpy(c->index, m->index, ibytes);
+        memcpy(c->entries, m->entries, (size_t)m->used * m->stride);
+        c->ilog = m->ilog; c->cap = m->cap; c->used = m->used; c->len = m->len;
+        if (ops->kdup || ops->vdup)
+            for (int64_t i = 0; i < c->used; i++) {
+                char* e = c->entries + (size_t)i * c->stride;
+                if (!*(uint64_t*)e) continue;
+                if (ops->kdup) ops->kdup(e + 8);
+                if (ops->vdup) ops->vdup(e + c->voff);
+            }
+    }
+    stn_drop(m, stn_map_release);
+    *pm = c;
+}
+
+/* The entry of the key, or NULL. *slot is where the index names it. */
+static inline char* stn_map_lookup(const StnMap* m, const void* key, uint64_t w, uint64_t* slot) {
+    if (!m->ilog) return NULL;
+    unsigned width = stn_index_width(m->ilog);
+    uint64_t mask = ((uint64_t)1 << m->ilog) - 1, s = w & mask;
+    for (;;) {
+        uint64_t at = stn_index_get(m->index, width, s);
+        if (!at) return NULL;
+        char* e = m->entries + (size_t)(at - 1) * m->stride;
+        if (*(const uint64_t*)e == w && m->ops->eq(e + 8, key)) { if (slot) *slot = s; return e; }
+        s = (s + 1) & mask;
+    }
+}
+
+void* stn_map_find(const StnMap* m, const void* key) {
+    char* e = stn_map_lookup(m, key, stn_map_word(m->ops->hash(key)), NULL);
+    return e ? e + m->voff : NULL;
+}
+
+void stn_map_put(StnMap** pm, const void* key, const void* value) {
+    stn_map_make_unique(pm);
+    StnMap* m = *pm;
+    const StnMapOps* ops = m->ops;
+    uint64_t w = stn_map_word(ops->hash(key));
+    char* e = stn_map_lookup(m, key, w, NULL);
+    if (e) {
+        /* the key that is there stays; the one given is let go */
+        if (ops->kdrop) ops->kdrop((void*)key);
+        if (ops->vdrop) ops->vdrop(e + m->voff);
+        if (ops->vsize) memcpy(e + m->voff, value, ops->vsize);
+        return;
+    }
+    if (m->used == m->cap) {
+        if (m->len >= STN_MAX_ALLOC) stn_too_large("<runtime>", 0, 0);
+        /* mostly tombstones: the same index, emptied of them; otherwise twice the index */
+        uint32_t ilog = !m->ilog ? 3 : (m->len * 2 <= m->cap ? m->ilog : m->ilog + 1);
+        stn_map_rebuild(m, ilog);
+    }
+    unsigned width = stn_index_width(m->ilog);
+    uint64_t mask = ((uint64_t)1 << m->ilog) - 1, s = w & mask;
+    while (stn_index_get(m->index, width, s)) s = (s + 1) & mask;
+    e = m->entries + (size_t)m->used * m->stride;
+    *(uint64_t*)e = w;
+    memcpy(e + 8, key, ops->ksize);
+    if (ops->vsize) memcpy(e + m->voff, value, ops->vsize);
+    stn_index_set(m->index, width, s, (uint64_t)++m->used);
+    m->len++;
+}
+
+int stn_map_remove(StnMap** pm, const void* key, void* out) {
+    StnMap* m = *pm;
+    uint64_t w = stn_map_word(m->ops->hash(key));
+    if (!stn_map_lookup(m, key, w, NULL)) return 0;
+    stn_map_make_unique(pm);
+    m = *pm;
+    const StnMapOps* ops = m->ops;
+    char* e = stn_map_lookup(m, key, w, NULL);
+    if (ops->kdrop) ops->kdrop(e + 8);
+    if (out) { if (ops->vsize) memcpy(out, e + m->voff, ops->vsize); }
+    else if (ops->vdrop) ops->vdrop(e + m->voff);
+    /* the index keeps naming the entry, which keeps the probes that pass it whole */
+    *(uint64_t*)e = 0;
+    m->len--;
+    if (m->len == 0) {
+        memset(m->index, 0, ((size_t)1 << m->ilog) * stn_index_width(m->ilog));
+        m->used = 0;
+    } else if ((m->used - m->len) * 3 > m->used && m->used >= 8) {
+        stn_map_rebuild(m, stn_map_ilog_for(m->len) > m->ilog ? m->ilog : stn_map_ilog_for(m->len));
+    }
+    return 1;
+}
+
+void stn_map_clear(StnMap** pm) {
+    StnMap* m = *pm;
+    if (m->len == 0 && m->used == 0) return;
+    StnMap* fresh = stn_map_new(m->ops);
+    stn_drop(m, stn_map_release);
+    *pm = fresh;
+}
+
+/* Equal as collections: the same keys, with equal values, in whatever order each was built. */
+int stn_map_eq(const StnMap* a, const StnMap* b) {
+    if (a == b) return 1;
+    if (a->len != b->len) return 0;
+    const StnMapOps* ops = a->ops;
+    int64_t pos = 0;
+    for (const char* e; (e = stn_map_next(a, &pos)); ) {
+        const char* f = stn_map_lookup(b, e + 8, *(const uint64_t*)e, NULL);
+        if (!f) return 0;
+        if (ops->vsize && !ops->veq(e + a->voff, f + b->voff)) return 0;
+    }
+    return 1;
+}
+
+static void stn_set_add_copy(StnMap** pm, const char* e, const StnMapOps* ops) {
+    /* the hash of the entry is the hash of its key: put works it out again, which keeps one path */
+    char key[64];
+    void* k = ops->ksize <= sizeof key ? (void*)key : malloc(ops->ksize);
+    if (!k) stn_map_oom();
+    memcpy(k, e + 8, ops->ksize);
+    if (ops->kdup) ops->kdup(k);
+    stn_map_put(pm, k, NULL);
+    if (k != (void*)key) free(k);
+}
+
+StnMap* stn_set_union(const StnMap* a, const StnMap* b) {
+    StnMap* r = stn_map_with_capacity(a->ops, a->len + b->len);
+    int64_t pos = 0;
+    for (const char* e; (e = stn_map_next(a, &pos)); ) stn_set_add_copy(&r, e, a->ops);
+    pos = 0;
+    for (const char* e; (e = stn_map_next(b, &pos)); ) stn_set_add_copy(&r, e, a->ops);
+    return r;
+}
+
+StnMap* stn_set_intersection(const StnMap* a, const StnMap* b) {
+    StnMap* r = stn_map_new(a->ops);
+    int64_t pos = 0;
+    for (const char* e; (e = stn_map_next(a, &pos)); )
+        if (stn_map_lookup(b, e + 8, *(const uint64_t*)e, NULL)) stn_set_add_copy(&r, e, a->ops);
+    return r;
+}
+
+StnMap* stn_set_difference(const StnMap* a, const StnMap* b) {
+    StnMap* r = stn_map_new(a->ops);
+    int64_t pos = 0;
+    for (const char* e; (e = stn_map_next(a, &pos)); )
+        if (!stn_map_lookup(b, e + 8, *(const uint64_t*)e, NULL)) stn_set_add_copy(&r, e, a->ops);
+    return r;
+}
+
 /* ---- string built-ins ---- */
 StnArray* stn_str_chars(StnStr s, const StnElemOps* ops) {
     StnArray* a = stn_array_new(ops, s->len > 0 ? s->len : 1);
@@ -1056,6 +1359,7 @@ static void stn_on_fault(int sig, siginfo_t* si, void* ctx) {
     raise(sig);
 }
 void stn_runtime_init(void) {
+    stn_hash_init();
     struct rlimit rl;
     char here;
     stn_stack_high = (uintptr_t)&here;
@@ -1074,7 +1378,7 @@ void stn_runtime_init(void) {
     sigaction(SIGBUS, &sa, NULL);
 }
 #else
-void stn_runtime_init(void) {}
+void stn_runtime_init(void) { stn_hash_init(); }
 #endif
 
 void stn_runtime_exit(int status) {

@@ -303,6 +303,60 @@ int     stn_parse_int(StnStr s, int64_t* out);   /* 0 ok, 1 invalid, 2 out of ra
 int     stn_parse_float(StnStr s, double* out);  /* 0 ok, 1 invalid */
 void    stn_check_char(int64_t c, const char* file, int line, int col);
 
+/* ---- maps and sets (section 3.6) ---- */
+/* One table serves both: a set is a map whose values take no room. Entries sit in a dense array in
+   insertion order; a sparse index of 1-, 2-, 4- or 8-byte slots finds them by hash. */
+typedef struct StnMapOps {
+    size_t ksize, vsize;                     /* vsize 0 for a set */
+    uint64_t (*hash)(const void* key);
+    int (*eq)(const void* a, const void* b); /* keys */
+    void (*kdup)(void* key);                 /* NULL for Copy kind */
+    void (*kdrop)(void* key);
+    void (*vdup)(void* value);
+    void (*vdrop)(void* value);
+    int (*veq)(const void* a, const void* b);/* values, for ==; NULL when V has no Eq */
+} StnMapOps;
+
+typedef struct StnMap {
+    stn_header h;
+    int64_t len;          /* live entries */
+    int64_t used;         /* entries written, tombstones included */
+    int64_t cap;          /* entries there is room for */
+    uint32_t ilog;        /* the index has 1 << ilog slots; 0 while nothing is allocated */
+    uint32_t stride;      /* bytes per entry: 8 of hash word, the key, the value */
+    uint32_t voff;        /* offset of the value in an entry */
+    const StnMapOps* ops;
+    uint8_t* index;
+    char* entries;
+} StnMap;
+
+void     stn_map_release(void* p);
+StnMap*  stn_map_new(const StnMapOps* ops);
+StnMap*  stn_map_with_capacity(const StnMapOps* ops, int64_t n);
+/* the value of the key (for a set, any address that is not NULL), or NULL */
+void*    stn_map_find(const StnMap* m, const void* key);
+/* takes the key and the value; an equal key keeps its place and its own key, and gets the new value */
+void     stn_map_put(StnMap** pm, const void* key, const void* value);
+/* takes the key out; its value moves to out when out is not NULL, and is dropped otherwise */
+int      stn_map_remove(StnMap** pm, const void* key, void* out);
+void     stn_map_clear(StnMap** pm);
+/* entries in insertion order: start with *pos = 0; NULL at the end. The key is at entry + 8. */
+static inline char* stn_map_next(const StnMap* m, int64_t* pos) {
+    while (*pos < m->used) {
+        char* e = m->entries + (size_t)(*pos)++ * m->stride;
+        if (*(const uint64_t*)e) return e;
+    }
+    return NULL;
+}
+int      stn_map_eq(const StnMap* a, const StnMap* b);
+StnMap*  stn_set_union(const StnMap* a, const StnMap* b);
+StnMap*  stn_set_intersection(const StnMap* a, const StnMap* b);
+StnMap*  stn_set_difference(const StnMap* a, const StnMap* b);
+/* SipHash-1-3 under a key drawn once per process */
+uint64_t stn_hash_u64(uint64_t x);
+uint64_t stn_hash_bytes(const void* p, size_t n);
+static inline uint64_t stn_hash_combine(uint64_t h, uint64_t x) { return stn_hash_u64(h ^ (x + UINT64_C(0x9E3779B97F4A7C15) + (h << 6) + (h >> 2))); }
+
 /* Generated functions are compiled for speed wherever they end up being inlined. Only an optimized
    release build asks for it: Clang honours the attribute even at -O0, which makes a debug build
    several times slower to compile. */
