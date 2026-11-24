@@ -820,8 +820,20 @@ uint64_t stn_hash_bytes(const void* p, size_t n) {
         memcpy(&m, in + i, 8);
         v3 ^= m; STN_SIPROUND; v0 ^= m;
     }
+    /* the last 0 to 7 bytes, in at most two loads that may overlap: a byte read twice lands on
+       the same bits both times */
     uint64_t b = (uint64_t)n << 56;
-    for (size_t j = 0; i + j < n; j++) b |= (uint64_t)in[i + j] << (8 * j);
+    size_t r = n - i;
+    if (r >= 4) {
+        uint32_t lo, hi;
+        memcpy(&lo, in + i, 4);
+        memcpy(&hi, in + i + r - 4, 4);
+        b |= (uint64_t)lo | ((uint64_t)hi << ((r - 4) * 8));
+    } else if (r >= 2) {
+        uint16_t lo;
+        memcpy(&lo, in + i, 2);
+        b |= (uint64_t)lo | ((uint64_t)in[i + r - 1] << ((r - 1) * 8));
+    } else if (r == 1) b |= in[i];
     v3 ^= b; STN_SIPROUND; v0 ^= b;
     v2 ^= 0xff; STN_SIPROUND; STN_SIPROUND; STN_SIPROUND;
     return v0 ^ v1 ^ v2 ^ v3;
@@ -1082,6 +1094,19 @@ void* stn_map_slot(StnMap** pm, const void* key, int* fresh) {
     return stn_map_append(m, w, key) + m->voff;
 }
 
+void* stn_map_slot_ref(StnMap** pm, const void* key, int* fresh) {
+    stn_map_make_unique(pm);
+    StnMap* m = *pm;
+    const StnMapOps* ops = m->ops;
+    uint64_t w = stn_key_word(ops, key);
+    char* e = stn_map_lookup(m, key, w, NULL);
+    if (e) { *fresh = 0; return e + m->voff; }
+    *fresh = 1;
+    e = stn_map_append(m, w, key);
+    if (ops->kdup) ops->kdup(e + 8);
+    return e + m->voff;
+}
+
 void stn_map_put(StnMap** pm, const void* key, const void* value) {
     int fresh;
     void* v = stn_map_slot(pm, key, &fresh);
@@ -1112,9 +1137,12 @@ int stn_map_remove(StnMap** pm, const void* key, void* out) {
         memset(m->index, STN_FREE, (size_t)mask + 1 + STN_GROUP);
         m->used = 0;
     } else {
-        /* the slot stays taken for the paths that pass it, until the index is made anew */
+        /* the slot stays taken for the paths that pass it, until the index is made anew. Tombstones
+           are closed up when the table next runs out of room, which costs nothing extra since it
+           rebuilds then anyway, or here when they are three quarters of the entries, so that a
+           table that shrinks gives its memory back and a walk over it stays short. */
         stn_ctrl_set(m->index, mask, s, STN_DEAD);
-        if ((m->used - m->len) * 3 > m->used && m->used >= 8) {
+        if ((m->used - m->len) * 4 > m->used * 3 && m->used >= 16) {
             uint32_t ilog = stn_map_ilog_for(m->len);
             stn_map_rebuild(m, ilog > m->ilog ? m->ilog : ilog);
         }

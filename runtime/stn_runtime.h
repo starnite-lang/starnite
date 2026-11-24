@@ -345,6 +345,8 @@ void     stn_map_put(StnMap** pm, const void* key, const void* value);
 /* the value of the key, which is put if it is missing: *fresh says so, and the value is then the
    caller's to write. Takes the key as put does. */
 void*    stn_map_slot(StnMap** pm, const void* key, int* fresh);
+/* the same with the key borrowed: a copy of it is counted and kept only when it is put */
+void*    stn_map_slot_ref(StnMap** pm, const void* key, int* fresh);
 /* takes the key out; its value moves to out when out is not NULL, and is dropped otherwise */
 int      stn_map_remove(StnMap** pm, const void* key, void* out);
 void     stn_map_clear(StnMap** pm);

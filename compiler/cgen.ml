@@ -2764,10 +2764,11 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
         | _ -> assert false
       in
       let fin = md 0 in
-      let k = o 1 in
+      (* the key is borrowed: it is counted again only if a new entry keeps it *)
+      let k = tmp fc (ts fc (List.hd tys)) (b 1) in
       let lv = fin () in
       let fresh_ = fresh st "_fresh" and p = fresh st "_p" in
-      line fc "int %s; %s* %s = (%s*)stn_map_slot(&%s, &%s, &%s);" fresh_ (ct fc vt) p (ct fc vt) lv k fresh_;
+      line fc "int %s; %s* %s = (%s*)stn_map_slot_ref(&%s, &%s, &%s);" fresh_ (ct fc vt) p (ct fc vt) lv k fresh_;
       line fc "if (%s) {" fresh_;
       fc.ind <- fc.ind + 1;
       let sv = expr fc start in
