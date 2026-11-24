@@ -1479,16 +1479,22 @@ StnArray* stn_str_split(const StnStr* s, const StnStr* sep, const StnElemOps* op
 }
 
 StnStr stn_str_join_parts(const StnStr* parts, int64_t n, StnStr sep) {
-    /* a part is at most 2^63 bytes and a string at most STN_MAX_ALLOC, so the sum is checked once
-       per part against a bound that cannot wrap */
+    /* The total is kept in 64 bits and checked once per part against a limit that is both the
+       largest allocation and what a size_t of this target can hold beside the buffer's header, so
+       it cannot wrap and the narrowing below loses nothing. */
     int64_t sep_n;
     const char* sep_data = stn_str_span(&sep, &sep_n);
-    size_t sep_len = (size_t)sep_n, total = 0;
+    size_t sep_len = (size_t)sep_n;
+    uint64_t limit = (uint64_t)STN_MAX_ALLOC, room = (uint64_t)SIZE_MAX - sizeof(StnStrBuf) - 1;
+    if (limit > room) limit = room;
+    uint64_t sum = 0;
     for (int64_t i = 0; i < n; i++) {
-        size_t k = (size_t)stn_str_len(parts[i]) + (i ? sep_len : 0);
-        if (k > (size_t)STN_MAX_ALLOC - total) stn_too_large("<runtime>", 0, 0);
-        total += k;
+        /* each term is the length of a string that exists, so the two cannot wrap 64 bits */
+        uint64_t k = (uint64_t)stn_str_len(parts[i]) + (i ? (uint64_t)sep_n : 0);
+        if (k > limit - sum) stn_too_large("<runtime>", 0, 0);
+        sum += k;
     }
+    size_t total = (size_t)sum;
     StnStr s;
     char* d = stn_str_start(&s, (int64_t)total);
     for (int64_t i = 0; i < n; i++) {
