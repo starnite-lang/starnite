@@ -1461,6 +1461,14 @@ and binop fc (e : texpr) op (a : texpr) (b : texpr) : r =
         | _ -> "uint64_t"
       in
       { c = Printf.sprintf "((int64_t)((%s)(%s) %% (%s)(%s)))" uint ab uint bb; owned = false }
+  | (Div | Mod), TInt k
+    when (match b.e with
+          | XLit (LInt lit) -> (let d = Values.parse_int_lit lit in d <> 0L && d <> -1L)
+          | _ -> false) ->
+      (* a divisor that is a literal other than 0 and -1 can neither be zero nor overflow the
+         quotient, so the division is plain C, which the C compiler turns into shifts and multiplies *)
+      ignore k;
+      { c = Printf.sprintf "(%s %s %s)" ab (if op = Div then "/" else "%") bb; owned = false }
   | (Add | Sub | Mul | Div | Mod), (TInt k) ->
       let f = match op with Add -> "add" | Sub -> "sub" | Mul -> "mul" | Div -> "div" | _ -> "rem" in
       { c = Printf.sprintf "stn_%s_%s(%s, %s, %s)" f (kname k) ab bb la; owned = false }
@@ -3019,7 +3027,11 @@ let compile_instance st cname uname tys =
   (* A C compiler guesses how often each block runs, and treats the late arms of a long chain of
      tests as cold: a loop inlined there is then compiled for size, without the conditional moves
      it would get anywhere else. Every Starnite function is compiled for speed instead. *)
-  pr b "STN_HOT %s {\n" header;
+  (* main is left out: it runs once, and made hot it has the whole program inlined into it, where
+     the C compiler loses what the restrict parameters of the functions it inlines said (the
+     spectral-norm benchmark ran 2.1 times as long) *)
+  let is_main = match st.prog.main with Some m -> m = uname | None -> false in
+  pr b "%s%s {\n" (if is_main then "" else "STN_HOT ") header;
   push fc FFun;
   List.iter
     (fun (v, m, t) ->
