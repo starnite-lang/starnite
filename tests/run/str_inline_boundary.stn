@@ -46,3 +46,13 @@ fn main():
         seen.add(s[0..13])
         seen.add(s)
     print(f"{len(seen)} {contains(seen, "abcdefghijklmnopqr")} {contains(seen, "abcdefghijklmnopqrs")}")
+
+    # literal prefixes and suffixes of up to eight bytes are compared as words: every length
+    var marks = ""
+    for n in 0..27:
+        let s = base[0..n]
+        for hit in [starts_with(s, "a"), starts_with(s, "abcdefgh"), starts_with(s, "abcdefghi"), ends_with(s, "z"),
+                    ends_with(s, "hi"), ends_with(s, "bcdefghi"), ends_with(s, "abcdefghi"), ends_with(s, "op")]:
+            marks = marks + (if hit: "1" else: "0")
+        marks = marks + " "
+    print(marks)

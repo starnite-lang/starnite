@@ -90,14 +90,45 @@ static inline __attribute__((always_inline)) StnStr stn_str_dup(StnStr s) {
     return s;
 }
 static inline __attribute__((always_inline)) void stn_str_drop(StnStr s) {
-    if (stn_str_heap(s)) stn_drop(s.buf, stn_str_release);
+    if (!stn_str_heap(s)) return;
+#ifndef STN_DEBUG
+    /* the common case, an unshared buffer counted by one thread, without a call */
+    stn_header* h = (stn_header*)s.buf;
+    if (__builtin_expect(h->flags == 0, 1)) { if (--h->rc == 0) stn_str_release(h); return; }
+#endif
+    stn_drop(s.buf, stn_str_release);
 }
 /* Starts a string of len bytes in *s and returns where its bytes go. The caller writes all len. */
 char*  stn_str_start(StnStr* s, int64_t len);
-StnStr stn_str_new(const char* data, int64_t len);
+StnStr stn_str_new_heap(const char* data, int64_t len);
+/* An inline string of len <= 15 bytes, assembled in registers by loads that stay inside the
+   source: writing the bytes to memory and reading the words back would stall the processor. */
+static inline __attribute__((always_inline)) StnStr stn_str_small(const char* d, int64_t len) {
+    StnStr s;
+    uint64_t w0 = 0, w1 = 0;
+    if (len >= 8) {
+        memcpy(&w0, d, 8);
+        if (len > 8) { memcpy(&w1, d + len - 8, 8); w1 >>= 8 * (16 - len); }
+    } else if (len >= 4) {
+        uint32_t lo, hi;
+        memcpy(&lo, d, 4);
+        memcpy(&hi, d + len - 4, 4);
+        w0 = (uint64_t)lo | ((uint64_t)hi << (8 * (len - 4)));
+    } else if (len >= 2) {
+        uint16_t lo;
+        memcpy(&lo, d, 2);
+        w0 = (uint64_t)lo | ((uint64_t)(unsigned char)d[len - 1] << (8 * (len - 1)));
+    } else if (len == 1) w0 = (unsigned char)d[0];
+    s.w0 = w0;
+    s.w1 = w1 | ((uint64_t)len << 56);
+    return s;
+}
+static inline StnStr stn_str_new(const char* data, int64_t len) {
+    return len <= STN_STR_INLINE_MAX ? stn_str_small(data, len) : stn_str_new_heap(data, len);
+}
 _Noreturn void stn_trap_str(const char* kind, const char* file, int line, int col, StnStr msg);
 StnStr stn_str_from_bytes(const char* data, int64_t len);   /* makes the bytes valid UTF-8 */
-StnStr stn_str_concat(StnStr a, StnStr b);
+StnStr stn_str_concat(const StnStr* a, const StnStr* b);
 StnStr stn_str_concat_n(int n, StnStr* parts);   /* borrows parts */
 /* Fixed-size comparisons may start at unaligned byte offsets. */
 static inline uint16_t stn_load_u16(const char* p) {
@@ -144,10 +175,10 @@ static inline __attribute__((always_inline)) int stn_str_eq(StnStr a, StnStr b) 
 #endif
     return memcmp(ad, bd, n) == 0;
 }
-int    stn_str_cmp(StnStr a, StnStr b);
-StnStr stn_str_slice(StnStr s, int64_t lo, int64_t hi, const char* file, int line, int col);
-static inline int64_t stn_str_byte_at_or_end(StnStr s, int64_t i) {
-    return (uint64_t)i < (uint64_t)stn_str_len(s) ? (unsigned char)stn_str_ptr(&s)[i] : -1;
+int    stn_str_cmp(const StnStr* a, const StnStr* b);
+StnStr stn_str_slice(const StnStr* s, int64_t lo, int64_t hi, const char* file, int line, int col);
+static inline int64_t stn_str_byte_at_or_end(const StnStr* s, int64_t i) {
+    return (uint64_t)i < (uint64_t)stn_str_len(*s) ? (unsigned char)stn_str_ptr(s)[i] : -1;
 }
 #define STN_STR_DUP(s) stn_str_dup(s)
 #define STN_STR_DROP(s) stn_str_drop(s)
@@ -279,24 +310,24 @@ static inline void stn_error_drop(StnError e) { if (e.box) stn_drop(e.box, e.box
 static inline StnError stn_error_dup(StnError e) { if (e.box) stn_dup(e.box); return e; }
 
 /* ---- console and the rest of the built-ins ---- */
-void    stn_print(StnStr s);
+void    stn_print(const StnStr* s);
 int     stn_read_line(StnStr* out);
 StnStr  stn_read_all(const char* file, int line, int col);
 int64_t stn_clock_ns(void);
-StnArray* stn_str_chars(StnStr s, const StnElemOps* char_ops);
-StnArray* stn_str_split(StnStr s, StnStr sep, const StnElemOps* str_ops, const char* file, int line, int col);
+StnArray* stn_str_chars(const StnStr* s, const StnElemOps* char_ops);
+StnArray* stn_str_split(const StnStr* s, const StnStr* sep, const StnElemOps* str_ops, const char* file, int line, int col);
 StnStr  stn_str_join_parts(const StnStr* parts, int64_t n, StnStr sep);
 StnStr  stn_str_join(StnArray* xs, StnStr sep);
-StnStr  stn_str_trim(StnStr s);
-uint8_t stn_str_contains_slow(StnStr s, StnStr sub);
-static inline uint8_t stn_str_contains(StnStr s, StnStr sub) {
+StnStr  stn_str_trim(const StnStr* s);
+uint8_t stn_str_contains_slow(const StnStr* s, const StnStr* sub);
+static inline uint8_t stn_str_contains(const StnStr* s, const StnStr* sub) {
 #if defined(__SSE2__)
-    int64_t s_len = stn_str_len(s);
-    const char* s_data = stn_str_ptr(&s);
-    const char* sub_data = stn_str_ptr(&sub);
+    int64_t s_len = stn_str_len(*s);
+    const char* s_data = stn_str_ptr(s);
+    const char* sub_data = stn_str_ptr(sub);
     /* A four-byte needle can be verified without a memcmp call. Scan a
        final overlapping vector so both loads stay inside the string. */
-    if (stn_str_len(sub) == 4 && s_len >= 19 && s_len <= 64) {
+    if (stn_str_len(*sub) == 4 && s_len >= 19 && s_len <= 64) {
         uint32_t needle;
         memcpy(&needle, sub_data, sizeof needle);
         __m128i first = _mm_set1_epi8(sub_data[0]);
@@ -323,17 +354,30 @@ static inline uint8_t stn_str_contains(StnStr s, StnStr sub) {
 #endif
     return stn_str_contains_slow(s, sub);
 }
-static inline uint8_t stn_str_starts_with(StnStr s, StnStr p) {
-    int64_t n = stn_str_len(p);
-    return n <= stn_str_len(s) && memcmp(stn_str_ptr(&s), stn_str_ptr(&p), (size_t)n) == 0;
+/* The first eight bytes of a string as a little-endian word, zero past its end; a string in a
+   buffer has at least sixteen. Read from the words of an inline string, not through its address. */
+static inline __attribute__((always_inline)) uint64_t stn_str_head8(const StnStr* s) {
+    return stn_str_heap(*s) ? stn_load_u64(s->buf->data) : s->w0;
 }
-static inline uint8_t stn_str_ends_with(StnStr s, StnStr p) {
-    int64_t n = stn_str_len(p), m = stn_str_len(s);
-    return n <= m && memcmp(stn_str_ptr(&s) + (m - n), stn_str_ptr(&p), (size_t)n) == 0;
+/* The last eight bytes of a string of at least one byte, its last byte in the top position; the
+   bytes before a shorter string are zero. */
+static inline __attribute__((always_inline)) uint64_t stn_str_tail8(const StnStr* s) {
+    if (stn_str_heap(*s)) return stn_load_u64(s->buf->data + (s->w1 & ~STN_STR_HEAP_BIT) - 8);
+    uint64_t n = s->w1 >> 56, hi = s->w1 & ~(UINT64_C(0xFF) << 56);
+    if (n > 8) return (s->w0 >> (8 * (n - 8))) | (hi << (8 * (16 - n)));
+    return n == 8 ? s->w0 : s->w0 << (8 * (8 - n));
 }
-StnStr  stn_str_repeat(StnStr s, int64_t n, const char* file, int line, int col);
-int     stn_parse_int(StnStr s, int64_t* out);   /* 0 ok, 1 invalid, 2 out of range */
-int     stn_parse_float(StnStr s, double* out);  /* 0 ok, 1 invalid */
+static inline uint8_t stn_str_starts_with(const StnStr* s, const StnStr* p) {
+    int64_t n = stn_str_len(*p);
+    return n <= stn_str_len(*s) && memcmp(stn_str_ptr(s), stn_str_ptr(p), (size_t)n) == 0;
+}
+static inline uint8_t stn_str_ends_with(const StnStr* s, const StnStr* p) {
+    int64_t n = stn_str_len(*p), m = stn_str_len(*s);
+    return n <= m && memcmp(stn_str_ptr(s) + (m - n), stn_str_ptr(p), (size_t)n) == 0;
+}
+StnStr  stn_str_repeat(const StnStr* s, int64_t n, const char* file, int line, int col);
+int     stn_parse_int(const StnStr* s, int64_t* out);   /* 0 ok, 1 invalid, 2 out of range */
+int     stn_parse_float(const StnStr* s, double* out);  /* 0 ok, 1 invalid */
 void    stn_check_char(int64_t c, const char* file, int line, int col);
 
 /* ---- maps and sets (section 3.6) ---- */
@@ -425,7 +469,12 @@ static inline uint64_t stn_hash_u64(uint64_t x) {
     return v0 ^ v1 ^ v2 ^ v3;
 }
 uint64_t stn_hash_bytes(const void* p, size_t n);
-static inline uint64_t stn_str_hash(StnStr s) { return stn_hash_bytes(stn_str_ptr(&s), (size_t)stn_str_len(s)); }
+/* SipHash of the bytes of an inline string, taken from its words: the bytes past its length are
+   zero and its last byte is its length, which are what the last block of SipHash holds */
+uint64_t stn_hash_inline(uint64_t w0, uint64_t w1);
+static inline uint64_t stn_str_hash(StnStr s) {
+    return stn_str_heap(s) ? stn_hash_bytes(s.buf->data, (size_t)(s.w1 & ~STN_STR_HEAP_BIT)) : stn_hash_inline(s.w0, s.w1);
+}
 /* equal floats hash alike: -0.0 is 0.0 */
 static inline uint64_t stn_hash_f64(double x) { uint64_t b; if (x == 0) x = 0; memcpy(&b, &x, 8); return stn_hash_u64(b); }
 /* SipHash-1-3 over a stream of 64-bit words, for keys made of several parts (a tuple, a struct,

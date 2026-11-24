@@ -503,6 +503,40 @@ let tmp fc t init =
   line fc "%s %s = %s;" (ct fc t) n init;
   n
 
+(* The address of a Str, for the runtime's string functions, which read a string where it already
+   is. Passing an inline string by value would store its two words on the callee's stack just before
+   its bytes are read back, and a read that spans both words cannot be forwarded from those stores.
+   A name or an indexed element is used in place; anything else is held in a temporary first. *)
+let sref fc (c : string) : string =
+  let is_ident x =
+    x <> "" && (match x.[0] with '0' .. '9' -> false | _ -> true)
+    && String.for_all (fun ch -> ch = '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) x in
+  (* the position of the bracket that closes at the end of c, if c ends with one *)
+  let opening () =
+    let n = String.length c in
+    if n = 0 || c.[n - 1] <> ']' then None
+    else
+      let rec go i depth =
+        if i < 0 then None
+        else match c.[i] with
+          | ']' -> go (i - 1) (depth + 1)
+          | '[' -> if depth = 1 then Some i else go (i - 1) (depth - 1)
+          | _ -> go (i - 1) depth in
+      go (n - 1) 0 in
+  let indexed () =
+    match opening () with
+    | Some i ->
+        let base = String.sub c 0 i in
+        let pre = "((StnStr*)(" and post = ")->data)" in
+        let lp = String.length pre and lq = String.length post and lb = String.length base in
+        (* a name, or an element of the data of an array that has a name *)
+        is_ident base
+        || (lb > lp + lq && String.sub base 0 lp = pre && String.sub base (lb - lq) lq = post
+            && is_ident (String.sub base lp (lb - lp - lq)))
+    | None -> false in
+  if is_ident c || indexed () then "&" ^ c
+  else "&" ^ tmp fc TStr c
+
 (* A value for code that is never reached, such as the end of a function whose body always
    fails. 0 is not an initializer for every type, a struct among them, so it is zeroed. *)
 let dead_value fc (t : ty) : string =
@@ -728,7 +762,7 @@ let rec expr fc (e : texpr) : r =
       let lov = tmp fc (TInt IInt) (expr fc lo).c in
       let hiv = tmp fc (TInt IInt) (expr fc hi).c in
       (match repr (ts fc a.ty) with
-       | TStr -> { c = tmp fc t (Printf.sprintf "stn_str_slice(%s, %s, %s, %s)" av lov hiv (loc_args e.l)); owned = true }
+       | TStr -> { c = tmp fc t (Printf.sprintf "stn_str_slice(%s, %s, %s, %s)" (sref fc av) lov hiv (loc_args e.l)); owned = true }
        | _ -> { c = tmp fc t (Printf.sprintf "stn_array_slice(%s, %s, %s, %s)" av lov hiv (loc_args e.l)); owned = true })
   | XTuple es ->
       let vs = List.map (fun x -> own fc (expr fc x) x.ty) es in
@@ -1426,7 +1460,7 @@ and map_find_call (kt : ty) m k =
 and cmp_call fc t a b : string =
   let st = fc.st in
   match repr t with
-  | TStr -> Printf.sprintf "((int64_t)stn_str_cmp(%s, %s))" a b
+  | TStr -> Printf.sprintf "((int64_t)stn_str_cmp(%s, %s))" (sref fc a) (sref fc b)
   | TInt _ | TFloat | TF32 | TBool | TChar | TDur | TBytes -> Printf.sprintf "((int64_t)(((%s) > (%s)) - ((%s) < (%s))))" a b a b
   | _ -> (
       match Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) "Ord" [] "cmp" t with
@@ -1460,10 +1494,10 @@ and binop fc (e : texpr) op (a : texpr) (b : texpr) : r =
       let c = match op with
         | Eq -> Printf.sprintf "stn_str_eq(%s, %s)" ab bb
         | Ne -> Printf.sprintf "(!stn_str_eq(%s, %s))" ab bb
-        | Lt -> Printf.sprintf "(stn_str_cmp(%s, %s) < 0)" ab bb
-        | Le -> Printf.sprintf "(stn_str_cmp(%s, %s) <= 0)" ab bb
-        | Gt -> Printf.sprintf "(stn_str_cmp(%s, %s) > 0)" ab bb
-        | _ -> Printf.sprintf "(stn_str_cmp(%s, %s) >= 0)" ab bb in
+        | Lt -> Printf.sprintf "(stn_str_cmp(%s, %s) < 0)" (sref fc ab) (sref fc bb)
+        | Le -> Printf.sprintf "(stn_str_cmp(%s, %s) <= 0)" (sref fc ab) (sref fc bb)
+        | Gt -> Printf.sprintf "(stn_str_cmp(%s, %s) > 0)" (sref fc ab) (sref fc bb)
+        | _ -> Printf.sprintf "(stn_str_cmp(%s, %s) >= 0)" (sref fc ab) (sref fc bb) in
       { c; owned = false }
   | (Eq | Ne), (TUnit | TNever) -> { c = (if op = Eq then "1" else "0"); owned = false }
   | Eq, _ -> plain "=="
@@ -1472,7 +1506,7 @@ and binop fc (e : texpr) op (a : texpr) (b : texpr) : r =
   | Le, _ -> plain "<="
   | Gt, _ -> plain ">"
   | Ge, _ -> plain ">="
-  | Add, TStr -> { c = tmp fc TStr (Printf.sprintf "stn_str_concat(%s, %s)" ab bb); owned = true }
+  | Add, TStr -> { c = tmp fc TStr (Printf.sprintf "stn_str_concat(%s, %s)" (sref fc ab) (sref fc bb)); owned = true }
   | Add, TInt (IInt | I64) when natural_bound fc e <> None -> plain "+"
   | Mul, TInt (IInt | I64) when natural_bound fc e <> None -> plain "*"
   | Mod, TInt (IInt | I64) when natural_bound fc e <> None ->
@@ -2610,7 +2644,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
   let owned c = { c = tmp fc t c; owned = true } in
   let elt () = match tys with [ x ] -> x | _ -> TUnit in
   match name with
-  | "print@Str" -> line fc "stn_print(%s);" (b 0); unit_ ()
+  | "print@Str" -> line fc "stn_print(%s);" (sref fc (b 0)); unit_ ()
   | "read_line@" ->
       let s = fresh st "_s" in
       line fc "StnStr %s;" s;
@@ -2931,9 +2965,9 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
   | "byte_at_or_end@Str" ->
       let s = b 0 in
       let i = tmp fc (TInt IInt) (b 1) in
-      value (Printf.sprintf "stn_str_byte_at_or_end(%s, %s)" s i)
-  | "chars@Str" -> owned (Printf.sprintf "stn_str_chars(%s, %s)" (b 0) (elem_ops st TChar))
-  | "split@Str" -> let s = b 0 in let sep = b 1 in owned (Printf.sprintf "stn_str_split(%s, %s, %s, %s)" s sep (elem_ops st TStr) la)
+      value (Printf.sprintf "stn_str_byte_at_or_end(%s, %s)" (sref fc s) i)
+  | "chars@Str" -> owned (Printf.sprintf "stn_str_chars(%s, %s)" (sref fc (b 0)) (elem_ops st TChar))
+  | "split@Str" -> let s = sref fc (b 0) in let sep = sref fc (b 1) in owned (Printf.sprintf "stn_str_split(%s, %s, %s, %s)" s sep (elem_ops st TStr) la)
   | "join@Array" -> (
       match (arg 0).a.e with
       | XArray parts ->
@@ -2952,16 +2986,16 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
           let xs = b 0 in
           let sep = b 1 in
           owned (Printf.sprintf "stn_str_join(%s, %s)" xs sep))
-  | "trim@Str" -> owned (Printf.sprintf "stn_str_trim(%s)" (b 0))
-  | "contains@Str" -> let s = b 0 in let x = b 1 in value (Printf.sprintf "stn_str_contains(%s, %s)" s x)
+  | "trim@Str" -> owned (Printf.sprintf "stn_str_trim(%s)" (sref fc (b 0)))
+  | "contains@Str" -> let s = sref fc (b 0) in let x = sref fc (b 1) in value (Printf.sprintf "stn_str_contains(%s, %s)" s x)
   | ("starts_with@Str" | "ends_with@Str") ->
       let prefix = name = "starts_with@Str" in
       (match (arg 1).a.e with
        | XLit (LStr literal) ->
-           let s = tmp fc TStr (b 0) in
+           let s = sref fc (b 0) in
            let n = String.length literal in
-           let offset = if prefix then "" else Printf.sprintf " + (stn_str_len(%s) - %d)" s n in
-           let data = Printf.sprintf "(stn_str_ptr(&%s)%s)" s offset in
+           let offset = if prefix then "" else Printf.sprintf " + (stn_str_len(*%s) - %d)" s n in
+           let data = Printf.sprintf "(stn_str_ptr(%s)%s)" s offset in
            let cmp at width =
              let bytes = c_string (String.sub literal at width) in
              if width = 2 || width = 4 || width = 8 then
@@ -2978,14 +3012,27 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
                if n = width then cmp 0 width
                else Printf.sprintf "(%s & %s)" (cmp 0 width) (cmp (n - width) width)
            in
-           value (Printf.sprintf "(stn_str_len(%s) >= %d && %s)" s n same)
+           if n >= 1 && n <= 8 then begin
+             (* a literal of up to eight bytes is compared as one word: the first or last eight
+                bytes of the string, read from its words when it is inline *)
+             let w = ref 0L in
+             for i = n - 1 downto 0 do w := Int64.logor (Int64.shift_left !w 8) (Int64.of_int (Char.code literal.[i])) done;
+             let word =
+               if prefix then
+                 let mask = if n = 8 then "" else Printf.sprintf " & UINT64_C(0x%Lx)" (Int64.sub (Int64.shift_left 1L (8 * n)) 1L) in
+                 Printf.sprintf "(stn_str_head8(%s)%s)" s mask
+               else if n = 8 then Printf.sprintf "stn_str_tail8(%s)" s
+               else Printf.sprintf "(stn_str_tail8(%s) >> %d)" s (8 * (8 - n)) in
+             value (Printf.sprintf "(stn_str_len(*%s) >= %d && %s == UINT64_C(0x%Lx))" s n word !w)
+           end else
+           value (Printf.sprintf "(stn_str_len(*%s) >= %d && %s)" s n same)
        | _ ->
-           let s = tmp fc TStr (b 0) in
-           let p = b 1 in
+           let s = sref fc (b 0) in
+           let p = sref fc (b 1) in
            value (Printf.sprintf "stn_str_%s(%s, %s)" (if prefix then "starts_with" else "ends_with") s p))
-  | "repeat@Str" -> let s = b 0 in let n = tmp fc (TInt IInt) (expr fc (arg 1).a).c in owned (Printf.sprintf "stn_str_repeat(%s, %s, %s)" s n la)
+  | "repeat@Str" -> let s = sref fc (b 0) in let n = tmp fc (TInt IInt) (expr fc (arg 1).a).c in owned (Printf.sprintf "stn_str_repeat(%s, %s, %s)" s n la)
   | "parse_int@Str" | "parse_float@Str" ->
-      let s = b 0 in
+      let s = sref fc (b 0) in
       let is_int = name = "parse_int@Str" in
       let out = fresh st "_v" in
       line fc "%s %s;" (if is_int then "int64_t" else "double") out;
@@ -2994,7 +3041,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       ignore (err_id st pe);
       line fc "if (%s) {" rcv;
       fc.ind <- fc.ind + 1;
-      let sd = tmp fc TStr (dup_expr st TStr s) in
+      let sd = tmp fc TStr (dup_expr st TStr ("(*" ^ s ^ ")")) in
       let inv = construct fc pe 0 [ sd ] in
       let oor = construct fc pe 1 [ sd ] in
       let ev = fresh st "_e" in
