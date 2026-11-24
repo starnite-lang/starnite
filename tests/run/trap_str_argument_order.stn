@@ -1,0 +1,6 @@
+# The receiver of a string built-in is evaluated, and its index checked, before the next argument
+# (section 4.4): this traps on index 3, not 4.
+fn main():
+    let a = ["prefix"]
+    let b = ["bonus"]
+    print(f"{starts_with(a[3], b[4])}")

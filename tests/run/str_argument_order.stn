@@ -8,6 +8,11 @@ fn replace_at(mut xs: Array[Str], i: Int, to: Str, give: Str) -> Str:
     xs[i] = to
     give
 
+type Broken = Broken(step: Int)
+
+fn broken(step: Int) -> Str ! Broken:
+    fail(Broken(step))
+
 fn main():
     var s = "old hello"
     print(f"{starts_with(s, replace(mut s, "changed", "old"))} {s}")
@@ -26,3 +31,9 @@ fn main():
     var xs = ["old element value", "y"]
     print(f"{starts_with(xs[0], replace_at(mut xs, 0, "new", "old"))} {xs}")
     print(f"{xs[1] + replace_at(mut xs, 1, "Y", "z")} {xs}")
+
+    # a string held against a later argument is released when that argument fails and the error
+    # is caught; the debug build checks that counts balance at exit
+    let long = repeat("abcdefghijkl", 2)
+    print(f"{(try starts_with(long, broken(1))).is_ok()} {(try contains(long, broken(2))).is_ok()} {(try (long + broken(3))).is_ok()}")
+    print(f"{(try f"{long}{broken(4)}").is_ok()} {long}")

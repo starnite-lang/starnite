@@ -534,7 +534,9 @@ let sref fc (c : string) : string =
         || (lb > lp + lq && String.sub base 0 lp = pre && String.sub base (lb - lq) lq = post
             && is_ident (String.sub base lp (lb - lp - lq)))
     | None -> false in
-  if is_ident c || indexed () then "&" ^ c
+  let n = String.length c in
+  if n > 3 && String.sub c 0 2 = "(*" && c.[n - 1] = ')' && is_ident (String.sub c 2 (n - 3)) then String.sub c 2 (n - 3)
+  else if is_ident c || indexed () then "&" ^ c
   else "&" ^ tmp fc TStr c
 
 (* A value for code that is never reached, such as the end of a function whose body always
@@ -565,21 +567,27 @@ let rec writes_nothing (e : texpr) =
   | XTuple xs | XArray xs | XStruct (_, _, xs) | XVariant (_, _, _, xs) | XFStr xs -> List.for_all writes_nothing xs
   | _ -> false
 
-(* [first] is a borrowed Str that is read only after the code of [later], which began at [mark].
-   That code may assign the variable or element [first] names, and a Str is read by address, so
-   unless [later] cannot assign anything, [first] is saved ahead of it with a count of its own:
-   operands and arguments are evaluated left to right (section 4.4). *)
-let hold_str fc mark (first : string) (later : texpr) =
-  let n = String.length first in
-  if Buffer.length fc.b = mark || writes_nothing later || (n > 6 && String.sub first 0 6 = "strlit") then first
-  else begin
-    let right = Buffer.sub fc.b mark (Buffer.length fc.b - mark) in
-    Buffer.truncate fc.b mark;
+(* [first] is a borrowed Str whose use waits for [later], which is about to be generated. Operands
+   and arguments are evaluated left to right (section 4.4), and a Str is read by address, so
+   [first] is settled now: held with a count of its own, registered before [later] can fail, when
+   [later] may assign the variable or element it names; otherwise, when it is an element whose
+   index is still to be checked, by its address. A name or a literal is read as it is. *)
+let hold_str fc (first : string) (later : texpr) =
+  let is_ident x = x <> "" && String.for_all (fun ch -> ch = '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) x in
+  let literal = String.length first > 6 && String.sub first 0 6 = "strlit" in
+  if literal then first
+  else if not (writes_nothing later) then begin
     let held = tmp fc TStr (dup_expr fc.st TStr first) in
     own_in fc held TStr;
-    Buffer.add_string fc.b right;
     held
   end
+  else if is_ident first then first
+  else if first <> "" && first.[String.length first - 1] = ']' then begin
+    let p = fresh fc.st "_p" in
+    line fc "StnStr const* %s = &%s;" p first;
+    "(*" ^ p ^ ")"
+  end
+  else tmp fc TStr first
 
 (* drop everything up to (not including) the first frame satisfying [stop] *)
 let drop_until fc stop =
@@ -761,10 +769,8 @@ let rec expr fc (e : texpr) : r =
         | [] -> []
         | p :: rest ->
             let c = borrow fc (expr fc p) TStr in
-            let mark = Buffer.length fc.b in
-            let later = parts_of rest in
-            let c = if rest = [] then c else hold_str fc mark c { p with e = XFStr rest } in
-            c :: later in
+            let c = if rest = [] then c else hold_str fc c { p with e = XFStr rest } in
+            c :: parts_of rest in
       let parts = parts_of ps in
       (match parts with
        | [ p ] -> { c = p; owned = false }
@@ -1507,6 +1513,7 @@ and binop fc (e : texpr) op (a : texpr) (b : texpr) : r =
   let st = fc.st in
   let at = ts fc a.ty in
   let ab = borrow fc (expr fc a) a.ty in
+  let ab = if repr at = TStr then hold_str fc ab b else ab in
   (* Operands are evaluated left to right (section 4.4), but C leaves the order of a
      call's arguments open, and either side may trap. So the left operand stays an
      expression only when it is a variable or a literal and the right one emits no
@@ -1514,7 +1521,7 @@ and binop fc (e : texpr) op (a : texpr) (b : texpr) : r =
   let mark = Buffer.length fc.b in
   let bb = borrow fc (expr fc b) b.ty in
   let ab =
-    if repr at = TStr then hold_str fc mark ab b
+    if repr at = TStr then ab
     else if rc fc a.ty || (Buffer.length fc.b = mark && simple_operand ab) then ab
     else begin
       let right = Buffer.sub fc.b mark (Buffer.length fc.b - mark) in
@@ -2674,10 +2681,8 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
   let b i = borrow fc (expr fc (arg i).a) (arg i).a.ty in
   (* the first two arguments as Str, the first held against the code of the second *)
   let b2 () =
-    let x = b 0 in
-    let mark = Buffer.length fc.b in
-    let y = b 1 in
-    (hold_str fc mark x (arg 1).a, y) in
+    let x = hold_str fc (b 0) (arg 1).a in
+    (x, b 1) in
   let o i = tmp fc (arg i).a.ty (own fc (expr fc (arg i).a) (arg i).a.ty) in
   let m i = place_lvalue_of_expr fc (arg i).a in
   (* a receiver whose address is taken after the other arguments have run, as for any mut place *)

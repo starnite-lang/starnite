@@ -7,4 +7,6 @@ true true zzz
 first part of the string|middle|second
 true [new, y]
 yz [new, Y]
+false false false
+false abcdefghijklabcdefghijkl
 exit 0
