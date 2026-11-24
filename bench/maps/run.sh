@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Measures the Map and Set workloads of maps.stn against the same work in Rust (maps.rs), and
-# against an earlier Starnite when one is given. For every run it records the time of the measured
+# Measures the Map and Set workloads of maps.stn against the same work in Rust (maps.rs) and in C
+# (maps.c, once with SipHash and once with a fast mixer), and against an earlier Starnite when one
+# is given. For every run it records the time of the measured
 # part, the CPU time of the whole process (user and system) and its peak resident memory.
 # usage: run.sh [--base CHECKOUT] [--cpus 0,1,...] [--rounds N] [--cases a,b] [--output FILE]
 set -euo pipefail
@@ -28,9 +29,11 @@ build_starnite() {
     (cd "$checkout" && "$checkout/_build/default/compiler/main.exe" build --release --keep-c "$here/maps.stn" -o "$out/$name-generated")
     "$cc" -O3 -std=c11 -fno-strict-aliasing -I"$checkout/runtime" "$out/$name-generated.c" "$checkout/runtime/stn_runtime.c" -lm -o "$out/$name"
 }
-variants="starnite rust"
+variants="starnite rust c-siphash c-fast"
 build_starnite "$repo" starnite
 "$rustc" -C opt-level=3 -C overflow-checks=yes "$here/maps.rs" -o "$out/rust"
+"$cc" -O3 -std=c11 -Wall -Wextra -Werror "$here/maps.c" -o "$out/c-siphash"
+"$cc" -O3 -std=c11 -Wall -Wextra -Werror -DFAST_HASH "$here/maps.c" -o "$out/c-fast"
 if [ -n "$base" ]; then build_starnite "$base" previous-starnite; variants="previous-starnite $variants"; fi
 "$cc" -O2 -std=c11 "$here/rusage.c" -o "$out/rusage"
 
