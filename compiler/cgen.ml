@@ -1469,8 +1469,10 @@ and binop fc (e : texpr) op (a : texpr) (b : texpr) : r =
           | _ -> false) ->
       (* a divisor that is a literal other than 0 and -1 can neither be zero nor overflow the
          quotient, so the division is plain C, which the C compiler turns into shifts and multiplies *)
-      ignore k;
-      { c = Printf.sprintf "(%s %s %s)" ab (if op = Div then "/" else "%") bb; owned = false }
+      (* both operands are converted to the type first: a literal such as INT64_C(-9223372036854775808)
+         can be unsigned in C, which would make the division unsigned *)
+      let ct = cty fc.st (TInt k) in
+      { c = Printf.sprintf "((%s)((%s)(%s) %s (%s)(%s)))" ct ct ab (if op = Div then "/" else "%") ct bb; owned = false }
   | (Add | Sub | Mul | Div | Mod), (TInt k) ->
       let f = match op with Add -> "add" | Sub -> "sub" | Mul -> "mul" | Div -> "div" | _ -> "rem" in
       { c = Printf.sprintf "stn_%s_%s(%s, %s, %s)" f (kname k) ab bb la; owned = false }

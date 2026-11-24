@@ -1,0 +1,6 @@
+0 -1 0 9223372036854775807
+1 0 -4611686018427387904 0 -3 -1 -3 1
+-64 -2 0 127 127 3 1 -306783378 -2
+trap: integer overflow at tests/run/division_by_literal.stn:14:16
+the result does not fit its type
+exit 2
