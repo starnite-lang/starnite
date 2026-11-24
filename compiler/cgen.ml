@@ -1374,7 +1374,10 @@ and map_ops fc (t : ty) : string =
           in
           (Printf.sprintf "sizeof(%s)" vc, vd, vr, veq)
     in
-    pr st.helpers "static const StnMapOps %s = { sizeof(%s), %s, mhash_%s, meq_%s, %s, %s, %s, %s, %s };\n" name kc vsize m m kd kr vd vr veq
+    (* a key of 64 bits that is compared as a number, or a Str with no Eq of the program's, is hashed
+       and compared inside the runtime *)
+    let kind = match repr k with TInt (IInt | I64 | U64) | TDur | TBytes -> "STN_KEY_I64" | TStr -> "STN_KEY_STR" | _ -> "0" in
+    pr st.helpers "static const StnMapOps %s = { sizeof(%s), %s, mhash_%s, meq_%s, %s, %s, %s, %s, %s, %s };\n" name kc vsize m m kd kr vd vr veq kind
   end;
   "&" ^ name
 
@@ -2029,6 +2032,37 @@ and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) ?pop_array ?i
           line fc "}";
           pop fc
       | _ -> unsupported a.l "for ... in mut with a pattern")
+  | IArray ({ e = XCall (CBuiltin (("entries@Map" | "items@Set" as source), tys), [ src ], _); _ }, _) ->
+      (* a Map or a Set is walked where it is, entry by entry in insertion order, with no array of
+         its entries made first. The loop holds a reference of its own, so a write in the body makes
+         the variable a table of its own and the walk goes on over the one it started with. *)
+      let tys = List.map (ts fc) tys in
+      let mt = ts fc src.a.ty in
+      let mv = tmp fc mt (own fc (expr fc src.a) mt) in
+      own_in fc mv mt;
+      let pos = fresh st "_pos" and e = fresh st "_e" in
+      before ();
+      line fc "int64_t %s = 0;" pos;
+      line fc "for (char* %s; (%s = stn_map_next(%s, &%s)); ) {" e e mv pos;
+      fc.ind <- fc.ind + 1;
+      push fc FLoop;
+      let kt = List.hd tys in
+      let et, x =
+        if source = "entries@Map" then begin
+          let vt = List.nth tys 1 in
+          let pair = TTuple [ kt; vt ] in
+          (pair, tmp fc pair (Printf.sprintf "(%s){ *(%s*)(%s + 8), *(%s*)(%s + %s->voff) }" (ct fc pair) (ct fc kt) e (ct fc vt) e mv))
+        end
+        else (kt, tmp fc kt (Printf.sprintf "*(%s*)(%s + 8)" (ct fc kt) e))
+      in
+      let _, binds = pat_test fc et p x in
+      bind_pattern fc binds;
+      push fc FScope;
+      body ();
+      pop fc;
+      pop fc;
+      fc.ind <- fc.ind - 1;
+      line fc "}"
   | IArray (a, _) ->
       let et = match repr (ts fc a.ty) with TArray et -> et | _ -> assert false in
       (* the loop holds its own reference, so the body may change the variable freely *)
@@ -2693,6 +2727,40 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       let m = tmp fc mt (b 0) in
       let k = tmp fc (List.hd tys) (b 1) in
       value (tmp fc TBool (Printf.sprintf "(stn_map_find(%s, &%s) != NULL)" m k))
+  | "put@Map"
+    when (match (arg 0).a.e, (arg 1).a.e, (arg 2).a.e with
+          | XVar root, XVar key, XBin ((Add | Sub | Mul | Div | Mod), { e = XCall (CBuiltin ("index_or@Map", _), [ { a = { e = XVar root'; _ }; _ }; { a = { e = XVar key'; _ }; _ }; _ ], _); _ }, rhs) ->
+              (* m[k] op= e where e is a literal or another variable: nothing in it can reach the Map *)
+              root.vid = root'.vid && key.vid = key'.vid
+              && (match rhs.e with XLit _ -> true | XVar w -> w.vid <> root.vid && not w.vcell | _ -> false)
+          | _ -> false) ->
+      (* the entry is found once, or made with the default of its type, and updated where it is *)
+      let vt = ts fc (List.nth tys 1) in
+      let op, start, rhs =
+        match (arg 2).a.e with
+        | XBin (op, { e = XCall (_, [ _; _; start ], _); _ }, rhs) -> (op, start.a, rhs)
+        | _ -> assert false
+      in
+      let fin = md 0 in
+      let k = o 1 in
+      let lv = fin () in
+      let fresh_ = fresh st "_fresh" and p = fresh st "_p" in
+      line fc "int %s; %s* %s = (%s*)stn_map_slot(&%s, &%s, &%s);" fresh_ (ct fc vt) p (ct fc vt) lv k fresh_;
+      line fc "if (%s) {" fresh_;
+      fc.ind <- fc.ind + 1;
+      let sv = expr fc start in
+      line fc "*%s = %s;" p (own fc sv start.ty);
+      fc.ind <- fc.ind - 1;
+      line fc "}";
+      (* the value in the entry stands in for a variable of the operation *)
+      let cur = new_var "$entry" vt false VLocal in
+      Hashtbl.replace fc.vars cur.vid (VDirect (Printf.sprintf "(*%s)" p));
+      let next = expr fc { e = XBin (op, { e = XVar cur; ty = vt; l = e.l }, rhs); ty = vt; l = (arg 2).a.l } in
+      let nv = tmp fc vt (own fc next vt) in
+      Hashtbl.remove fc.vars cur.vid;
+      if needs_rc st vt then line fc "%s" (drop_stmt st vt (Printf.sprintf "(*%s)" p));
+      line fc "*%s = %s;" p nv;
+      unit_ ()
   | "put@Map" ->
       let fin = md 0 in
       let k = o 1 in

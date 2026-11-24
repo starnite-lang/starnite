@@ -315,7 +315,10 @@ typedef struct StnMapOps {
     void (*vdup)(void* value);
     void (*vdrop)(void* value);
     int (*veq)(const void* a, const void* b);/* values, for ==; NULL when V has no Eq */
+    int kind;                                /* STN_KEY_I64 or STN_KEY_STR where the key is one, else 0 */
 } StnMapOps;
+#define STN_KEY_I64 1
+#define STN_KEY_STR 2
 
 typedef struct StnMap {
     stn_header h;
@@ -337,6 +340,9 @@ StnMap*  stn_map_with_capacity(const StnMapOps* ops, int64_t n);
 void*    stn_map_find(const StnMap* m, const void* key);
 /* takes the key and the value; an equal key keeps its place and its own key, and gets the new value */
 void     stn_map_put(StnMap** pm, const void* key, const void* value);
+/* the value of the key, which is put if it is missing: *fresh says so, and the value is then the
+   caller's to write. Takes the key as put does. */
+void*    stn_map_slot(StnMap** pm, const void* key, int* fresh);
 /* takes the key out; its value moves to out when out is not NULL, and is dropped otherwise */
 int      stn_map_remove(StnMap** pm, const void* key, void* out);
 void     stn_map_clear(StnMap** pm);
