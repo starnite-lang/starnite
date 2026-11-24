@@ -305,7 +305,8 @@ void    stn_check_char(int64_t c, const char* file, int line, int col);
 
 /* ---- maps and sets (section 3.6) ---- */
 /* One table serves both: a set is a map whose values take no room. Entries sit in a dense array in
-   insertion order; a sparse index of 1-, 2-, 4- or 8-byte slots finds them by hash. */
+   insertion order; a sparse index of control bytes and of 1-, 2-, 4- or 8-byte places finds them
+   by hash. */
 typedef struct StnMapOps {
     size_t ksize, vsize;                     /* vsize 0 for a set */
     uint64_t (*hash)(const void* key);
@@ -329,7 +330,8 @@ typedef struct StnMap {
     uint32_t stride;      /* bytes per entry: 8 of hash word, the key, the value */
     uint32_t voff;        /* offset of the value in an entry */
     const StnMapOps* ops;
-    uint8_t* index;
+    uint8_t* index;       /* the control bytes of the slots, then the places they name */
+    uint8_t* places;
     char* entries;
 } StnMap;
 
