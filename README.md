@@ -97,6 +97,10 @@ Not done yet:
 - `split_at_mut`, `Slice[T]` and `StrView` of the `array` and `str` modules: they are views into a borrowed buffer, which the `local` mode of milestone 3 is for (section 10.5), and `swap` covers the common case of two parts of one array; and a search function over arrays, which the draft names without a signature
 - property, snapshot and doc tests, which belong to milestone 2
 
+## Milestone 2 so far
+
+- **`Map` and `Set` (section 3.6).** Literals (`{"a": 1}`, `{1, 2}`, `{}` where the expected type says which, `Map()`, `Set()`), `m[k]` (which traps on a missing key), `m[k] = v`, `m[k] += v` from `Default.default()`, `get`, `contains`, `remove`, `clear`, `len`, `add`, `==` in any order, `Show`, the set operators `|`, `&` and `-`, `for (k, v) in m` and `for x in s` in insertion order, `{k: v for ...}` and `{x for ...}`, and an entry as a place: `m[k].x = v`, `m[k].push(x)`, `f(mut m[k])`, `for x in mut m[k]`. Keys are anything with `Hash` and `Eq`, derived for numbers, strings, tuples, structs, data types and arrays, or written by the program. The interpreter keeps a Map as an ordered array of pairs; the C runtime as a compact insertion-ordered table with an index of control bytes searched sixteen at a time, SipHash-1-3 under a key drawn per process, and no stored hash for 64-bit integer keys. Int and Str keys are looked up inline in the generated code.
+
 Strings are always heap buffers. The 15-byte inline form arrives with the layout work of milestone 2.
 
 ## Gate benchmarks
@@ -144,6 +148,18 @@ bench/priority/run.sh ../starnite-benchmark-base --all --output /tmp/priority.js
 Read a result as Starnite divided by the fastest of the three controls on the same CPU. On the 4-CPU x86-64 host it was last run on, 28 workloads were within 3% of that and the other three within 4.4%, with peak memory level. A few string workloads move by 10 to 25% with where the C compiler places code, and timings shift with what else the machine is doing, so compare builds within one run, never across runs. The AVX-512 results describe that host; other targets take the AVX2 or the portable paths.
 
 Generated functions are marked hot in optimized builds, which makes GCC compile them 40 to 55% more slowly and keeps loops in rarely taken branches fast.
+
+## Map and Set benchmarks
+
+`bench/maps/run.sh` compares eleven Map and Set workloads with the same work in Rust (`HashMap` and `HashSet`, whose default hasher is SipHash-1-3 too) and in C (`maps.c`: an open-addressing table with linear probing, built once with SipHash and once with a fast multiply-and-shift mixer, `-DFAST_HASH`, which chosen keys can make collide). For every run it records the time of the measured part, the CPU time of the whole process and its peak resident memory, and the checksums of all four builds must agree.
+
+```sh
+bench/maps/run.sh --cpus 0,1,2,3 --rounds 15 --output /tmp/maps.json
+```
+
+`--cases a,b` runs some of the workloads and `--base CHECKOUT` adds an earlier Starnite. It needs `gcc` (or `CC`), `rustc` (or `RUSTC`), `taskset` and `shuf`.
+
+On the 4-CPU x86-64 host it was last run on, Starnite was at or below Rust and the SipHash C table in time on every workload but one (string counting, level with C), and used less memory than both everywhere: about 30% less than Rust and 50 to 70% less than C. Against the C table with the fast mixer, lookups, updates and removals of integer keys take 1.2 to 2.4 times as long; that is the price of SipHash, which the specification keeps for every key so that chosen keys cannot force collisions.
 
 ## Reading of the specification
 
