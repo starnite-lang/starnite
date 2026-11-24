@@ -29,7 +29,7 @@
 
 let sprintf = Printf.sprintf
 
-let types = [| "Int"; "Bool"; "Str"; "Array[Int]"; "Pair"; "Shape"; "Int?"; "any Show"; "Array[any Show]" |]
+let types = [| "Int"; "Bool"; "Str"; "Array[Int]"; "Pair"; "Shape"; "Int?"; "any Show"; "Array[any Show]"; "Map[Str, Int]"; "Set[Int]" |]
 
 (* Trait values have no Show of their own, so they are never printed directly: [types]
    are the printable ones, [all_types] also hold variables and parameters. *)
@@ -42,6 +42,18 @@ let prelude =
 
 fn no_ints() -> Array[Int]:
     []
+
+fn no_counts() -> Map[Str, Int]:
+    {}
+
+fn no_keys() -> Set[Int]:
+    {}
+
+fn counts_of(xs: Array[Int]) -> Map[Str, Int]:
+    var m: Map[Str, Int] = {}
+    for x in xs:
+        m[f"n{x % 3}"] += 1
+    m
 
 type Pair = struct(a: Int, b: Str)
 type Shape = Dot | Box(w: Int, h: Int) | Named(name: Str, inner: Array[Int])
@@ -330,6 +342,8 @@ let leaf g t =
   | "Bool" -> choice g [| "true"; "false" |]
   | "Str" -> choice g [| {|"a"|}; {|"bc"|}; {|""|}; {|"héllo"|}; {|"0123456789abcdef"|}; {|"  name1042,alpha,tag3126,é漢🙂  "|}; {|"0123456789abcdef0123456789abcdef!"|} |]
   | "Array[Int]" -> choice g [| "no_ints()"; "[1]"; "[3, 1, 2]" |]
+  | "Map[Str, Int]" -> choice g [| "no_counts()"; {|{"a": 1}|}; {|{"b": 2, "a": -1, "b": 3}|} |]
+  | "Set[Int]" -> choice g [| "no_keys()"; "{1}"; "{3, 1, 2, 3}" |]
   | "Pair" -> {|Pair(0, "p")|}
   | "Shape" -> "Dot"
   | "Int?" -> "no_int()"
@@ -358,6 +372,11 @@ let rec expr g t d =
         | 5 -> sprintf "(if %s: %s else: %s)" (e "Bool") (e "Int") (e "Int")
         | 6 -> sprintf "%s.a" (e "Pair")
         | 7 -> sprintf "(%s).or(%s)" (e "Int?") (small g)
+        | 8 -> (
+            match int g 3 with
+            | 0 -> sprintf "len(%s)" (e "Map[Str, Int]")
+            | 1 -> sprintf "len(%s)" (e "Set[Int]")
+            | _ -> sprintf "(%s).get(%s).or(%s)" (e "Map[Str, Int]") (e "Str") (small g))
         | 9 -> sprintf "total(%s)" (e "Array[any Fig]")
         | 10 -> sprintf "via_any(%s, %s)" (e "any Fig") (e "Int")
         | 11 -> sprintf "total_gen(%s)" (e "Array[any Fig]")
@@ -376,7 +395,10 @@ let rec expr g t d =
                 let name, ps = choice_l g fns in
                 sprintf "%s(%s)" name (String.concat ", " (List.map e ps))))
     | "Bool" -> (
-        match int g 10 with
+        match int g 13 with
+        | 10 -> sprintf "(%s).contains(%s)" (e "Set[Int]") (e "Int")
+        | 11 -> sprintf "contains(%s, %s)" (e "Map[Str, Int]") (e "Str")
+        | 12 -> if chance g 0.5 then sprintf "(%s == %s)" (e "Set[Int]") (e "Set[Int]") else sprintf "(%s != %s)" (e "Map[Str, Int]") (e "Map[Str, Int]")
         | 0 -> sprintf "(%s < %s)" (e "Int") (e "Int")
         | 1 -> sprintf "(%s == %s)" (e "Str") (e "Str")
         | 2 -> sprintf "(%s and %s)" (e "Bool") (e "Bool")
@@ -410,6 +432,20 @@ let rec expr g t d =
         | 1 -> sprintf "[x +%% %s for x in %s]" (small g) (e "Array[Int]")
         | 2 -> sprintf "[i *%% i for i in 0..%d]" (int g 6)
         | _ -> sprintf "filled(%d, %s)" (int g 4) (e "Int"))
+    | "Map[Str, Int]" -> (
+        match int g 4 with
+        | 0 -> "{" ^ String.concat ", " (List.init (range g 1 4) (fun _ -> sprintf "%s: %s" (e "Str") (e "Int"))) ^ "}"
+        | 1 -> sprintf "{f\"k{x}\": x *%% 2 for x in %s}" (e "Array[Int]")
+        | 2 -> sprintf "{k: v +%% 1 for (k, v) in %s if v > %s}" (e "Map[Str, Int]") (small g)
+        | _ -> sprintf "counts_of(%s)" (e "Array[Int]"))
+    | "Set[Int]" -> (
+        match int g 6 with
+        | 0 -> "{" ^ String.concat ", " (List.init (range g 1 4) (fun _ -> e "Int")) ^ "}"
+        | 1 -> sprintf "(%s | %s)" (e "Set[Int]") (e "Set[Int]")
+        | 2 -> sprintf "(%s & %s)" (e "Set[Int]") (e "Set[Int]")
+        | 3 -> sprintf "(%s - %s)" (e "Set[Int]") (e "Set[Int]")
+        | 4 -> sprintf "{x %% 5 for x in %s}" (e "Array[Int]")
+        | _ -> sprintf "{v for (_, v) in %s}" (e "Map[Str, Int]"))
     | "Pair" -> sprintf "Pair(%s, %s)" (e "Int") (e "Str")
     | "Shape" -> (
         match int g 3 with
@@ -456,7 +492,7 @@ let rec stmts g ind k d = List.concat (List.init k (fun _ -> stmt g ind d))
 
 and stmt g ind d =
   let p = String.make (4 * ind) ' ' in
-  let k = int g 17 in
+  let k = int g 18 in
   let fallback () = [ sprintf "%sprint(%s)" p (leaf g "Str") ] in
   if k <= 1 || d <= 0 then begin
     let t = choice g all_types in
@@ -554,6 +590,31 @@ and stmt g ind d =
             let line = sprintf "%slet %s: any Fig = %s" p t (expr g "any Fig" 2) in
             declare g (t, "any Fig", false);
             [ line; sprintf "%sreplace_fig(mut %s, %s)" p (choice_l g vs) t ])
+    | 17 -> (
+        (* writes to a Map or a Set: an entry put, updated from the default, taken out; a key added or
+           taken out; a loop over what the collection held when it started that writes to it *)
+        match int g 2 with
+        | 0 -> (
+            match vars_of ~mutable_:true g "Map[Str, Int]" with
+            | [] -> fallback ()
+            | vs -> (
+                let v = choice_l g vs in
+                match int g 5 with
+                | 0 -> [ sprintf "%s%s[%s] = %s" p v (expr g "Str" 1) (expr g "Int" 2) ]
+                | 1 -> [ sprintf "%s%s[%s] += %s" p v (expr g "Str" 1) (small g) ]
+                | 2 -> [ sprintf "%slet %s = %s.remove(%s)" p (fresh g "v") v (expr g "Str" 1) ]
+                | 3 -> [ sprintf "%sfor (k, x) in %s:" p v; sprintf "%s    %s[k + \"!\"] = x +%% 1" p v ]
+                | _ -> [ sprintf "%s%s.clear()" p v ]))
+        | _ -> (
+            match vars_of ~mutable_:true g "Set[Int]" with
+            | [] -> fallback ()
+            | vs -> (
+                let v = choice_l g vs in
+                match int g 4 with
+                | 0 -> [ sprintf "%s%s.add(%s)" p v (expr g "Int" 2) ]
+                | 1 -> [ sprintf "%slet %s = %s.remove(%s)" p (fresh g "v") v (expr g "Int" 1) ]
+                | 2 -> [ sprintf "%sfor x in %s:" p v; sprintf "%s    %s.add(x *%% 3)" p v ]
+                | _ -> [ sprintf "%s%s.clear()" p v ])))
     | 16 -> (
         (* projections (section 4.6): a write and a compound write through a lend mut call, on a field and on
            an element, a read through a lend call, and a function that lends one of two places. An index is
@@ -958,6 +1019,7 @@ let simplest = function
   | "Int" -> Some "0" | "Bool" -> Some "true" | "Str" -> Some "\"\"" | "Array[Int]" -> Some "no_ints()"
   | "Pair" -> Some "Pair(0, \"p\")" | "Shape" -> Some "Dot" | "Int?" -> Some "no_int()" | "any Show" -> Some "7"
   | "Array[any Show]" -> Some "no_shows()" | "any Fig" -> Some "Sq(1)" | "Array[any Fig]" -> Some "no_figs()"
+  | "Map[Str, Int]" -> Some "no_counts()" | "Set[Int]" -> Some "no_keys()"
   | "(any Fig)?" -> Some "no_fig()" | "any Chk" -> Some "Lim(3)" | _ -> None
 
 (* an arm of a match over a type with several variants: a line that begins with its pattern *)
