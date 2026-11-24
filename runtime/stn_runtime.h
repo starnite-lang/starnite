@@ -84,6 +84,13 @@ static inline __attribute__((always_inline)) int64_t stn_str_len(StnStr s) {
 static inline __attribute__((always_inline)) const char* stn_str_ptr(const StnStr* s) {
     return stn_str_heap(*s) ? s->buf->data : (const char*)s;
 }
+/* The bytes and the length of a string together, its form checked once. */
+static inline __attribute__((always_inline)) const char* stn_str_span(const StnStr* s, int64_t* n) {
+    uint64_t w1 = s->w1;
+    if (w1 >> 63) { *n = (int64_t)(w1 & ~STN_STR_HEAP_BIT); return s->buf->data; }
+    *n = (int64_t)(w1 >> 56);
+    return (const char*)s;
+}
 void   stn_str_release(void* p);
 static inline __attribute__((always_inline)) StnStr stn_str_dup(StnStr s) {
     if (stn_str_heap(s)) stn_dup(s.buf);

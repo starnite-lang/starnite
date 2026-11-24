@@ -183,14 +183,16 @@ static __attribute__((noinline)) StnStr stn_str_concat_n_small(int n, const StnS
 #endif
 
 StnStr stn_str_concat(const StnStr* a, const StnStr* b) {
-    int64_t an = stn_str_len(*a), bn = stn_str_len(*b);
+    int64_t an, bn;
+    const char* ad = stn_str_span(a, &an);
+    const char* bd = stn_str_span(b, &bn);
     StnStr s;
 #if defined(__SIZEOF_INT128__)
     if (an + bn <= STN_STR_INLINE_MAX) return stn_str_concat_small(a, b, an, bn);
 #endif
     char* d = stn_str_start(&s, an + bn);
-    memcpy(d, stn_str_ptr(a), (size_t)an);
-    memcpy(d + an, stn_str_ptr(b), (size_t)bn);
+    memcpy(d, ad, (size_t)an);
+    memcpy(d + an, bd, (size_t)bn);
     return s;
 }
 
@@ -204,17 +206,20 @@ StnStr stn_str_concat_n(int n, StnStr* parts) {
     char* d = stn_str_start(&s, total);
     int64_t at = 0;
     for (int i = 0; i < n; i++) {
-        int64_t k = stn_str_len(parts[i]);
-        memcpy(d + at, stn_str_ptr(&parts[i]), (size_t)k);
+        int64_t k;
+        const char* pd = stn_str_span(&parts[i], &k);
+        memcpy(d + at, pd, (size_t)k);
         at += k;
     }
     return s;
 }
 
 int stn_str_cmp(const StnStr* a, const StnStr* b) {
-    int64_t an = stn_str_len(*a), bn = stn_str_len(*b);
+    int64_t an, bn;
+    const char* ad = stn_str_span(a, &an);
+    const char* bd = stn_str_span(b, &bn);
     int64_t n = an < bn ? an : bn;
-    int c = memcmp(stn_str_ptr(a), stn_str_ptr(b), (size_t)n);
+    int c = memcmp(ad, bd, (size_t)n);
     if (c) return c < 0 ? -1 : 1;
     return an < bn ? -1 : an > bn ? 1 : 0;
 }
@@ -224,8 +229,8 @@ static int stn_boundary(const char* d, int64_t n, int64_t i) {
 }
 
 StnStr stn_str_slice(const StnStr* s, int64_t lo, int64_t hi, const char* file, int line, int col) {
-    int64_t n = stn_str_len(*s);
-    const char* d = stn_str_ptr(s);
+    int64_t n;
+    const char* d = stn_str_span(s, &n);
     if (lo < 0 || hi > n || lo > hi) {
         char buf[96];
         snprintf(buf, sizeof buf, "slice %lld..%lld, length %lld", (long long)lo, (long long)hi, (long long)n);
@@ -717,8 +722,9 @@ _Noreturn void stn_index_trap(int64_t i, int64_t len, const char* file, int line
 
 /* ---- console ---- */
 void stn_print(const StnStr* s) {
-    size_t n = (size_t)stn_str_len(*s);
-    const char* d = stn_str_ptr(s);
+    int64_t len;
+    const char* d = stn_str_span(s, &len);
+    size_t n = (size_t)len;
     if (stn_outlen + n + 1 > sizeof stn_outbuf) stn_flush();
     if (n + 1 > sizeof stn_outbuf) { fwrite(d, 1, n, stdout); fputc('\n', stdout); return; }
     memcpy(stn_outbuf + stn_outlen, d, n);
@@ -1327,9 +1333,9 @@ StnMap* stn_set_difference(const StnMap* a, const StnMap* b) {
 
 /* ---- string built-ins ---- */
 StnArray* stn_str_chars(const StnStr* s, const StnElemOps* ops) {
-    int64_t n = stn_str_len(*s);
+    int64_t n;
+    const unsigned char* p = (const unsigned char*)stn_str_span(s, &n);
     StnArray* a = stn_array_new(ops, n > 0 ? n : 1);
-    const unsigned char* p = (const unsigned char*)stn_str_ptr(s);
     int64_t i = 0;
     while (i < n) {
         uint32_t c = p[i];
@@ -1401,12 +1407,12 @@ static const char* stn_find_bytes(const char* haystack, size_t n, const char* ne
 }
 
 StnArray* stn_str_split(const StnStr* s, const StnStr* sep, const StnElemOps* ops, const char* file, int line, int col) {
-    int64_t sep_len = stn_str_len(*sep);
-    const char* sep_data = stn_str_ptr(sep);
+    int64_t sep_len, s_len;
+    const char* sep_data = stn_str_span(sep, &sep_len);
     if (sep_len == 0) stn_trap("invalid argument", file, line, col, "split with an empty separator");
     StnArray* a = stn_array_new(ops, 4);
-    const char* field = stn_str_ptr(s);
-    const char* end = field + stn_str_len(*s);
+    const char* field = stn_str_span(s, &s_len);
+    const char* end = field + s_len;
     const char* hit;
     while ((hit = stn_find_bytes(field, (size_t)(end - field), sep_data, (size_t)sep_len))) {
         StnStr part = stn_str_new(field, (int64_t)(hit - field));
@@ -1419,28 +1425,27 @@ StnArray* stn_str_split(const StnStr* s, const StnStr* sep, const StnElemOps* op
 }
 
 StnStr stn_str_join_parts(const StnStr* parts, int64_t n, StnStr sep) {
-    size_t total = 0;
-    size_t limit = SIZE_MAX - sizeof(StnStrBuf) - 1;
-    if (limit > INT64_MAX) limit = INT64_MAX;
-    size_t sep_len = (size_t)stn_str_len(sep);
-    const char* sep_data = stn_str_ptr(&sep);
+    /* a part is at most 2^63 bytes and a string at most STN_MAX_ALLOC, so the sum is checked once
+       per part against a bound that cannot wrap */
+    int64_t sep_n;
+    const char* sep_data = stn_str_span(&sep, &sep_n);
+    size_t sep_len = (size_t)sep_n, total = 0;
     for (int64_t i = 0; i < n; i++) {
-        size_t k = (size_t)stn_str_len(parts[i]);
-        if (k > limit - total || (i && sep_len > limit - total - k))
-            stn_too_large("<runtime>", 0, 0);
-        total += k + (i ? sep_len : 0);
+        size_t k = (size_t)stn_str_len(parts[i]) + (i ? sep_len : 0);
+        if (k > (size_t)STN_MAX_ALLOC - total) stn_too_large("<runtime>", 0, 0);
+        total += k;
     }
     StnStr s;
     char* d = stn_str_start(&s, (int64_t)total);
-    size_t at = 0;
     for (int64_t i = 0; i < n; i++) {
         if (i) {
-            memcpy(d + at, sep_data, sep_len);
-            at += sep_len;
+            memcpy(d, sep_data, sep_len);
+            d += sep_len;
         }
-        size_t k = (size_t)stn_str_len(parts[i]);
-        memcpy(d + at, stn_str_ptr(&parts[i]), k);
-        at += k;
+        int64_t k;
+        const char* pd = stn_str_span(&parts[i], &k);
+        memcpy(d, pd, (size_t)k);
+        d += k;
     }
     return s;
 }
@@ -1452,8 +1457,9 @@ StnStr stn_str_join(StnArray* xs, StnStr sep) {
 static int stn_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
 
 StnStr stn_str_trim(const StnStr* s) {
-    int64_t n = stn_str_len(*s), lo = 0, hi = n;
-    const char* d = stn_str_ptr(s);
+    int64_t n;
+    const char* d = stn_str_span(s, &n);
+    int64_t lo = 0, hi = n;
     while (lo < hi && stn_space(d[lo])) lo++;
     while (hi > lo && stn_space(d[hi - 1])) hi--;
     if (lo == 0 && hi == n) return stn_str_dup(*s);
@@ -1461,23 +1467,25 @@ StnStr stn_str_trim(const StnStr* s) {
 }
 
 uint8_t stn_str_contains_slow(const StnStr* s, const StnStr* sub) {
-    int64_t m = stn_str_len(*sub);
-    return m == 0 || stn_find_bytes(stn_str_ptr(s), (size_t)stn_str_len(*s), stn_str_ptr(sub), (size_t)m) != NULL;
+    int64_t m, n;
+    const char* sub_data = stn_str_span(sub, &m);
+    const char* data = stn_str_span(s, &n);
+    return m == 0 || stn_find_bytes(data, (size_t)n, sub_data, (size_t)m) != NULL;
 }
 StnStr stn_str_repeat(const StnStr* s, int64_t n, const char* file, int line, int col) {
     if (n < 0) stn_trap("invalid argument", file, line, col, "negative repeat count");
-    int64_t k = stn_str_len(*s);
+    int64_t k;
+    const char* src = stn_str_span(s, &k);
     if (n > 0 && k > STN_MAX_ALLOC / n) stn_too_large(file, line, col);
     StnStr r;
     char* d = stn_str_start(&r, k * n);
-    const char* src = stn_str_ptr(s);
     for (int64_t i = 0; i < n; i++) memcpy(d + i * k, src, (size_t)k);
     return r;
 }
 
 int stn_parse_int(const StnStr* s, int64_t* out) {
-    int64_t i = 0, n = stn_str_len(*s);
-    const char* text = stn_str_ptr(s);
+    int64_t i = 0, n;
+    const char* text = stn_str_span(s, &n);
     if (n == 0) return 1;
     int neg = text[0] == '-';
     if (text[0] == '-' || text[0] == '+') i = 1;
@@ -1562,9 +1570,9 @@ static int stn_parse_short_float(const char* data, int64_t n, double* out) {
 }
 
 int stn_parse_float(const StnStr* s, double* out) {
-    int64_t n = stn_str_len(*s);
+    int64_t n;
+    const char* d = stn_str_span(s, &n);
     if (n == 0) return 1;
-    const char* d = stn_str_ptr(s);
     if (stn_parse_short_float(d, n, out)) return 0;
     for (int64_t i = 0; i < n; i++) {
         char c = d[i];

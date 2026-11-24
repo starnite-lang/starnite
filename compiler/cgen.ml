@@ -2539,7 +2539,8 @@ and declare_var ?(owned = true) fc (v : var) (init : string) =
 and stable_string_source fc (e : texpr) =
   let immutable v =
     match Hashtbl.find_opt fc.vars v.vid with
-    | Some (VDirect _) -> not v.vmut && v.vkind <> VParam MMut
+    (* VPtr: a let that names an element of an array that does not change *)
+    | Some (VDirect _ | VPtr _) -> not v.vmut && v.vkind <> VParam MMut
     | _ -> false
   in
   match e.e with
