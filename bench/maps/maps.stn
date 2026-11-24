@@ -1,0 +1,117 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Map and Set workloads (section 3.6). Each reads a name and a seed, and prints the time of the
+# measured part in nanoseconds and a checksum that maps.rs and maps.c must also print.
+
+fn key(i: Int, seed: Int) -> Int:
+    (i * 7919 + seed) % 1000003
+
+fn filled_map(n: Int, seed: Int) -> Map[Int, Int]:
+    var m: Map[Int, Int] = {}
+    for i in 0..n:
+        m[key(i, seed)] = i
+    m
+
+fn names(seed: Int) -> Array[Str]:
+    var out: Array[Str] = []
+    for i in 0..512:
+        out.push(f"name{(i * 37 + seed) % 100000}/item")
+    out
+
+fn bench_map_insert_int(seed: Int) -> (Int, Int):
+    let start = clock_ns()
+    let m = filled_map(200000, seed)
+    let elapsed = clock_ns() - start
+    (elapsed, len(m) + m[key(7, seed)] + m[key(199999, seed)])
+
+fn bench_map_lookup_int(seed: Int) -> (Int, Int):
+    let m = filled_map(100000, seed)
+    var sum = 0
+    let start = clock_ns()
+    for i in 0..1000000:
+        match m.get(key(i % 200000, seed)):
+            Some(v) -> sum += v
+            None -> sum += 1
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_map_update_int(seed: Int) -> (Int, Int):
+    var m: Map[Int, Int] = {}
+    let start = clock_ns()
+    for i in 0..1000000:
+        m[(i * 31 + seed) % 50021] += 1
+    let elapsed = clock_ns() - start
+    (elapsed, len(m) * 1000 + m[seed % 50021])
+
+fn bench_map_iter_int(seed: Int) -> (Int, Int):
+    let m = filled_map(200000, seed)
+    var sum = 0
+    let start = clock_ns()
+    for _ in 0..5:
+        for (k, v) in m:
+            sum += k - v
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn bench_map_remove_int(seed: Int) -> (Int, Int):
+    var m = filled_map(200000, seed)
+    var found = 0
+    let start = clock_ns()
+    for i in 0..200000:
+        if i % 2 == 0:
+            match m.remove(key(i, seed)):
+                Some(v) -> found += v
+                None -> found += 0
+    let elapsed = clock_ns() - start
+    (elapsed, len(m) + found)
+
+fn bench_map_count_str(seed: Int) -> (Int, Int):
+    let keys = names(seed)
+    var m: Map[Str, Int] = {}
+    let start = clock_ns()
+    for i in 0..300000:
+        m[keys[(i * 7) % 512]] += 1
+    let elapsed = clock_ns() - start
+    (elapsed, len(m) * 1000000 + m[keys[3]])
+
+fn bench_set_int(seed: Int) -> (Int, Int):
+    var s: Set[Int] = {}
+    var hits = 0
+    let start = clock_ns()
+    for i in 0..200000:
+        s.add(key(i, seed))
+    for i in 0..1000000:
+        if s.contains(key(i % 400000, seed)):
+            hits += 1
+    let elapsed = clock_ns() - start
+    (elapsed, len(s) + hits)
+
+fn bench_set_union(seed: Int) -> (Int, Int):
+    var a: Set[Int] = {}
+    var b: Set[Int] = {}
+    for i in 0..100000:
+        a.add(key(i, seed))
+        b.add(key(i + 50000, seed))
+    let start = clock_ns()
+    let u = a | b
+    let n = a & b
+    let d = a - b
+    let elapsed = clock_ns() - start
+    (elapsed, len(u) * 3 + len(n) * 5 + len(d) * 7)
+
+fn dispatch(name: Str, seed: Int) -> (Int, Int):
+    match name:
+        "map_insert_int" -> bench_map_insert_int(seed)
+        "map_lookup_int" -> bench_map_lookup_int(seed)
+        "map_update_int" -> bench_map_update_int(seed)
+        "map_iter_int" -> bench_map_iter_int(seed)
+        "map_remove_int" -> bench_map_remove_int(seed)
+        "map_count_str" -> bench_map_count_str(seed)
+        "set_int" -> bench_set_int(seed)
+        "set_union" -> bench_set_union(seed)
+        _ -> unreachable("unknown benchmark")
+
+fn main():
+    let name = unwrap(read_line())
+    let seed = parse_int(unwrap(read_line()))
+    let (elapsed, checksum) = dispatch(name, seed)
+    print(f"{elapsed} {checksum}")

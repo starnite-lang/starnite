@@ -1,0 +1,8 @@
+map_insert_int
+map_lookup_int
+map_update_int
+map_iter_int
+map_remove_int
+map_count_str
+set_int
+set_union
