@@ -644,6 +644,10 @@ let sig_can_fail (sg : fsig) =
 
 let fn_can_fail_ty (f : fnty) = f.feff.errs <> [] || f.feff.poly
 
+(* The entry main calls a looping function through: every function's own name starts fn_, so a
+   name that starts stn_entry_ cannot be one. *)
+let entry_name cname = "stn_entry_" ^ cname
+
 let inst_name uname targs =
   "fn_" ^ c_ident uname ^ (if targs = [] then "" else "__" ^ String.concat "__" (List.map mangle_eff targs))
 
@@ -1242,9 +1246,10 @@ and call_instance fc (e : texpr) uname tys (sg : fsig) targs convs : r =
   (* main is not compiled hot (see emit_fn), and a function that loops, inlined into it, would lose
      that; main calls it through an entry that is hot and never inlined, where it is inlined *)
   let name =
-    if !(st.in_main) && sg.slend = None && loops st uname then begin
+    let is_main = match st.prog.main with Some m -> m = uname | None -> false in
+    if !(st.in_main) && sg.slend = None && not is_main && loops st uname then begin
       if not (Hashtbl.mem st.entries name) then Hashtbl.replace st.entries name ("", "");
-      name ^ "_entry"
+      entry_name name
     end else name in
   let s = List.combine (List.map fst sg.stparams) tys in
   let ps = List.map (fun (m, _, pt, _) -> (m, subst s pt)) sg.sparams in
@@ -3186,7 +3191,7 @@ let compile_instance st cname uname tys =
   pr b "%s%s {\n" (if is_main then "" else "STN_HOT ") header;
   (* the entry main calls this through, if it loops: the same parameters, hot, never inlined *)
   if not (is_main || lend) then begin
-    let entry = cname ^ "_entry" in
+    let entry = entry_name cname in
     let names = List.map (fun (v, _, _) -> var_name v) params in
     let args = String.concat ", " ((if can_fail then [ "_out"; "_err" ] else []) @ names) in
     let eheader =
