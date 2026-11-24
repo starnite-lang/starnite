@@ -595,7 +595,9 @@ let int_suffix k s =
   | U64 -> Printf.sprintf "UINT64_C(%s)" s
   | U32 -> Printf.sprintf "UINT32_C(%s)" s
   | IInt | I64 ->
-      if s = "9223372036854775808" then "INT64_MIN" else Printf.sprintf "INT64_C(%s)" s
+      (* the most negative Int has no decimal literal in C: its magnitude does not fit int64_t *)
+      if s = "9223372036854775808" || s = "-9223372036854775808" then "INT64_MIN" else Printf.sprintf "INT64_C(%s)" s
+  | I32 when s = "-2147483648" -> "INT32_MIN"
   | _ -> s
 
 let float_lit f =
