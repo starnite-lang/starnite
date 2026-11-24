@@ -1385,6 +1385,7 @@ and map_ops fc (t : ty) : string =
 and map_find_call (kt : ty) m k =
   match repr kt with
   | TInt (IInt | I64 | U64) | TDur | TBytes -> Printf.sprintf "stn_map_find_i64(%s, (uint64_t)%s)" m k
+  | TStr -> Printf.sprintf "stn_map_find_str(%s, %s)" m k
   | _ -> Printf.sprintf "stn_map_find(%s, &%s)" m k
 
 and cmp_call fc t a b : string =
@@ -2769,9 +2770,9 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       let lv = fin () in
       let fresh_ = fresh st "_fresh" and p = fresh st "_p" in
       (match repr (ts fc (List.hd tys)) with
-       | TInt (IInt | I64 | U64) | TDur | TBytes ->
-           (* an integer key that is there already is found inline, in a table nothing else holds *)
-           line fc "int %s = 0; %s* %s = stn_unique(%s) ? (%s*)stn_map_find_i64(%s, (uint64_t)%s) : NULL;" fresh_ (ct fc vt) p lv (ct fc vt) lv k;
+       | TInt (IInt | I64 | U64) | TDur | TBytes | TStr ->
+           (* a key of 64 bits or a Str that is there already is found inline, in a table nothing else holds *)
+           line fc "int %s = 0; %s* %s = stn_unique(%s) ? (%s*)%s : NULL;" fresh_ (ct fc vt) p lv (ct fc vt) (map_find_call (ts fc (List.hd tys)) lv k);
            line fc "if (__builtin_expect(!%s, 0)) %s = (%s*)stn_map_slot_ref(&%s, &%s, &%s);" p p (ct fc vt) lv k fresh_
        | _ -> line fc "int %s; %s* %s = (%s*)stn_map_slot_ref(&%s, &%s, &%s);" fresh_ (ct fc vt) p (ct fc vt) lv k fresh_);
       line fc "if (%s) {" fresh_;

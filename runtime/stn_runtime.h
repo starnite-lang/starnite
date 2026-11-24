@@ -436,6 +436,45 @@ static inline void* stn_map_find_i64(const StnMap* m, uint64_t key) {
     }
 }
 
+/* stn_map_find for a table whose keys are Str (STN_KEY_STR), inline. A key that is the very string
+   the table holds is found without comparing its bytes. */
+static inline void* stn_map_find_str(const StnMap* m, StnStr key) {
+    if (__builtin_expect(!m->ilog, 0)) return NULL;
+    uint64_t h = stn_hash_bytes(key->data, (size_t)key->len);
+    uint64_t w = h | (uint64_t)(h == 0);
+    uint64_t mask = ((uint64_t)1 << m->ilog) - 1, pos = (w >> 7) & mask, step = 0;
+    int64_t cap = m->cap;
+    unsigned width = cap <= 256 ? 1 : cap <= 65536 ? 2 : cap <= INT64_C(4294967296) ? 4 : 8;
+    const uint8_t* ctrl = m->index;
+    for (;;) {
+        const uint8_t* g = ctrl + pos;
+        unsigned hits, unused_free;
+#if defined(__SSE2__)
+        __m128i grp = _mm_loadu_si128((const __m128i_u*)g);
+        hits = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(grp, _mm_set1_epi8((char)(w & 0x7F))));
+        unused_free = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(grp, _mm_set1_epi8((char)0xFF)));
+#else
+        hits = 0; unused_free = 0;
+        for (unsigned i = 0; i < 16; i++) { hits |= (unsigned)(g[i] == (uint8_t)(w & 0x7F)) << i; unused_free |= (unsigned)(g[i] == 0xFF) << i; }
+#endif
+        for (; hits; hits &= hits - 1) {
+            uint64_t s = (pos + (unsigned)__builtin_ctz(hits)) & mask;
+            uint64_t place;
+            switch (width) {
+                case 1: place = m->places[s]; break;
+                case 2: { uint16_t v; memcpy(&v, m->places + s * 2, 2); place = v; break; }
+                case 4: { uint32_t v; memcpy(&v, m->places + s * 4, 4); place = v; break; }
+                default: memcpy(&place, m->places + s * 8, 8);
+            }
+            char* e = m->entries + (size_t)place * m->stride;
+            if (*(const uint64_t*)e == w && stn_str_eq(*(const StnStr*)(e + 8), key)) return e + m->voff;
+        }
+        if (unused_free) return NULL;
+        step += 16;
+        pos = (pos + step) & mask;
+    }
+}
+
 /* Generated functions are compiled for speed wherever they end up being inlined. Only an optimized
    release build asks for it: Clang honours the attribute even at -O0, which makes a debug build
    several times slower to compile. */
