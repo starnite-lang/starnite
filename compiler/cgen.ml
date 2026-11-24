@@ -25,6 +25,10 @@ type st = {
   instances : (string, unit) Hashtbl.t;
   queue : (string * string * ty list) Queue.t;
   strlits : (string, string) Hashtbl.t;
+  loops : (string, bool) Hashtbl.t;   (* whether a function loops, itself or through a call *)
+  in_main : bool ref;                  (* the body being generated is main's *)
+  entries : (string, string * string) Hashtbl.t;  (* entry wrappers that main calls: prototype and definition, by instance *)
+  entry_defs : (string, string * string) Hashtbl.t;  (* the entry wrapper each instance could have *)
   errtypes : (string, int * ty) Hashtbl.t;
   layouts : (string, layout) Hashtbl.t;
   debug : bool;
@@ -1231,6 +1235,13 @@ and call_instance fc (e : texpr) uname tys (sg : fsig) targs convs : r =
   let st = fc.st in
   let t = ts fc e.ty in
   let name = !request_instance st uname tys in
+  (* main is not compiled hot (see emit_fn), and a function that loops, inlined into it, would lose
+     that; main calls it through an entry that is hot and never inlined, where it is inlined *)
+  let name =
+    if !(st.in_main) && sg.slend = None && loops st uname then begin
+      if not (Hashtbl.mem st.entries name) then Hashtbl.replace st.entries name ("", "");
+      name ^ "_entry"
+    end else name in
   let s = List.combine (List.map fst sg.stparams) tys in
   let ps = List.map (fun (m, _, pt, _) -> (m, subst s pt)) sg.sparams in
   if sg.slend <> None then begin
@@ -2292,6 +2303,26 @@ and walk_texpr (fe : texpr -> unit) (fs : tstmt -> unit) (e : texpr) =
   | XLambda lam -> we lam.lbody
   | XComp (b, cs) -> we b; List.iter (fun cp -> wit cp.csrc; Option.iter we cp.ccond) cs
 
+(* Whether a function loops, itself or through a function it calls by name. *)
+and loops st uname =
+  match Hashtbl.find_opt st.loops uname with
+  | Some b -> b
+  | None ->
+      Hashtbl.replace st.loops uname false;   (* a cycle of calls adds nothing *)
+      let found = ref false in
+      (match Hashtbl.find_opt st.prog.fns uname with
+       | Some tf ->
+           walk_texpr
+             (fun (x : texpr) -> match x.e with
+                | XComp _ -> found := true
+                | XCall (CFn (u, _), _, _) -> if not !found && loops st u then found := true
+                | _ -> ())
+             (fun (s : tstmt) -> match s.st with SWhile _ | SFor _ -> found := true | _ -> ())
+             tf.fbody
+       | None -> ());
+      Hashtbl.replace st.loops uname !found;
+      !found
+
 (* Check length once for up to two arrays with bounded subscripts. The
    fallback retains the per-access trap and its original source location. *)
 and guarded_indices fc body =
@@ -3145,6 +3176,19 @@ let compile_instance st cname uname tys =
      spectral-norm benchmark ran 2.1 times as long) *)
   let is_main = match st.prog.main with Some m -> m = uname | None -> false in
   pr b "%s%s {\n" (if is_main then "" else "STN_HOT ") header;
+  (* the entry main calls this through, if it loops: the same parameters, hot, never inlined *)
+  if not (is_main || lend) then begin
+    let entry = cname ^ "_entry" in
+    let names = List.map (fun (v, _, _) -> var_name v) params in
+    let args = String.concat ", " ((if can_fail then [ "_out"; "_err" ] else []) @ names) in
+    let eheader =
+      if can_fail then Printf.sprintf "static uint8_t %s(%s* _out, StnError* _err%s)" entry (cty st ret) (String.concat "" (List.map (fun p -> ", " ^ p) plist))
+      else Printf.sprintf "static %s %s(%s)" (cty st ret) entry (if plist = [] then "void" else String.concat ", " plist) in
+    Hashtbl.replace st.entry_defs cname
+      (Printf.sprintf "STN_NOINLINE %s;\n" eheader,
+       Printf.sprintf "STN_HOT STN_NOINLINE %s { return %s(%s); }\n" eheader cname args)
+  end;
+  st.in_main := is_main;
   push fc FFun;
   List.iter
     (fun (v, m, t) ->
@@ -3190,6 +3234,7 @@ let compile_instance st cname uname tys =
   pop fc;
   if can_fail then (line fc "*_out = %s;" r; line fc "return 0;") else line fc "return %s;" r;
   pr b "}\n\n";
+  st.in_main := false;
   Buffer.add_buffer st.funcs b
   end
 
@@ -3229,7 +3274,7 @@ let emit (prog : tprog) ~debug : string =
     prog; fwd = Buffer.create 1024; typedefs = Buffer.create 4096; boxed_bodies = Buffer.create 1024;
     protos = Buffer.create 4096; helpers = Buffer.create 4096; funcs = Buffer.create 16384;
     defined = Hashtbl.create 64; pending_boxed = Queue.create (); instances = Hashtbl.create 64;
-    queue = Queue.create (); strlits = Hashtbl.create 64; errtypes = Hashtbl.create 8;
+    queue = Queue.create (); strlits = Hashtbl.create 64; loops = Hashtbl.create 64; in_main = ref false; entries = Hashtbl.create 8; entry_defs = Hashtbl.create 32; errtypes = Hashtbl.create 8;
     layouts = Hashtbl.create 64; debug; counter = 0 }
   in
   let main_u = match prog.main with Some m -> m | None -> raise (Unsupported ("no main function", Syntax.noloc)) in
@@ -3262,10 +3307,18 @@ let emit (prog : tprog) ~debug : string =
   Buffer.add_buffer out st.boxed_bodies;
   pr out "\n";
   Buffer.add_buffer out st.protos;
+  Hashtbl.iter (fun name _ ->
+      match Hashtbl.find_opt st.entry_defs name with
+      | Some (proto, _) -> Buffer.add_string out proto
+      | None -> ()) st.entries;
   pr out "\n";
   Buffer.add_buffer out st.helpers;
   pr out "\n";
   Buffer.add_buffer out st.funcs;
+  Hashtbl.iter (fun name _ ->
+      match Hashtbl.find_opt st.entry_defs name with
+      | Some (_, def) -> Buffer.add_string out def
+      | None -> ()) st.entries;
   Buffer.add_buffer out show_err2;
   pr out "\nint main(void) {\n  stn_runtime_init();\n";
   if sig_can_fail main_sg then begin

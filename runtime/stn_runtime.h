@@ -588,6 +588,13 @@ static inline void* stn_map_find_str(const StnMap* m, StnStr key) {
 #else
 #  define STN_HOT
 #endif
+/* An entry through which main calls a function that loops: never inlined into main, which is not
+   compiled hot, so the loop is compiled as hot code where the function is inlined into the entry. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define STN_NOINLINE __attribute__((noinline))
+#else
+#  define STN_NOINLINE
+#endif
 
 /* ---- integer arithmetic that traps (section 17.1) ---- */
 #define STN_ARITH(T, N)                                                                      \
