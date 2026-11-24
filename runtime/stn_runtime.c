@@ -1184,7 +1184,8 @@ void stn_map_clear(StnMap** pm) {
 
 /* Equal as collections: the same keys, with equal values, in whatever order each was built. */
 int stn_map_eq(const StnMap* a, const StnMap* b) {
-    if (a == b) return 1;
+    /* a table is not taken to equal itself: a NaN key or value is unequal to itself, and the
+       answer must not depend on whether two Maps share storage */
     if (a->len != b->len) return 0;
     const StnMapOps* ops = a->ops;
     int64_t pos = 0;

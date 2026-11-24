@@ -330,7 +330,7 @@ and eval_call env (cl : callee) (targs : targ list) convs loc : value =
 and prim_trait env tr m self vals loc : value =
   match (tr, vals) with
   | "Show", [ v ] -> VStr (show_value env self v)
-  | "Eq", [ a; b ] -> VBool (values_equal a b)
+  | "Eq", [ a; b ] -> VBool (typed_equal env self a b)
   | "Ord", [ a; b ] -> VInt (Int64.of_int (compare_values self a b))
   | "Hash", [ v ] -> VInt (Int64.of_int (Hashtbl.hash v))
   | "Default", [] -> (
@@ -726,13 +726,46 @@ and describe_assert env (e : texpr) : string =
 (* ---------- maps and sets ---------- *)
 
 (* Keys are compared as == compares them: by the Eq of their type, an impl of the program included. *)
-and key_equal env (k : ty) a b : bool =
-  match resolve env "Eq" [] "eq" (tsub env k) with
+and key_equal env (k : ty) a b : bool = typed_equal env k a b
+
+(* a == b at the type t, as the C backend compares: by the Eq of the program where a type has one,
+   and otherwise part by part at the types of the parts, so that an Eq of the program on a key,
+   a field or an element is honored wherever it sits. Maps and Sets are equal when each entry of
+   one has an equal key in the other with an equal value, in whatever order each was built. *)
+and typed_equal env (t : ty) a b : bool =
+  let t = tsub env t in
+  match resolve env "Eq" [] "eq" t with
   | Some (f, ftys) ->
       let tf = Hashtbl.find env.prog.fns f in
       let sub = List.combine (List.map fst tf.fsig.stparams) ftys in
       as_bool (fst (invoke env tf sub [ a; b ]))
-  | None -> values_equal a b
+  | None -> (
+      match (repr t, a, b) with
+      | TNamed ("Map", [ kt; vt ]), VMap xs, VMap ys ->
+          Array.length xs = Array.length ys
+          && Array.for_all
+               (fun (k, v) -> match map_find env kt ys k with Some i -> typed_equal env vt v (snd ys.(i)) | None -> false)
+               xs
+      | TNamed ("Set", [ kt ]), VSet xs, VSet ys ->
+          Array.length xs = Array.length ys && Array.for_all (fun k -> set_find env kt ys k <> None) xs
+      | TArray et, VArr xs, VArr ys -> Array.length xs = Array.length ys && Array.for_all2 (typed_equal env et) xs ys
+      | TTuple ts, VTuple xs, VTuple ys -> List.for_all2 (fun t (x, y) -> typed_equal env t x y) ts (List.combine (Array.to_list xs) (Array.to_list ys))
+      | TNamed (n, args), VStruct xs, VStruct ys -> (
+          match Hashtbl.find_opt env.prog.decls n with
+          | Some { dbody = DStruct fs; dparams; _ } ->
+              let s = List.combine dparams args in
+              List.for_all2 (fun (f : field_info) (x, y) -> typed_equal env (subst s f.fty) x y) fs (List.combine (Array.to_list xs) (Array.to_list ys))
+          | _ -> values_equal a b)
+      | TNamed (n, args), VVariant (i, xs), VVariant (j, ys) -> (
+          i = j
+          &&
+          match Hashtbl.find_opt env.prog.decls n with
+          | Some { dbody = DData vs; dparams; _ } ->
+              let s = List.combine dparams args in
+              let v = List.nth vs i in
+              List.for_all2 (fun (f : field_info) (x, y) -> typed_equal env (subst s f.fty) x y) v.vfields (List.combine (Array.to_list xs) (Array.to_list ys))
+          | _ -> values_equal a b)
+      | _ -> values_equal a b)
 
 and map_find env k (es : (value * value) array) key = find_index (fun (k', _) -> key_equal env k k' key) es
 and set_find env k (ks : value array) key = find_index (fun k' -> key_equal env k k' key) ks

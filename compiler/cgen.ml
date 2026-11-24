@@ -1342,8 +1342,10 @@ and hash_feed fc t a : string =
   | _ when Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) "Hash" [] "hash" t <> None ->
       Printf.sprintf "stn_sip_word(&s, %s);" (hash_call fc t a)
   | TArray et ->
-      Printf.sprintf "stn_sip_word(&s, (uint64_t)(%s)->len); for (int64_t _i = 0; _i < (%s)->len; _i++) { %s _x = ((%s*)(%s)->data)[_i]; %s }"
-        a a (cty st et) (cty st et) a (hash_feed fc et "_x")
+      (* names of their own at each level: an element may be an array too *)
+      let i = fresh st "_hi" and x = fresh st "_hx" in
+      Printf.sprintf "stn_sip_word(&s, (uint64_t)(%s)->len); for (int64_t %s = 0; %s < (%s)->len; %s++) { %s %s = ((%s*)(%s)->data)[%s]; %s }"
+        a i i a i (cty st et) x (cty st et) a i (hash_feed fc et x)
   | TTuple ts -> String.concat " " (List.mapi (fun i et -> hash_feed fc et (Printf.sprintf "(%s).f%d" a i)) ts)
   | TNamed _ when is_struct st t -> String.concat " " (List.map (fun (fnm, et) -> hash_feed fc et (Printf.sprintf "(%s).%s" a (fname fnm))) (struct_fields st t))
   | TNamed _ when is_data st t ->
