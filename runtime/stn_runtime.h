@@ -355,6 +355,8 @@ StnMap*  stn_set_difference(const StnMap* a, const StnMap* b);
 /* SipHash-1-3 under a key drawn once per process */
 uint64_t stn_hash_u64(uint64_t x);
 uint64_t stn_hash_bytes(const void* p, size_t n);
+/* equal floats hash alike: -0.0 is 0.0 */
+static inline uint64_t stn_hash_f64(double x) { uint64_t b; if (x == 0) x = 0; memcpy(&b, &x, 8); return stn_hash_u64(b); }
 static inline uint64_t stn_hash_combine(uint64_t h, uint64_t x) { return stn_hash_u64(h ^ (x + UINT64_C(0x9E3779B97F4A7C15) + (h << 6) + (h >> 2))); }
 
 /* Generated functions are compiled for speed wherever they end up being inlined. Only an optimized

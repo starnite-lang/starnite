@@ -44,7 +44,7 @@ let ctors decls t : (ctor * ty list * string) list option =
           match d.dbody with
           | DStruct fs -> Some [ (KSingle, List.map (fun f -> subst s f.fty) fs, n) ]
           | DData vs -> Some (List.map (fun v -> (KVariant v.vindex, List.map (fun f -> subst s f.fty) v.vfields, v.vname_)) vs)
-          | DAlias _ -> None)
+          | DAlias _ | DBuiltin -> None)
       | None -> None)
   | TErr ms -> Some (List.map (fun m -> (KErr (show_ty m), [ m ], show_ty m)) ms)
   | _ -> None

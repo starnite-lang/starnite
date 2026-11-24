@@ -7,6 +7,10 @@ type Result*[T, E] = Ok(value: T) | Err(error: E)
 
 type ParseError* = InvalidNumber(text: Str) | OutOfRange(text: Str)
 
+# Map and Set (section 3.6): built into the backends as one insertion-ordered hash table
+type Map*[K, V]
+type Set*[K]
+
 trait Eq*:
     fn eq(a: Self, b: Self) -> Bool
 trait Ord*:
@@ -68,6 +72,18 @@ fn ends_with*(s: Str, suffix: Str) -> Bool
 fn repeat*(s: Str, n: Int) -> Str
 fn parse_int*(s: Str) -> Int ! ParseError
 fn parse_float*(s: Str) -> Float ! ParseError
+
+# ---- maps and sets (section 3.6) ----
+fn len*[K, V](m: Map[K, V]) -> Int
+fn get*[K: Hash + Eq, V](m: Map[K, V], k: K) -> V?
+fn contains*[K: Hash + Eq, V](m: Map[K, V], k: K) -> Bool
+fn remove*[K: Hash + Eq, V](mut m: Map[K, V], k: K) -> V?
+fn clear*[K, V](mut m: Map[K, V])
+fn len*[K](s: Set[K]) -> Int
+fn contains*[K: Hash + Eq](s: Set[K], k: K) -> Bool
+fn add*[K: Hash + Eq](mut s: Set[K], take k: K)
+fn remove*[K: Hash + Eq](mut s: Set[K], k: K) -> Bool
+fn clear*[K](mut s: Set[K])
 
 # ---- numbers ----
 fn sqrt*(x: Float) -> Float
@@ -137,6 +153,24 @@ impl[T: Show] Show for Array[T]:
         for x in xs:
             parts.push(f"{x}")
         "[" + join(parts, ", ") + "]"
+
+impl[K: Show, V: Show] Show for Map[K, V]:
+    fn show(m: Map[K, V]) -> Str:
+        var parts: Array[Str] = []
+        for (k, v) in m:
+            parts.push(f"{k}: {v}")
+        "{" + join(parts, ", ") + "}"
+
+# an empty Set is shown as it is written, since {} is also an empty Map
+impl[K: Show] Show for Set[K]:
+    fn show(s: Set[K]) -> Str:
+        if len(s) == 0:
+            "Set()"
+        else:
+            var parts: Array[Str] = []
+            for k in s:
+                parts.push(f"{k}")
+            "{" + join(parts, ", ") + "}"
 
 impl Show for ParseError:
     fn show(e: ParseError) -> Str:

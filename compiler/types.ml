@@ -356,7 +356,8 @@ type field_info = { fname_ : string; fty : ty }
 
 type variant_info = { vname_ : string; vfields : field_info list; vnamed : bool; vindex : int }
 
-type tdecl_body = DStruct of field_info list | DData of variant_info list | DAlias of ty
+(* DBuiltin: a type of the prelude that the backends implement, Map and Set (section 3.6) *)
+type tdecl_body = DStruct of field_info list | DData of variant_info list | DAlias of ty | DBuiltin
 
 type tdecl = {
   dname : string;
