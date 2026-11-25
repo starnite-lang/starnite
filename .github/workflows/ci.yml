@@ -43,6 +43,9 @@ jobs:
       - name: Constant stack
         # a million-element list through functions that must run as loops (tests/deep.sh)
         run: tests/deep.sh
+      - name: Model of counting
+        # P1 and P2 on random programs in the model of section 21.4 (tests/model.sh)
+        run: tests/model.sh
       - name: Reporting copies
         # --explain-copies and --profile-copies on a program that copies (tests/copies.sh)
         run: tests/copies.sh
