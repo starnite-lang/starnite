@@ -1,0 +1,108 @@
+# Reuse (section 9.3): an arm that takes a boxed value apart consumes it. When nothing else holds
+# the value its fields move into the arm's variables and its cell serves the next constructor of
+# the same type; otherwise the variables are duplicated. Nothing a program prints depends on
+# which, and the debug build checks that the counts balance on every path here.
+type List = Nil | Cons(head: Int, tail: List)
+type Tree = Leaf | Node(left: Tree, label: Str, right: Tree)
+type Pair = Pair(first: Tree, second: Tree)
+type Stop = Stop(at: Str)
+
+fn long(s: Str) -> Str:
+    s + " long enough to live in a buffer"
+
+fn range(n: Int) -> List:
+    var out = Nil
+    var i = n
+    while i > 0:
+        i -= 1
+        out = Cons(i, out)
+    out
+
+fn bump(take xs: List, by: Int) -> List:
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) -> Cons(x + by, bump(take rest, by))
+
+fn total(xs: List) -> Int:
+    match xs:
+        Nil -> 0
+        Cons(x, rest) -> x + total(rest)
+
+fn relabel(take t: Tree, suffix: Str) -> Tree:
+    match t:
+        Leaf -> Leaf
+        Node(l, name, r) -> Node(relabel(take l, suffix), name + suffix, relabel(take r, suffix))
+
+fn show(t: Tree) -> Str:
+    match t:
+        Leaf -> "."
+        Node(l, name, r) -> f"({show(l)} {name} {show(r)})"
+
+# fields that are not bound are released, and a cell that no constructor takes is freed
+fn label_of(take t: Tree) -> Str:
+    match t:
+        Node(_, name, _) -> name
+        Leaf -> "none"
+
+# a guard reads the fields before the arm commits; the arm it turns down leaves the value whole
+fn trim_long(take t: Tree) -> Tree:
+    match t:
+        Node(l, name, _) if len(name) > 40 -> Node(l, "trimmed", Leaf)
+        Node(l, name, r) -> Node(r, name, l)
+        Leaf -> Leaf
+
+# two constructors in one arm, one in a loop, a closure, and a constructor of another type
+fn spread(take t: Tree, n: Int) -> Pair:
+    match t:
+        Leaf -> Pair(Leaf, Leaf)
+        Node(l, name, r) ->
+            var chain = Leaf
+            for i in 0..n:
+                chain = Node(chain, f"{name}#{i}", Leaf)
+            let tag = fn(x: Tree): Node(x, long("tagged"), Leaf)
+            Pair(tag(Node(l, name, r)), chain)
+
+# leaving an arm early, by return and by an error, after the value was taken apart
+fn left_or_stop(take t: Tree, limit: Int) -> Tree ! Stop:
+    match t:
+        Leaf -> Leaf
+        Node(l, name, r) ->
+            if len(name) > limit:
+                fail(Stop(name))
+            if limit == 0:
+                return r
+            Node(l, name + "+", Leaf)
+
+fn main():
+    # a list nothing else holds, and one that something does
+    let xs = range(6)
+    let kept = xs
+    let ys = bump(take xs, 10)
+    var zs = range(300)
+    for i in 0..5:
+        zs = bump(take zs, 1)
+    print(f"{total(ys)} {total(kept)} {total(zs)}")
+
+    let t = Node(Node(Leaf, long("a"), Leaf), long("root"), Node(Leaf, "b", Leaf))
+    let other = t
+    let u = relabel(take t, "!")
+    print(f"{show(u)} {show(other)}")
+    print(show(relabel(Node(Leaf, long("alone"), Leaf), "?")))
+
+    print(f"{label_of(Node(Node(Leaf, long("inner"), Leaf), long("outer"), Leaf))} {label_of(Leaf)} {label_of(take u)}")
+    print(f"{show(trim_long(Node(Node(Leaf, "l", Leaf), long("a name that is long"), Node(Leaf, "r", Leaf))))} {show(trim_long(Node(Node(Leaf, "l", Leaf), "short", Node(Leaf, "r", Leaf))))}")
+
+    match spread(Node(Leaf, long("seed"), Node(Leaf, "right", Leaf)), 3):
+        Pair(a, b) -> print(f"{show(a)} {show(b)}")
+    match spread(take other, 1):
+        Pair(a, b) -> print(f"{show(a)} {show(b)}")
+
+    let stopped = try left_or_stop(Node(Leaf, long("too long a name"), Leaf), 5)
+    let returned = try left_or_stop(Node(Leaf, "", Node(Leaf, "right", Leaf)), 0)
+    let built = try left_or_stop(Node(Leaf, "ok", Node(Leaf, "dropped", Leaf)), 9)
+    match returned:
+        Ok(v) -> print(f"{stopped.is_ok()} {show(v)}")
+        Err(_) -> print("unexpected")
+    match built:
+        Ok(v) -> print(show(v))
+        Err(_) -> print("unexpected")
