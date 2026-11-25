@@ -85,6 +85,16 @@ fn countdown(n: Int) -> List:
         return Cons(n, countdown(n - 1))
     Nil
 
+# The call is inside a loop of the program: the next turn starts at the top of the function, with
+# what comes before the loop, not at the loop's next turn. A plain tail call from a loop does too.
+fn stepped(n: Int, skip: Int) -> List:
+    var seen = n * 2
+    while seen > 0:
+        if skip > 0:
+            return stepped(n, skip - 1)
+        return Cons(seen, stepped(n - 1, 0))
+    Nil
+
 type Marks = Stop | Mark(rest: Marks, mark: Int)
 
 # The field after the call is a variable that a closure changes while the call runs: it is read
@@ -117,3 +127,4 @@ fn main():
     print(f"{sum_tree(t)} {sum_tree(mirror(take t))}")
     print(f"{total(countdown(4000))} {total(countdown(0))}")
     print(show_marks(marked(3, fn(): print("first"))))
+    print(f"{total(stepped(4000, 3))} {total(stepped(3, 0))} {total(stepped(0, 5))}")

@@ -1909,7 +1909,8 @@ and dps_tail fc cname params dst (e : texpr) : unit =
       line fc "%s = &%s;" dst (variant_field st t vinfo k cell.c);
       drop_until fc (fun _ -> false);
       List.iter (fun (p, v) -> line fc "%s = %s;" p v) !next;
-      line fc "continue;";
+      (* to the top of the function, whatever loops of the program this is inside *)
+      line fc "goto stn_dps_turn;";
       pop fc
   | XCall _ when dps_self fc cname params e ->
       (* a call of the function to itself in tail position is another turn, to the same destination *)
@@ -1917,7 +1918,8 @@ and dps_tail fc cname params dst (e : texpr) : unit =
       let next = dps_next fc params e in
       drop_until fc (fun _ -> false);
       List.iter (fun (p, v) -> line fc "%s = %s;" p v) next;
-      line fc "continue;";
+      (* to the top of the function, whatever loops of the program this is inside *)
+      line fc "goto stn_dps_turn;";
       pop fc
   | _ ->
       push fc FStmt;
@@ -3716,11 +3718,14 @@ let compile_instance st cname uname tys =
     line fc "%s _res;" (cty st ret);
     line fc "%s* _dst = &_res;" (cty st ret);
     st.dps := Some ("_dst", fc.b, dps_tail fc cname params "_dst");
-    line fc "for (;;) {";
+    (* a turn is a jump to this label, not a continue: a call that becomes a turn may be inside a
+       loop of the program, whose next turn a continue would start *)
+    line fc "stn_dps_turn: {";
     fc.ind <- fc.ind + 1;
     dps_tail fc cname params "_dst" tf.fbody;
     fc.ind <- fc.ind - 1;
     line fc "}";
+    line fc "stn_trap(\"unreachable\", __FILE__, __LINE__, 0, \"a function ended without a value\");";
     st.dps := None;
     fc.frames <- [];
     pr b "}\n\n";
