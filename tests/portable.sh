@@ -42,5 +42,12 @@ else
     echo "skipped the big-endian run: $cross and qemu-s390x are not installed"
 fi
 
+# the size arithmetic of strings for a 32-bit size_t, checked on this machine (tests/str_limits.c)
+if "${CC:-cc}" -std=c11 -O1 -w -I"$root/runtime" "$here/str_limits.c" -o "$tmp/str_limits.exe" 2> "$tmp/err" && "$tmp/str_limits.exe" > "$tmp/out" 2>&1; then
+    pass=$((pass + 1))
+else
+    echo "FAIL str_limits"; cat "$tmp/err" "$tmp/out" 2> /dev/null | head -10; fail=$((fail + 1))
+fi
+
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]
