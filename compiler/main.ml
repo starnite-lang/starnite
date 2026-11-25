@@ -10,7 +10,8 @@ commands:
   run <file>      compile and run (add --interp to use the reference interpreter)
   build <file>    compile to an executable next to the source (or -o <path>)
   check <file>    check without generating code
-  test <file>     run the test blocks of a file
+  test <file>     run the test blocks of a file, and check the budgets of its bench blocks
+  bench <file>    run the bench blocks of a file: counters, then times
   emit-c <file>   print the generated C
 
 options:
@@ -148,12 +149,111 @@ let doc_tests (src : string) : string =
   done;
   Buffer.contents out
 
-let front_end ?(docs = false) file =
+(* Bench blocks (section 20.3).
+
+       bench "name" for n in [10, 100] budget allocs <= 4 budget copies == 0:
+           setup
+           measure:
+               work
+
+   A bench is turned into a function before the file is parsed, line for line, so that positions
+   in the rest of the file stay as they are: the first line becomes the head of a function, which
+   takes n when there is a `for`, and `measure:` becomes the loop that the runtime ends
+   (bench_more in the prelude). The calls of those functions make up a main of their own, which
+   takes the place of the program's for `starnite bench` and for the budget checks of
+   `starnite test`. In any other build the functions are checked like the rest and never run.
+
+   Returns the new text and the body of that main; raises Error on a bench it cannot read. *)
+let bench_blocks file (src : string) : string * string list =
+  let lines = Array.of_list (String.split_on_char '\n' src) in
+  let n = Array.length lines in
+  let calls = ref [] and count = ref 0 in
+  let bad i fmt = Printf.ksprintf (fun m -> raise (Error ("E0100", { file; line = i + 1; col = 1 }, m))) fmt in
+  let starts p t = String.length t >= String.length p && String.sub t 0 (String.length p) = p in
+  (* the first place sub stands in t at or after from *)
+  let find t sub from =
+    let k = String.length sub and len = String.length t in
+    let rec go i = if i + k > len then None else if String.sub t i k = sub then Some i else go (i + 1) in
+    go from in
+  for i = 0 to n - 1 do
+    let line = lines.(i) in
+    if starts "bench \"" line then begin
+      (* the name, as a string literal *)
+      let close =
+        let rec go j = if j >= String.length line then bad i "the name of this bench does not end" else if line.[j] = '\\' then go (j + 2) else if line.[j] = '"' then j else go (j + 1) in
+        go 7 in
+      let name = String.sub line 6 (close - 5) in
+      let rest = String.trim (String.sub line (close + 1) (String.length line - close - 1)) in
+      if rest = "" || rest.[String.length rest - 1] <> ':' then bad i "a bench ends its first line with ':'";
+      let rest = " " ^ String.trim (String.sub rest 0 (String.length rest - 1)) ^ " " in
+      if find rest " threads " 0 <> None then bad i "`threads` on a bench arrives with tasks, in milestone 6";
+      (* for IDENT in EXPR, then each budget *)
+      let parts =
+        let rec split from acc =
+          match find rest " budget " from with
+          | Some j -> split (j + 8) (String.trim (String.sub rest from (j - from)) :: acc)
+          | None -> List.rev (String.trim (String.sub rest from (String.length rest - from)) :: acc) in
+        split 0 [] in
+      let head, budgets = match parts with h :: b -> (h, b) | [] -> ("", []) in
+      let var, source =
+        if head = "" then (None, "")
+        else if starts "for " head then
+          match find head " in " 4 with
+          | Some j -> (Some (String.trim (String.sub head 4 (j - 4))), String.trim (String.sub head (j + 4) (String.length head - j - 4)))
+          | None -> bad i "a bench is run for a name `in` a list: for n in [10, 100]"
+        else bad i "after its name a bench has `for name in list`, then its budgets" in
+      if List.length budgets > 4 then bad i "a bench has at most four budgets";
+      let spec, limits =
+        List.split (List.map (fun bgt ->
+            let op_at = match find bgt "<" 0, find bgt "==" 0 with
+              | Some a, Some b -> min a b | Some a, None -> a | None, Some b -> b
+              | None, None -> bad i "a budget compares a counter with a limit: budget allocs <= 10" in
+            let counter = String.trim (String.sub bgt 0 op_at) in
+            let op = if starts "<=" (String.sub bgt op_at (String.length bgt - op_at)) then "<=" else if bgt.[op_at] = '<' then "<" else "==" in
+            let limit = String.trim (String.sub bgt (op_at + String.length op) (String.length bgt - op_at - String.length op)) in
+            if not (List.mem counter [ "allocs"; "alloc_bytes"; "copies"; "count_ops"; "time" ]) then
+              bad i "'%s' is not a counter; the counters are allocs, alloc_bytes, copies and count_ops" counter;
+            (* a time differs from machine to machine, and is not held to a budget *)
+            (counter ^ op, if counter = "time" then "0" else limit)) budgets) in
+      let limits = limits @ List.init (4 - List.length limits) (fun _ -> "0") in
+      let fn = Printf.sprintf "__bench_%d" !count in
+      incr count;
+      lines.(i) <- Printf.sprintf "fn %s(%s) ! io:" fn (match var with Some v -> v ^ ": Int" | None -> "");
+      (* its measure line, before the next line that starts at the margin *)
+      let j = ref (i + 1) and found = ref false in
+      while not !found && !j < n && (lines.(!j) = "" || lines.(!j).[0] = ' ' || lines.(!j).[0] = '#' || String.trim lines.(!j) = "") do
+        if String.trim lines.(!j) = "measure:" then begin
+          let indent = String.sub lines.(!j) 0 (String.index lines.(!j) 'm') in
+          lines.(!j) <- Printf.sprintf "%swhile bench_more(%s, \"%s\", %s, \"%s\", %s):" indent name
+              (match var with Some v -> v | None -> "") (match var with Some v -> v | None -> "0")
+              (String.concat " " spec) (String.concat ", " limits);
+          found := true
+        end;
+        incr j
+      done;
+      if not !found then bad i "a bench has a `measure:` block, the part that is measured";
+      calls := (match var with
+          | Some v -> [ Printf.sprintf "    for %s in %s:" v source; Printf.sprintf "        %s(%s)" fn v ]
+          | None -> [ Printf.sprintf "    %s()" fn ]) :: !calls
+    end
+  done;
+  (String.concat "\n" (Array.to_list lines), List.concat (List.rev !calls))
+
+let front_end ?(docs = false) ?(bench = false) file =
   let src = read_file file in
+  let src, bench_calls = bench_blocks file src in
+  (* for a run of the benches, a main that calls each of them *)
+  let src = if bench then src ^ "\nfn __bench_main() ! io:\n" ^ String.concat "\n" (if bench_calls = [] then [ "    print(\"no bench blocks\")" ] else bench_calls) ^ "\n" else src in
   (* the examples in doc comments are tests of the module (section 20.2) *)
   let src = if docs then src ^ doc_tests src else src in
   let pre = load_prelude () in
   let user = Parser.parse_file file src in
+  let user =
+    if not bench then user
+    else { user with items = List.filter_map (function
+        | IFn f when f.fname = "main" -> None
+        | IFn f when f.fname = "__bench_main" -> Some (IFn { f with fname = "main" })
+        | it -> Some it) user.items } in
   let imported = Loader.load ~entry:file user in
   (user, imported, Typecheck.check_program pre imported user)
 
@@ -243,7 +343,7 @@ let run_tests_interp ~cases ~seed ~update file (user : Syntax.file) imported (pr
       | None -> incr failn; Printf.printf "FAIL %s: expected %s, but it compiled\n" t.tsname code)
     (Typecheck.rejection_tests user);
   Printf.printf "\n%d passed, %d failed\n" !pass !failn;
-  if !failn > 0 then exit 1
+  !failn > 0
 
 let () =
   let args = List.tl (Array.to_list Sys.argv) in
@@ -271,7 +371,7 @@ let () =
     | _ -> print_string usage; exit (if pos = [] then 0 else 2)
   in
   try
-    let user, imported, prog = front_end ~docs:(cmd = "test") file in
+    let user, imported, prog = front_end ~docs:(cmd = "test") ~bench:(cmd = "bench") file in
     (match cmd with "check" | "test" -> Cgen.check ?explain:!explain prog | "run" when !interp -> Cgen.check ?explain:!explain prog | _ -> ());
     (* the list of --explain-copies, once the code that it describes has been generated *)
     let explained () =
@@ -283,9 +383,31 @@ let () =
     match cmd with
     | "check" -> ()
     | "run" when !interp -> run_interp prog
-    | "test" -> run_tests_interp ~cases:!cases ~seed:!seed ~update:!update file user imported prog
+    | "test" ->
+        let failed = run_tests_interp ~cases:!cases ~seed:!seed ~update:!update file user imported prog in
+        (* each measure block once, in the counting build, with its budgets (section 20.3) *)
+        let src, calls = bench_blocks file (read_file file) in
+        ignore src;
+        let bench_failed =
+          if calls = [] then false
+          else begin
+            let _, _, bprog = front_end ~bench:true file in
+            print_newline ();
+            flush stdout;
+            Backend.run { Backend.release = true; cc = !cc; keep_c = false; profile = false; explain = None; counters = true } bprog file <> 0
+          end in
+        if failed || bench_failed then exit 1
+    | "bench" ->
+        (* the counters and the times come from two builds, so that counting slows no timing *)
+        let opts = { Backend.release = true; cc = !cc; keep_c = false; profile = false; explain = None; counters = true } in
+        flush stdout;
+        let counted = Backend.run opts prog file in
+        print_newline ();
+        flush stdout;
+        let timed = Backend.run { opts with counters = false } prog file in
+        exit (if counted <> 0 then counted else timed)
     | "run" | "build" | "emit-c" ->
-        let opts = { Backend.release = !release; cc = !cc; keep_c = !keep; profile = !profile; explain = !explain } in
+        let opts = { Backend.release = !release; cc = !cc; keep_c = !keep; profile = !profile; explain = !explain; counters = false } in
         (match cmd with
          | "emit-c" -> print_string (Cgen.emit ?explain:!explain ~profile:!profile prog ~debug:(not !release)); explained ()
          | "build" ->

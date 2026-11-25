@@ -27,8 +27,22 @@ typedef uint8_t StnUnit;
 void* stn_alloc(size_t size);
 void  stn_free(void* p);
 
+/* ---- counters of bench blocks (section 20.3) ---- */
+/* What a `measure` block did, in numbers that are the same on every machine: allocations and
+   their bytes, copies of shared values (section 9.8), and counts raised or lowered. Compiled in
+   only for the counting build of a bench (STN_COUNTERS); otherwise these are nothing. */
+#ifdef STN_COUNTERS
+extern uint64_t stn_count_allocs, stn_count_bytes, stn_count_copies, stn_count_ops;
+#define STN_COUNT_OP() ((void)(stn_count_ops++))
+#define STN_COUNT_COPY() ((void)(stn_count_copies++))
+#else
+#define STN_COUNT_OP() ((void)0)
+#define STN_COUNT_COPY() ((void)0)
+#endif
+
 static inline void stn_dup(void* p) {
     if ((uintptr_t)p & 1) return;                 /* field-less variant */
+    STN_COUNT_OP();
     stn_header* h = (stn_header*)p;
     if (h->flags == 0) {
         if (__builtin_expect(++h->rc == UINT32_MAX, 0)) h->flags |= STN_NOCOUNT;
@@ -81,6 +95,7 @@ static inline void stn_release_leave(void) {
 
 static inline void stn_drop(void* p, void (*release)(void*)) {
     if ((uintptr_t)p & 1) return;
+    STN_COUNT_OP();
     stn_header* h = (stn_header*)p;
 #ifdef STN_DEBUG
     stn_check_header(p);
@@ -181,6 +196,7 @@ static inline __attribute__((always_inline)) StnStr stn_str_dup(StnStr s) {
 #ifdef STN_PROFILE_COPIES
             stn_profile_event(STN_PROFILE_VIEW);
 #endif
+            STN_COUNT_COPY();
             return stn_str_new_heap(s.ptr, (int64_t)(s.w1 & STN_STR_LEN_MASK));
         }
         stn_dup(stn_str_buf(s));
@@ -197,7 +213,7 @@ static inline __attribute__((always_inline)) void stn_str_drop(StnStr s) {
 #ifndef STN_DEBUG
     /* the common case, an unshared buffer counted by one thread, without a call */
     stn_header* h = (stn_header*)stn_str_buf(s);
-    if (__builtin_expect(h->flags == 0, 1)) { if (--h->rc == 0) stn_str_release(h); return; }
+    if (__builtin_expect(h->flags == 0, 1)) { STN_COUNT_OP(); if (--h->rc == 0) stn_str_release(h); return; }
 #endif
     stn_drop(stn_str_buf(s), stn_str_release);
 }
@@ -464,6 +480,11 @@ void    stn_print(const StnStr* s);
 int     stn_read_line(StnStr* out);
 StnStr  stn_read_all(const char* file, int line, int col);
 int64_t stn_clock_ns(void);
+/* The loop of a `measure` block (section 20.3): true while it should run again. In the counting
+   build it runs once, then prints the counters and checks the budgets in spec ("allocs<= copies==",
+   their limits in a to d); otherwise it runs for STN_BENCH_MS milliseconds and prints the time. */
+uint8_t stn_bench_more(const StnStr* name, const StnStr* label, int64_t n, const StnStr* spec,
+                       int64_t a, int64_t b, int64_t c, int64_t d);
 StnArray* stn_str_chars(const StnStr* s, const StnElemOps* char_ops);
 StnArray* stn_str_split(const StnStr* s, const StnStr* sep, const StnElemOps* str_ops, const char* file, int line, int col);
 StnStr  stn_str_join_parts(const StnStr* parts, int64_t n, StnStr sep);

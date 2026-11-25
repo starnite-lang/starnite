@@ -41,6 +41,8 @@ type env = {
 
 let out = Buffer.create 65536
 
+let bench_turn = ref false
+
 (* what `assert_snapshot` does with the text of its value: the test runner puts in a comparison
    with the stored copy (section 20.2) *)
 let snapshot : (string -> Syntax.loc -> unit) ref =
@@ -801,6 +803,8 @@ and builtin env name (tys : ty list) (vals : value list) loc : value * value lis
       (match In_channel.input_all stdin with
        | input -> pure (VStr (sanitize_utf8 input))
        | exception Sys_error _ -> trap "input error" loc "could not read stdin")
+  (* the reference interpreter has no counters: a measure block runs once *)
+  | "bench_more@Str", _ -> bench_turn := not !bench_turn; pure (VBool !bench_turn)
   | "clock_ns@", [] -> pure (VInt (Int64.of_float (Unix.gettimeofday () *. 1e9)))
   | "len@Array", [ VArr a ] -> pure (VInt (Int64.of_int (Array.length a)))
   | "push@Array", [ VArr a; x ] -> (VUnit, [ VArr (Array.append a [| x |]); x ])

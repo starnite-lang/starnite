@@ -373,7 +373,7 @@ and emit_helpers st t =
                (variants st t))
         in
         pr st.helpers
-          "static void release_%s(void* p) { if (stn_release_enter(p, release_%s)) return; for (;;) { %s x = (%s)p; %s next = NULL; switch (x->h.tag) { %s default: break; } stn_free(p); if (next == NULL || ((uintptr_t)next & 1)) break; stn_header* h = (stn_header*)next; if (h->flags != 0) { stn_drop(next, release_%s); break; } STN_CHECK_HEADER(next); if (--h->rc != 0) break; if (--stn_release_left < 0) { stn_release_defer(next, release_%s); break; } p = next; } stn_release_leave(); }\n"
+          "static void release_%s(void* p) { if (stn_release_enter(p, release_%s)) return; for (;;) { %s x = (%s)p; %s next = NULL; switch (x->h.tag) { %s default: break; } stn_free(p); if (next == NULL || ((uintptr_t)next & 1)) break; stn_header* h = (stn_header*)next; if (h->flags != 0) { stn_drop(next, release_%s); break; } STN_CHECK_HEADER(next); STN_COUNT_OP(); if (--h->rc != 0) break; if (--stn_release_left < 0) { stn_release_defer(next, release_%s); break; } p = next; } stn_release_leave(); }\n"
           m m c c c arms m m;
         pr st.helpers "static inline %s dup_%s(%s x) { stn_dup(x); return x; }\n" c m c;
         pr st.helpers "static inline void drop_%s(%s x) { stn_drop(x, release_%s); }\n" m c m
@@ -3340,6 +3340,13 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       { c = res; owned = true }
   | "read_all@" -> owned (Printf.sprintf "stn_read_all(%s)" (loc_args e.l))
   | "clock_ns@" -> value "stn_clock_ns()"
+  | "bench_more@Str" ->
+      (* the strings are literals and the numbers plain, so evaluating them each turn of the
+         measured loop counts as nothing *)
+      let name = sref fc (b 0) and label = sref fc (b 1) in
+      let n = b 2 in
+      let spec = sref fc (b 3) in
+      value (Printf.sprintf "stn_bench_more(%s, %s, %s, %s, %s, %s, %s, %s)" name label n spec (b 4) (b 5) (b 6) (b 7))
   | "len@Array" -> (
       match (arg 0).a.e with
       | XVar v when Hashtbl.mem fc.cached v.vid -> value (snd (Hashtbl.find fc.cached v.vid))

@@ -1,0 +1,46 @@
+# Bench blocks with counters and budgets (section 20.3). `starnite test` runs each measure block
+# once in the counting build and holds it to its budgets; tests/run.sh compares what that prints
+# with benches.out. The counters are the same on every machine: the list is changed in place with
+# no allocation, it is read without a count being touched, and the last bench breaks its budget on
+# purpose. `starnite bench` adds the times, from a build without the counters.
+type List = Nil | Cons(head: Int, tail: List)
+
+fn range(n: Int) -> List:
+    var out = Nil
+    var i = n
+    while i > 0:
+        i = i - 1
+        out = Cons(i, out)
+    out
+
+fn bump(take xs: List, by: Int) -> List:
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) -> Cons(x + by, bump(take rest, by))
+
+fn total(xs: List) -> Int:
+    match xs:
+        Nil -> 0
+        Cons(x, rest) -> x + total(rest)
+
+bench "bump in place" for n in [10, 1000] budget allocs == 0 budget copies == 0:
+    var xs = range(n)
+    measure:
+        xs = bump(take xs, 1)
+
+bench "read a list" budget count_ops == 0 budget allocs == 0:
+    let xs = range(100)
+    var sum = 0
+    measure:
+        sum = sum + total(xs)
+
+bench "build a list" for n in [100] budget allocs <= 50 budget time < 5ms:
+    var sum = 0
+    measure:
+        sum = sum + total(range(n))
+
+test "ranges add up":
+    assert total(range(4)) == 6
+
+fn main() ! io:
+    print(f"{total(bump(range(3), 1))}")

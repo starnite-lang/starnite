@@ -22,6 +22,18 @@
 
 int64_t stn_live_objects = 0;
 
+/* ---- counters of bench blocks (section 20.3) ---- */
+#ifdef STN_COUNTERS
+uint64_t stn_count_allocs, stn_count_bytes, stn_count_copies, stn_count_ops;
+static void* stn_counted_malloc(size_t n) { stn_count_allocs++; stn_count_bytes += n; return malloc(n); }
+static void* stn_counted_calloc(size_t k, size_t n) { stn_count_allocs++; stn_count_bytes += k * n; return calloc(k, n); }
+static void* stn_counted_realloc(void* p, size_t n) { stn_count_allocs++; stn_count_bytes += n; return realloc(p, n); }
+/* every allocation the runtime makes from here on is counted */
+#define malloc(n) stn_counted_malloc(n)
+#define calloc(k, n) stn_counted_calloc(k, n)
+#define realloc(p, n) stn_counted_realloc(p, n)
+#endif
+
 /* ---- allocation (section 11.2) ---- */
 /* Size classes step by 16 bytes up to 1 KiB, with a free list per class. Milestone 1 is
    single-threaded, so the lists are plain globals; milestone 6 makes them per thread. */
@@ -38,7 +50,13 @@ void* stn_alloc(size_t size) {
         /* a release that STN_FREE_BUDGET stopped goes on here, a budget's worth at a time */
         if (__builtin_expect(stn_release_pending != 0, 0) && stn_release_depth == 0) stn_release_drain(1);
         stn_free_node* n = stn_free_lists[cls];
-        if (n) { stn_free_lists[cls] = n->next; h = (stn_header*)n; }
+        if (n) {
+            stn_free_lists[cls] = n->next; h = (stn_header*)n;
+#ifdef STN_COUNTERS
+            /* a cell taken back from the free list is an allocation all the same */
+            stn_count_allocs++; stn_count_bytes += cls * 16;
+#endif
+        }
         else {
             h = (stn_header*)malloc(cls * 16);
             if (!h) { fputs("trap: out of memory\n", stderr); exit(2); }
@@ -481,6 +499,7 @@ static StnArray* stn_array_copy(StnArray* a, int64_t cap) {
 #ifdef STN_PROFILE_COPIES
     stn_profile_event(STN_PROFILE_ARRAY);
 #endif
+    STN_COUNT_COPY();
     StnArray* b = stn_array_new(a->ops, cap);
     size_t sz = a->ops->size;
     memcpy(b->data, a->data, (size_t)a->len * sz);
@@ -1024,6 +1043,86 @@ int64_t stn_clock_ns(void) {
     return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
+/* ---- bench blocks (section 20.3) ---- */
+static int stn_bench_on, stn_bench_failed;
+static int64_t stn_bench_start, stn_bench_iters, stn_bench_target;
+#ifdef STN_COUNTERS
+static uint64_t stn_bench_base[4];
+#endif
+
+static void stn_bench_title(const StnStr* name, const StnStr* label, int64_t n) {
+    int64_t k, l;
+    const char* nm = stn_str_span(name, &k);
+    const char* lb = stn_str_span(label, &l);
+    printf("bench %.*s", (int)k, nm);
+    if (l > 0) printf("  %.*s=%lld", (int)l, lb, (long long)n);
+}
+
+uint8_t stn_bench_more(const StnStr* name, const StnStr* label, int64_t n, const StnStr* spec,
+                       int64_t a, int64_t b, int64_t c, int64_t d) {
+#ifdef STN_COUNTERS
+    if (!stn_bench_on) {
+        stn_bench_on = 1;
+        stn_bench_base[0] = stn_count_allocs; stn_bench_base[1] = stn_count_bytes;
+        stn_bench_base[2] = stn_count_copies; stn_bench_base[3] = stn_count_ops;
+        return 1;
+    }
+    static const char* const names[4] = { "allocs", "alloc_bytes", "copies", "count_ops" };
+    uint64_t got[4] = { stn_count_allocs - stn_bench_base[0], stn_count_bytes - stn_bench_base[1],
+                        stn_count_copies - stn_bench_base[2], stn_count_ops - stn_bench_base[3] };
+    stn_bench_on = 0;
+    stn_flush();
+    stn_bench_title(name, label, n);
+    for (int i = 0; i < 4; i++) printf("  %s %llu", names[i], (unsigned long long)got[i]);
+    printf("\n");
+    /* the budgets: each a counter and a comparison, with its limit among a to d in order */
+    int64_t limits[4] = { a, b, c, d };
+    int64_t len;
+    const char* text = stn_str_span(spec, &len);
+    int which = 0;
+    for (int64_t i = 0; i < len && which < 4; which++) {
+        while (i < len && text[i] == ' ') i++;
+        int64_t from = i;
+        while (i < len && text[i] != '<' && text[i] != '=') i++;
+        int64_t op = i;
+        while (i < len && text[i] != ' ') i++;
+        if (op == from) break;
+        int counter = -1;
+        for (int j = 0; j < 4; j++)
+            if ((int64_t)strlen(names[j]) == op - from && memcmp(names[j], text + from, (size_t)(op - from)) == 0) counter = j;
+        if (counter < 0) continue;   /* time: not a counter, and not checked here */
+        int strict = i - op == 1, equal = text[op] == '=';
+        uint64_t limit = (uint64_t)limits[which];
+        int ok = limits[which] >= 0 && (equal ? got[counter] == limit : strict ? got[counter] < limit : got[counter] <= limit);
+        if (!ok) {
+            printf("FAIL budget %s %.*s %lld: it was %llu\n", names[counter], (int)(i - op), text + op,
+                   (long long)limits[which], (unsigned long long)got[counter]);
+            stn_bench_failed = 1;
+        }
+    }
+    fflush(stdout);
+    return 0;
+#else
+    (void)spec; (void)a; (void)b; (void)c; (void)d;
+    if (!stn_bench_on) {
+        const char* ms = getenv("STN_BENCH_MS");
+        stn_bench_target = (ms && atoll(ms) > 0 ? atoll(ms) : 300) * 1000000LL;
+        stn_bench_on = 1; stn_bench_iters = 0;
+        stn_bench_start = stn_clock_ns();
+        return 1;
+    }
+    stn_bench_iters++;
+    int64_t spent = stn_clock_ns() - stn_bench_start;
+    if (spent < stn_bench_target) return 1;
+    stn_bench_on = 0;
+    stn_flush();
+    stn_bench_title(name, label, n);
+    printf("  %.1f ns per iteration over %lld\n", (double)spent / (double)stn_bench_iters, (long long)stn_bench_iters);
+    fflush(stdout);
+    return 0;
+#endif
+}
+
 /* ---- maps and sets (section 3.6) ---- */
 uint64_t stn_hash_k0 = UINT64_C(0x0706050403020100), stn_hash_k1 = UINT64_C(0x0f0e0d0c0b0a0908);
 
@@ -1260,6 +1359,7 @@ static void stn_map_copy_for_write(StnMap** pm) {
 #ifdef STN_PROFILE_COPIES
     stn_profile_event(STN_PROFILE_MAP);
 #endif
+    STN_COUNT_COPY();
     StnMap* m = *pm;
     const StnMapOps* ops = m->ops;
     StnMap* c = stn_map_new(ops);
@@ -1871,6 +1971,8 @@ void stn_runtime_exit(int status) {
     /* what a budget left for later is released now: nothing will allocate again */
     stn_release_budget = INT64_MAX;
     if (stn_release_depth == 0) stn_release_drain(1);
+    /* a budget of a bench that was not kept fails the run */
+    if (stn_bench_failed && status == 0) status = 1;
 #ifdef STN_PROFILE_COPIES
     stn_profile_report();
 #endif
