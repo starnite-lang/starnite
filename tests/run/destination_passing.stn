@@ -79,6 +79,29 @@ fn sum_tree(t: Tree) -> Int:
         Leaf -> 0
         Node(l, x, r) -> sum_tree(l) * 2 + x + sum_tree(r)
 
+# the constructor is only under a return statement
+fn countdown(n: Int) -> List:
+    if n > 0:
+        return Cons(n, countdown(n - 1))
+    Nil
+
+type Marks = Stop | Mark(rest: Marks, mark: Int)
+
+# The field after the call is a variable that a closure changes while the call runs: it is read
+# after the call, so this stays a call, and each mark is the 1 its closure left.
+fn marked(n: Int, take run: fn()) -> Marks:
+    run()
+    if n == 0:
+        return Stop
+    var mark = 0
+    let next = fn(): mark += 1
+    Mark(marked(n - 1, take next), mark)
+
+fn show_marks(ms: Marks) -> Str:
+    match ms:
+        Stop -> "."
+        Mark(rest, mark) -> f"{mark} {show_marks(rest)}"
+
 fn main():
     let big = bump(range(4000), 1)
     print(f"{total(big)}")
@@ -92,3 +115,5 @@ fn main():
     print(f"{total(bump(take kept, 100))} {total(other)}")
     let t = Node(Node(Leaf, 1, Leaf), 2, Node(Node(Leaf, 3, Leaf), 4, Leaf))
     print(f"{sum_tree(t)} {sum_tree(mirror(take t))}")
+    print(f"{total(countdown(4000))} {total(countdown(0))}")
+    print(show_marks(marked(3, fn(): print("first"))))

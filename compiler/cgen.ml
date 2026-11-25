@@ -25,7 +25,7 @@ type st = {
   instances : (string, unit) Hashtbl.t;
   queue : (string * string * ty list) Queue.t;
   strlits : (string, string) Hashtbl.t;
-  dps : (string * Buffer.t) option ref;   (* the destination of the function being generated as a loop (section 9.5), and its code *)
+  dps : (string * Buffer.t * (texpr -> unit)) option ref;   (* the destination of the function being generated as a loop (section 9.5), and its code *)
   reuse : (string * string * Buffer.t) list ref;   (* cells a match took apart, free for a constructor of the same type: C name, type, and the function's code, which a closure inside it does not share *)
   movable : texpr list ref;              (* the last occurrences of owned variables, which may move them (section 9.2) *)
   pinned : (int, unit) Hashtbl.t;        (* variables something borrows from to the end of their scope: never moved *)
@@ -1835,8 +1835,14 @@ and dps_field fc cname (params : (var * mode * ty) list) (e : texpr) : int optio
        | [ call ] ->
            let k = ref (-1) in
            List.iteri (fun j x -> if x == call then k := j) es;
-           (* nothing may run between the call and the constructor: what follows it is a name or a literal *)
-           let rest_plain = List.for_all (fun (x : texpr) -> match x.e with XVar _ | XLit _ -> true | _ -> false)
+           (* Nothing may run between the call and the constructor, and what follows the call is
+              read before it here, where the program reads it after: so it is a literal, or a
+              variable the call cannot change. A variable in a shared cell can be changed by a
+              closure that the call runs. *)
+           let rest_plain = List.for_all (fun (x : texpr) -> match x.e with
+               | XLit _ -> true
+               | XVar v -> not v.vcell && not v.vcaptured
+               | _ -> false)
                (List.filteri (fun j _ -> j > !k) es) in
            if rest_plain then Some !k else None
        | _ -> None)
@@ -1844,11 +1850,18 @@ and dps_field fc cname (params : (var * mode * ty) list) (e : texpr) : int optio
 
 (* whether a body returns a constructor with such a call from a tail position *)
 and dps_body fc cname params (e : texpr) : bool =
-  match e.e with
-  | XBlock (_, v) -> dps_body fc cname params v
-  | XIf (_, a, b) -> dps_body fc cname params a || dps_body fc cname params b
-  | XMatch (_, arms) -> List.exists (fun a -> dps_body fc cname params a.body) arms
-  | _ -> dps_field fc cname params e <> None
+  let rec tail (e : texpr) =
+    match e.e with
+    | XBlock (_, v) -> tail v
+    | XIf (_, a, b) -> tail a || tail b
+    | XMatch (_, arms) -> List.exists (fun (a : tarm) -> tail a.body) arms
+    | _ -> dps_field fc cname params e <> None in
+  (* what a return statement returns is in tail position too, wherever the statement is *)
+  let returned = ref false in
+  walk_texpr (fun _ -> ())
+    (fun (s : tstmt) -> match s.st with SReturn r -> if tail r then returned := true | _ -> ())
+    e;
+  tail e || !returned
 
 (* generates e, in tail position of a function that is a loop: every path stores the value at the
    destination and returns, or stores a constructor with an empty field and goes round again *)
@@ -3103,14 +3116,15 @@ and stmt fc (s : tstmt) =
        if rc fc p.pty then line fc "%s" (drop_stmt st (ts fc p.pty) lv);
        line fc "%s = %s;" lv nv
    | SExpr e -> discard_value fc e
+   | SReturn e when (match !(st.dps) with Some (_, b, _) -> b == fc.b | None -> false) ->
+       (* in a function that runs as a loop (section 9.5), what is returned is in tail position *)
+       (match !(st.dps) with Some (_, _, tail) -> tail e | None -> ())
    | SReturn e ->
        let x = expr fc e in
        let v = if repr (ts fc e.ty) = TNever then "0" else own fc x e.ty in
        let rv = tmp fc fc.ret v in
        drop_until fc (fun _ -> false);
-       (match !(st.dps) with
-        | Some (dst, b) when b == fc.b -> line fc "*%s = %s;" dst rv; line fc "return _res;"
-        | _ -> if fc.can_fail then (line fc "*_out = %s;" rv; line fc "return 0;") else line fc "return %s;" rv)
+       if fc.can_fail then (line fc "*_out = %s;" rv; line fc "return 0;") else line fc "return %s;" rv
    | SBreak ->
        drop_until fc (fun f -> f.fk = FLoop);
        line fc "break;"
@@ -3701,7 +3715,7 @@ let compile_instance st cname uname tys =
     (* a function that returns a constructor holding a call of itself runs as a loop (section 9.5) *)
     line fc "%s _res;" (cty st ret);
     line fc "%s* _dst = &_res;" (cty st ret);
-    st.dps := Some ("_dst", fc.b);
+    st.dps := Some ("_dst", fc.b, dps_tail fc cname params "_dst");
     line fc "for (;;) {";
     fc.ind <- fc.ind + 1;
     dps_tail fc cname params "_dst" tf.fbody;
