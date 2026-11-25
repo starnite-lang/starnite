@@ -36,3 +36,16 @@ test "wrong: traps on a sum" for a: Int, b: Int:
 
 test "wrong: a snapshot that differs":
     assert_snapshot larger(4, 9)
+
+# a type with no value: every Ring holds another
+type Ring = Link(next: Ring)
+
+test "wrong: nothing to generate" for r: Ring:
+    assert true
+
+# two names that differ only in what a file name does not keep
+test "names collide!":
+    assert_snapshot 1
+
+test "names collide?":
+    assert_snapshot 1

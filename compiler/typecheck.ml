@@ -2662,6 +2662,21 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
       loop_moves c before;
       mks (SFor (tp, src, tb))
   | While (cnd, body) ->
+      (* The loop a `measure:` block becomes (section 20.3) is ended by the runtime, which then
+         reports the counters and checks the budgets. Leaving it any other way would skip that. *)
+      (match cnd.d with
+       | Call ({ d = Name "bench_more"; _ }, _) ->
+           let rec scan in_loop (b : block) =
+             List.iter (fun (st : stmt) ->
+                 match st.s with
+                 | Break when not in_loop -> err "E0100" st.sloc "a measure block cannot be left with break: its counters would never be reported"
+                 | Return _ -> err "E0100" st.sloc "a measure block cannot be left with return: its counters would never be reported"
+                 | If (branches, last) -> List.iter (fun (_, bl) -> scan in_loop bl) branches; Option.iter (scan in_loop) last
+                 | Match (_, arms) -> List.iter (fun (a : arm) -> scan in_loop a.abody) arms
+                 | For (_, _, _, _, bl) | While (_, bl) -> scan true bl
+                 | _ -> ()) b in
+           scan false body
+       | _ -> ());
       let tc = check c cnd TBool in
       c.loops <- c.loops + 1;
       let before = c.moved in

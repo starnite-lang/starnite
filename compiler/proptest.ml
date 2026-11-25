@@ -41,31 +41,42 @@ let seed_of (name : string) (given : int option) : int =
 
 let decl env n = Hashtbl.find_opt env.prog.decls n
 
-(* whether values of a type can be generated *)
-let rec generable env (t : ty) : bool =
-  match repr t with
-  | TInt _ | TFloat | TF32 | TBool | TChar | TStr | TUnit -> true
-  | TArray e -> generable env e
-  | TTuple ts -> List.for_all (generable env) ts
-  | TNamed (("Map" | "Set"), args) -> List.for_all (generable env) args
-  | TNamed (n, args) -> (
-      match decl env n with
-      | Some { dbody = DStruct fs; dparams; _ } when List.length dparams = List.length args ->
-          let s = List.combine dparams args in
-          List.for_all (fun (f : field_info) -> generable_field env n (subst s f.fty)) fs
-      | Some { dbody = DData vs; dparams; _ } when List.length dparams = List.length args ->
-          let s = List.combine dparams args in
-          List.for_all (fun (v : variant_info) -> List.for_all (fun (f : field_info) -> generable_field env n (subst s f.fty)) v.vfields) vs
-      | _ -> false)
-  | _ -> false
+(* Whether values of a type can be generated. A type met again while it is being looked at,
+   directly or through an array or another type, is taken on trust, or the question would not
+   end: `type Tree = Leaf | Node(children: Array[Tree])`. *)
+let generable env (t : ty) : bool =
+  let rec go (seen : string list) (t : ty) =
+    match repr t with
+    | TInt _ | TFloat | TF32 | TBool | TChar | TStr | TUnit -> true
+    | TArray e -> go seen e
+    | TTuple ts -> List.for_all (go seen) ts
+    | TNamed (("Map" | "Set"), args) -> List.for_all (go seen) args
+    | TNamed (n, args) ->
+        let key = show_ty (repr t) in
+        List.mem key seen
+        || (match decl env n with
+            | Some { dbody = DStruct fs; dparams; _ } when List.length dparams = List.length args ->
+                let s = List.combine dparams args in
+                List.for_all (fun (f : field_info) -> go (key :: seen) (subst s f.fty)) fs
+            | Some { dbody = DData vs; dparams; _ } when List.length dparams = List.length args ->
+                let s = List.combine dparams args in
+                List.for_all (fun (v : variant_info) -> List.for_all (fun (f : field_info) -> go (key :: seen) (subst s f.fty)) v.vfields) vs
+            | _ -> false)
+    | _ -> false in
+  go [] t
 
-(* a field of the type being looked at is taken on trust, or the question would not end *)
-and generable_field env self (t : ty) =
-  match repr t with
-  | TNamed (n, _) when n = self -> true
-  | _ -> generable env t
+(* how deep a value being generated is: a type with no variant that ends, such as
+   `type Ring = Link(next: Ring)`, has no values, and is given up on *)
+let nesting = ref 0
 
 let rec gen env (r : rng) (size : int) (t : ty) : value =
+  incr nesting;
+  if !nesting > 500 then raise (No_generator t);
+  let v = gen_at env r size t in
+  decr nesting;
+  v
+
+and gen_at env (r : rng) (size : int) (t : ty) : value =
   match repr t with
   | TUnit -> VUnit
   | TBool -> VBool (below r 2 = 1)
@@ -224,13 +235,14 @@ let check env ~(cases : int) ~(seed : int) (params : var list)
     ~(valid : value list -> bool) ~(run : value list -> string option) : outcome =
   match List.find_opt (fun (v : var) -> not (generable env v.vty)) params with
   | Some v -> Cannot v.vty
-  | None ->
+  | None -> try
       let r = { s = Int64.of_int seed } in
       let ran = ref 0 and made = ref 0 and failure = ref None in
       (* up to ten inputs are made for each case wanted, which is where "one in ten" is counted *)
       while !failure = None && !ran < cases && !made < cases * 10 do
         (* by inputs made, not cases run: a where clause that small inputs cannot pass is then given larger ones *)
         let size = min 40 (!made * 40 / max 1 cases) in
+        nesting := 0;
         let inputs = List.map (fun (v : var) -> gen env r size v.vty) params in
         incr made;
         if valid inputs then begin
@@ -264,3 +276,4 @@ let check env ~(cases : int) ~(seed : int) (params : var list)
           done;
           let shown = List.mapi (fun i (v : var) -> Printf.sprintf "%s = %s" v.vname (show env v.vty !inputs.(i))) params in
           Failed_case (!why, shown, seed)
+    with No_generator t -> Cannot t

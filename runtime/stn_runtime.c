@@ -87,8 +87,9 @@ void stn_release_defer(void* p, void (*release)(void*)) {
     if (stn_release_pending == stn_pending_cap) {
         size_t cap = stn_pending_cap ? stn_pending_cap * 2 : 256;
         StnPending* grown = (StnPending*)realloc(stn_pending, cap * sizeof *grown);
-        /* without room for the list the object is released at once, as deep as that goes */
-        if (!grown) { release(p); return; }
+        /* Without room for the list there is no way on: the release function would only come
+           back here. Out of memory is a trap, as it is for any allocation. */
+        if (!grown) { fputs("trap: out of memory\n", stderr); exit(2); }
         stn_pending = grown; stn_pending_cap = cap;
     }
     stn_pending[stn_release_pending].p = p;

@@ -74,6 +74,9 @@ done
 if cmp -s "$tmp/failing" "$here/testing/failing.out"; then pass=$((pass + 1))
 else note "FAIL testing/failing"; diff "$here/testing/failing.out" "$tmp/failing" | head -10; fail=$((fail + 1)); fi
 
+# a run of no cases would pass whatever a property says
+if (cd "$root" && "$starnite" test --cases 0 tests/unit/testing_kinds.stn) > "$tmp/cases" 2>&1; then note "FAIL --cases 0 was accepted"; fail=$((fail + 1)); else pass=$((pass + 1)); fi
+
 # bench blocks (section 20.3): the counters of each measure block and its budgets, one of them
 # broken, against tests/testing/benches.out
 (cd "$root" && "$starnite" test tests/testing/benches.stn) > "$tmp/benches" 2>&1; echo "exit $?" >> "$tmp/benches"

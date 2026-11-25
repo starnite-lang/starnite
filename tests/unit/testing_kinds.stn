@@ -49,6 +49,21 @@ test "trees and pairs and maps" for t: Tree, p: Pair, m: Map[Str, Int], s: Set[C
     assert len(p.b) >= 0
     assert len(m) >= 0 and len(s) >= 0
 
+# a type that holds itself through an array
+type Rose = Tip | Branch(children: Array[Rose])
+
+fn tips(r: Rose) -> Int:
+    match r:
+        Tip -> 1
+        Branch(cs) ->
+            var n = 0
+            for c in cs:
+                n = n + tips(c)
+            n
+
+test "a tree of arrays of trees" for r: Rose:
+    assert tips(r) >= 0
+
 test "a snapshot":
     assert_snapshot [(area(Rect(2, 3)), "rect"), (area(Circle(1)), "circle")]
     assert_snapshot larger(4, 9)
