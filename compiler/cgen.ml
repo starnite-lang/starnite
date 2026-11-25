@@ -819,12 +819,14 @@ let rec expr fc (e : texpr) : r =
       { c = Printf.sprintf "((%s*)(%s)->data)[stn_index(%s, stn_len(%s), %s)]" (ct fc t) av iv av (loc_args e.l); owned = false }
   | XSlice (a, lo, hi) ->
       let av = borrow fc (expr fc a) a.ty in
+      (* a string is read by address: it is settled before its bounds, which may assign it *)
+      let av = if repr (ts fc a.ty) = TStr then hold_str fc av { lo with e = XTuple [ lo; hi ] } else av in
       let lov = tmp fc (TInt IInt) (expr fc lo).c in
       let hiv = tmp fc (TInt IInt) (expr fc hi).c in
       (match repr (ts fc a.ty) with
        (* a slice of a string that cannot change while it is in scope is a view of it: nothing
           is copied until the slice is stored or returned, when its duplicate is a copy *)
-       | TStr when view_source fc a ->
+       | TStr when view_source fc a && writes_nothing lo && writes_nothing hi ->
            { c = tmp fc t (Printf.sprintf "stn_str_view(%s, %s, %s, %s)" (sref fc av) lov hiv (loc_args e.l)); owned = false }
        | TStr -> { c = tmp fc t (Printf.sprintf "stn_str_slice(%s, %s, %s, %s)" (sref fc av) lov hiv (loc_args e.l)); owned = true }
        | _ -> { c = tmp fc t (Printf.sprintf "stn_array_slice(%s, %s, %s, %s)" av lov hiv (loc_args e.l)); owned = true })
@@ -2587,7 +2589,8 @@ and view_source fc (e : texpr) =
 (* A let or var of a slice of such a string keeps the view. *)
 and binds_view fc (v : var) (e : texpr) =
   match repr (ts fc e.ty), e.e with
-  | TStr, XSlice (a, _, _) when not v.vcell -> view_source fc a
+  (* bounds that may assign make the slice a copy of a held string, not a view (see XSlice) *)
+  | TStr, XSlice (a, lo, hi) when not v.vcell -> view_source fc a && writes_nothing lo && writes_nothing hi
   | _ -> false
 
 and borrows_array_string fc (v : var) (e : texpr) =
@@ -3137,7 +3140,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       line fc "memset(&%s, 0, sizeof %s);" res res;
       { c = res; owned = false }
   | "byte_at_or_end@Str" ->
-      let s = b 0 in
+      let s = hold_str fc (b 0) (arg 1).a in
       let i = tmp fc (TInt IInt) (b 1) in
       value (Printf.sprintf "stn_str_byte_at_or_end(%s, %s)" (sref fc s) i)
   | "chars@Str" -> owned (Printf.sprintf "stn_str_chars(%s, %s)" (sref fc (b 0)) (elem_ops st TChar))
@@ -3201,7 +3204,11 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
            let s, p = b2 () in
            let s = sref fc s and p = sref fc p in
            value (Printf.sprintf "stn_str_%s(%s, %s)" (if prefix then "starts_with" else "ends_with") s p))
-  | "repeat@Str" -> let s = sref fc (b 0) in let n = tmp fc (TInt IInt) (expr fc (arg 1).a).c in owned (Printf.sprintf "stn_str_repeat(%s, %s, %s)" s n la)
+  | "repeat@Str" ->
+      (* the string is settled before the count is evaluated, which may assign it *)
+      let held = hold_str fc (b 0) (arg 1).a in
+      let n = tmp fc (TInt IInt) (expr fc (arg 1).a).c in
+      let s = sref fc held in owned (Printf.sprintf "stn_str_repeat(%s, %s, %s)" s n la)
   | "parse_int@Str" | "parse_float@Str" ->
       let s = sref fc (b 0) in
       let is_int = name = "parse_int@Str" in

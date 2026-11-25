@@ -4,6 +4,10 @@ fn replace(mut s: Str, to: Str, give: Str) -> Str:
     s = to
     give
 
+fn count_and_replace(mut s: Str, to: Str, give: Int) -> Int:
+    s = to
+    give
+
 fn replace_at(mut xs: Array[Str], i: Int, to: Str, give: Str) -> Str:
     xs[i] = to
     give
@@ -31,6 +35,17 @@ fn main():
     var xs = ["old element value", "y"]
     print(f"{starts_with(xs[0], replace_at(mut xs, 0, "new", "old"))} {xs}")
     print(f"{xs[1] + replace_at(mut xs, 1, "Y", "z")} {xs}")
+
+    # the count of repeat, the bounds of a slice and the index of a byte are later arguments too
+    s = "old"
+    print(f"{repeat(s, count_and_replace(mut s, "new", 2))} {s}")
+    s = "a string long enough to live in a buffer"
+    print(f"{s[2..count_and_replace(mut s, "short", 20)]} {s}")
+    s = "a string long enough to live in a buffer"
+    let cut = s[count_and_replace(mut s, "gone", 9)..25]
+    print(f"{cut} {s}")
+    s = "xyz"
+    print(f"{byte_at_or_end(s, count_and_replace(mut s, "abc", 1))} {s}")
 
     # a string held against a later argument is released when that argument fails and the error
     # is caught; the debug build checks that counts balance at exit
