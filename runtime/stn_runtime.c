@@ -116,12 +116,15 @@ void stn_check_char(int64_t c, const char* file, int line, int col) {
 /* ---- strings ---- */
 void stn_str_release(void* p) { stn_free(p); }
 
+_Noreturn static void stn_too_large(const char* file, int line, int col);
+
 char* stn_str_start(StnStr* s, int64_t len) {
     if (len <= STN_STR_INLINE_MAX) {
         s->w0 = 0;
         s->w1 = (uint64_t)len << 56;
         return (char*)s + STN_STR_INLINE_AT;
     }
+    if ((uint64_t)len > STN_STR_LIMIT) stn_too_large("<runtime>", 0, 0);
     StnStrBuf* b = (StnStrBuf*)stn_alloc(sizeof(StnStrBuf) + (size_t)len + 1);
     b->len = len;
     b->data[len] = 0;
@@ -196,8 +199,6 @@ StnStr stn_str_concat(const StnStr* a, const StnStr* b) {
     return s;
 }
 
-_Noreturn static void stn_too_large(const char* file, int line, int col);
-
 StnStr stn_str_append(StnStr a, const StnStr* b) {
     int64_t an, bn;
     const char* ad = stn_str_span(&a, &an);
@@ -210,11 +211,10 @@ StnStr stn_str_append(StnStr a, const StnStr* b) {
             if (n > buf->len) {
                 /* grow by half again at least, so that a run of appends copies each byte a
                    bounded number of times */
-                int64_t room = buf->len + buf->len / 2;
-                if (room < n) room = n;
-                if (room > STN_MAX_ALLOC) stn_too_large("<runtime>", 0, 0);
+                uint64_t room = stn_str_grown((uint64_t)buf->len, (uint64_t)n, STN_STR_LIMIT);
+                if (room == 0) stn_too_large("<runtime>", 0, 0);
                 StnStrBuf* grown = (StnStrBuf*)stn_alloc(sizeof(StnStrBuf) + (size_t)room + 1);
-                grown->len = room;
+                grown->len = (int64_t)room;
                 memcpy(grown->data, ad, (size_t)an);
                 stn_free(buf);
                 buf = grown;
@@ -1519,8 +1519,7 @@ StnStr stn_str_join_parts(const StnStr* parts, int64_t n, StnStr sep) {
     int64_t sep_n;
     const char* sep_data = stn_str_span(&sep, &sep_n);
     size_t sep_len = (size_t)sep_n;
-    uint64_t limit = (uint64_t)STN_MAX_ALLOC, room = (uint64_t)SIZE_MAX - sizeof(StnStrBuf) - 1;
-    if (limit > room) limit = room;
+    uint64_t limit = STN_STR_LIMIT;
     uint64_t sum = 0;
     for (int64_t i = 0; i < n; i++) {
         /* each term is the length of a string that exists, so the two cannot wrap 64 bits */
