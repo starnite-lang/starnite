@@ -91,6 +91,16 @@ fn bench_list_map(seed: Int) -> (Int, Int):
     let elapsed = clock_ns() - start
     (elapsed, total(xs))
 
+# a list read by a function that does not take it: nothing is counted on the way
+fn bench_list_sum(seed: Int) -> (Int, Int):
+    let xs = range(1000)
+    var sum = seed
+    let start = clock_ns()
+    for i in 0..2000:
+        sum += total(xs)
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
 fn dispatch(name: Str) -> (Int, Int):
     match name:
         "accumulate" -> bench_accumulate(1)
@@ -98,6 +108,7 @@ fn dispatch(name: Str) -> (Int, Int):
         "push_last" -> bench_push_last(1)
         "grow" -> bench_grow(1)
         "list_map" -> bench_list_map(1)
+        "list_sum" -> bench_list_sum(1)
         _ -> unreachable("unknown benchmark")
 
 fn main():

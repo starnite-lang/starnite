@@ -1922,7 +1922,11 @@ and match_ ?tail fc t (s : texpr) arms : r =
   let t = if tail <> None then TUnit else t in
   (* The arms bind borrowed views into the scrutinee, so it must outlive the match even
      when an arm overwrites the place it was read from: hold a reference of our own. *)
-  let sv = tmp fc s.ty (own fc (expr fc s) s.ty) in
+  let sx = expr fc s in
+  (* whether the match was handed its reference, by a variable at its last use or a result, or
+     took one of its own from something borrowed, which still holds the value *)
+  let handed = sx.owned in
+  let sv = tmp fc s.ty (own fc sx s.ty) in
   if rc fc s.ty then own_in fc sv s.ty;
   let has_value = match repr t with TUnit | TNever -> false | _ -> true in
   let res = fresh st "_r" and endl = fresh st "match_end" in
@@ -1941,8 +1945,10 @@ and match_ ?tail fc t (s : texpr) arms : r =
          reference is spent. *)
       let fields =
         match arm.pat with
+        (* only a value the match was handed: one it borrowed is still held by what lent it, so
+           its cell could never be used again, and its fields are read where they are *)
         | TPVariant (_, _, i, ps)
-          when ps <> [] && is_data st (ts fc s.ty) && layout st (ts fc s.ty) = LBoxed
+          when handed && ps <> [] && is_data st (ts fc s.ty) && layout st (ts fc s.ty) = LBoxed
                && List.for_all (function TPVar _ | TPWild -> true | _ -> false) ps ->
             let vinfo, fs = List.nth (variants st (ts fc s.ty)) i in
             Some (List.mapi (fun j (p, (_, ft)) -> (p, ft, variant_field st (ts fc s.ty) vinfo j sv)) (List.combine ps fs))
