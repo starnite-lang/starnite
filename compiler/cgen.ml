@@ -45,6 +45,7 @@ type st = {
   profile : bool;                        (* --profile-copies: generated code says which statement it is in *)
   excused : (Buffer.t * int * int) list ref;   (* code that runs only when a take argument is shared *)
   records : Verify.fn_record list ref;
+  demoted : (string * int, unit) Hashtbl.t;   (* take parameters passed as read-only ones (section 9.4): function, position *)
   names : (string * string) list ref;    (* every function generated, and its name in the program *)
   debug : bool;
   mutable counter : int;
@@ -372,8 +373,8 @@ and emit_helpers st t =
                (variants st t))
         in
         pr st.helpers
-          "static void release_%s(void* p) { for (;;) { %s x = (%s)p; %s next = NULL; switch (x->h.tag) { %s default: break; } stn_free(p); if (next == NULL || ((uintptr_t)next & 1)) return; stn_header* h = (stn_header*)next; if (h->flags != 0) { stn_drop(next, release_%s); return; } STN_CHECK_HEADER(next); if (--h->rc != 0) return; if (--stn_release_left < 0) { stn_release_defer(next, release_%s); return; } p = next; } }\n"
-          m c c c arms m m;
+          "static void release_%s(void* p) { if (stn_release_enter(p, release_%s)) return; for (;;) { %s x = (%s)p; %s next = NULL; switch (x->h.tag) { %s default: break; } stn_free(p); if (next == NULL || ((uintptr_t)next & 1)) break; stn_header* h = (stn_header*)next; if (h->flags != 0) { stn_drop(next, release_%s); break; } STN_CHECK_HEADER(next); if (--h->rc != 0) break; if (--stn_release_left < 0) { stn_release_defer(next, release_%s); break; } p = next; } stn_release_leave(); }\n"
+          m m c c c arms m m;
         pr st.helpers "static inline %s dup_%s(%s x) { stn_dup(x); return x; }\n" c m c;
         pr st.helpers "static inline void drop_%s(%s x) { stn_drop(x, release_%s); }\n" m c m
     | _ -> ()
@@ -477,6 +478,13 @@ let str_lit st s =
       end;
       n
 
+(* A release function for the object at p: drops is what it holds, as C statements. One that
+   drops something goes in through stn_release_enter, so that releases cannot nest without bound
+   (section 9.7). *)
+let release_fn name before drops =
+  if String.trim drops = "" then Printf.sprintf "static void %s(void* p) { %s stn_free(p); }\n" name before
+  else Printf.sprintf "static void %s(void* p) { if (stn_release_enter(p, %s)) return; %s %s stn_free(p); stn_release_leave(); }\n" name name before drops
+
 let err_id st t =
   let key = mangle t in
   match Hashtbl.find_opt st.errtypes key with
@@ -486,8 +494,8 @@ let err_id st t =
       Hashtbl.replace st.errtypes key (id, t);
       let c = cty st t in
       pr st.protos "typedef struct { StnErrBox base; %s value; } errbox_%s;\nstatic StnError errmake_%s(%s v);\n" c key key c;
-      pr st.helpers "static void errbox_release_%s(void* p) { %s stn_free(p); }\n" key
-        (if needs_rc st t then drop_stmt st t (Printf.sprintf "((errbox_%s*)p)->value" key) else "");
+      Buffer.add_string st.helpers (release_fn ("errbox_release_" ^ key) ""
+        (if needs_rc st t then drop_stmt st t (Printf.sprintf "((errbox_%s*)p)->value" key) else ""));
       pr st.helpers "static StnError errmake_%s(%s v) { errbox_%s* b = (errbox_%s*)stn_alloc(sizeof *b); b->base.release = errbox_release_%s; b->value = v; return (StnError){ %d, &b->base }; }\n"
         key c key key key id;
       id
@@ -718,8 +726,8 @@ let cell_type st t =
     Hashtbl.replace st.defined n ();
     pr st.typedefs "typedef struct { stn_header h; uint8_t busy; %s value; } %s;\n" (cty st t) n;
     pr st.protos "static void release_%s(void* p);\n" n;
-    pr st.helpers "static void release_%s(void* p) { %s stn_free(p); }\n" n
-      (if needs_rc st t then drop_stmt st t (Printf.sprintf "((%s*)p)->value" n) else "")
+    Buffer.add_string st.helpers (release_fn ("release_" ^ n) ""
+      (if needs_rc st t then drop_stmt st t (Printf.sprintf "((%s*)p)->value" n) else ""))
   end;
   n
 
@@ -1295,8 +1303,8 @@ and any_vtable st (l : Syntax.loc) (any : ty) (at : ty) : string =
   if not (Hashtbl.mem st.defined ("anyrel_" ^ crel)) then begin
     Hashtbl.replace st.defined ("anyrel_" ^ crel) ();
     pr st.protos "static void anyrel_%s(void* p);\n" crel;
-    pr st.helpers "static void anyrel_%s(void* p) { %s stn_free(p); }\n" crel
-      (if needs_rc st at then drop_stmt st at (Printf.sprintf "(*(%s*)((StnAnyBox*)p)->data)" cc) else "")
+    Buffer.add_string st.helpers (release_fn ("anyrel_" ^ crel) ""
+      (if needs_rc st at then drop_stmt st at (Printf.sprintf "(*(%s*)((StnAnyBox*)p)->data)" cc) else ""))
   end;
   let key = "vt_" ^ am ^ "__" ^ cm in
   if not (Hashtbl.mem st.defined key) then begin
@@ -1382,7 +1390,7 @@ and call_instance fc (e : texpr) uname tys (sg : fsig) targs convs : r =
       entry_name name
     end else name in
   let s = List.combine (List.map fst sg.stparams) tys in
-  let ps = List.map (fun (m, _, pt, _) -> (m, subst s pt)) sg.sparams in
+  let ps = List.mapi (fun i (m, _, pt, _) -> ((if Hashtbl.mem st.demoted (uname, i) then MBorrow else m), subst s pt)) sg.sparams in
   if sg.slend <> None then begin
     (* every parameter it can lend from is passed by address, so the place outlives
        the call; the pointer is good for the rest of the caller's statement *)
@@ -2017,8 +2025,17 @@ and match_ ?tail fc t (s : texpr) arms : r =
   (* whether the match was handed its reference, by a variable at its last use or a result, or
      took one of its own from something borrowed, which still holds the value *)
   let handed = sx.owned in
-  let sv = tmp fc s.ty (own fc sx s.ty) in
-  if rc fc s.ty then own_in fc sv s.ty;
+  (* No reference is needed for a variable this function only borrows and cannot assign: a
+     read-only parameter, or what a match on one bound. Whoever lent it holds it for the whole
+     call, and nothing here can move it or overwrite it. *)
+  let lent = (not sx.owned) && (match s.e with
+      | XVar v when not v.vmut && not v.vcell ->
+          (match Hashtbl.find_opt fc.vars v.vid with
+           | Some (VDirect n) -> not (List.exists (fun (f : frame) -> List.exists (fun (o, _) -> o = n) f.owned) fc.frames)
+           | _ -> false)
+      | _ -> false) in
+  let sv = if lent then tmp fc s.ty sx.c else tmp fc s.ty (own fc sx s.ty) in
+  if rc fc s.ty && not lent then own_in fc sv s.ty;
   let has_value = match repr t with TUnit | TNever -> false | _ -> true in
   let res = fresh st "_r" and endl = fresh st "match_end" in
   if has_value then line fc "%s %s;" (ct fc t) res;
@@ -2110,14 +2127,14 @@ and closure fc (lam : lambda) : string =
   pr st.typedefs "typedef struct { StnClosure base; %s } %s_t;\n"
     (String.concat " " (List.map (fun v -> cap_ctype v ^ " " ^ cap_field v ^ ";") caps)) name;
   pr st.protos "static void %s_release(void* p);\n" name;
-  pr st.helpers "static void %s_release(void* p) { %s_t* self = (%s_t*)p; (void)self; %s stn_free(p); }\n" name name name
+  Buffer.add_string st.helpers (release_fn (name ^ "_release") (Printf.sprintf "%s_t* self = (%s_t*)p; (void)self;" name name)
     (String.concat " "
        (List.map
           (fun v ->
             if is_cell fc v then Printf.sprintf "stn_drop(self->%s, release_%s);" (cap_field v) (cell_type st (ts fc v.vty))
             else if rc fc v.vty then drop_stmt st (ts fc v.vty) ("self->" ^ cap_field v)
             else "")
-          caps));
+          caps)));
   (* the code *)
   let b = Buffer.create 1024 in
   let params = List.map (fun (v : var) -> (v, (match v.vkind with VParam m -> m | VLocal -> MBorrow))) lam.lparams in
@@ -3649,6 +3666,12 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
           let sep = b 1 in
           owned (Printf.sprintf "stn_str_join(%s, %s)" xs sep))
   | "trim@Str" -> owned (Printf.sprintf "stn_str_trim(%s)" (sref fc (b 0)))
+  | "find_or_end@Str" ->
+      (* both strings are held against the code of what follows them *)
+      let s = hold_str fc (b 0) { (arg 1).a with e = XTuple [ (arg 1).a; (arg 2).a ] } in
+      let x = hold_str fc (b 1) (arg 2).a in
+      let from = tmp fc (TInt IInt) (b 2) in
+      value (Printf.sprintf "stn_str_find(%s, %s, %s)" (sref fc s) (sref fc x) from)
   | "contains@Str" -> let s, x = b2 () in let s = sref fc s and x = sref fc x in value (Printf.sprintf "stn_str_contains(%s, %s)" s x)
   | ("starts_with@Str" | "ends_with@Str") ->
       let prefix = name = "starts_with@Str" in
@@ -3733,7 +3756,8 @@ let compile_instance st cname uname tys =
   let sub = List.combine (List.map fst sg.stparams) tys in
   let ret = subst sub sg.sret in
   let can_fail = sig_can_fail sg in
-  let params = List.map2 (fun (v : var) (m, _, t, _) -> (v, m, subst sub t)) tf.fparams sg.sparams in
+  let params = List.mapi (fun i ((v : var), (m, _, t, _)) -> (v, (if Hashtbl.mem st.demoted (uname, i) then MBorrow else m), subst sub t))
+      (List.combine tf.fparams sg.sparams) in
   let plist = List.map (fun (v, m, t) -> param_decl st m t (var_name v)) params in
   let lend = sg.slend <> None in
   (* a lend function takes its borrowed parameters by address too, and returns a pointer *)
@@ -3894,6 +3918,120 @@ let emit_show_error st =
   pr b "    default: return stn_str_new(\"error\", 5);\n  }\n}\n";
   b
 
+(* Demoting take to borrow (section 9.4). A take parameter that its function only reads is passed
+   as a read-only one: the caller keeps its reference, and no count is updated for the call. It
+   applies to a private function called only by name: not exported, not main, not a method of an
+   impl, not used as a value, since each of those has callers that go by the signature as written.
+   A parameter is only read when every occurrence of it, and of the variables a match on it binds,
+   is a field or element read, an operand, the subject of a match or of a for, or an argument to a
+   read-only parameter or to a take parameter that is itself demoted. Whatever stores it, returns
+   it, binds it or captures it needs the reference a take parameter brings. The sets are found
+   together, starting from every candidate and removing those that fail, until none does.
+
+   Left alone: a function with a mut parameter, through which the caller's variable could change
+   under the borrow; and a function that returns a constructor holding a call of itself, which
+   runs as a loop (section 9.5) whose turns pass new values to take parameters, something a
+   read-only parameter cannot be given. *)
+let note_demotions st =
+  let prog = st.prog in
+  let methods = Hashtbl.create 32 and valued = Hashtbl.create 32 in
+  List.iter (fun (im : impl_info) -> List.iter (fun (_, g) -> Hashtbl.replace methods g ()) im.imethods_) prog.impls;
+  let bodies =
+    Hashtbl.fold (fun _ (f : tfn) acc -> f.fbody :: acc) prog.fns []
+    @ List.map (fun (_, b, _) -> b) prog.tests @ List.map (fun (l : lambda) -> l.lbody) prog.lambdas in
+  List.iter (walk_texpr (fun (x : texpr) -> match x.e with XFnRef (u, _) -> Hashtbl.replace valued u () | _ -> ()) (fun _ -> ())) bodies;
+  let loop_shaped u (body : texpr) =
+    let is_self (x : texpr) = match x.e with XCall (CFn (g, _), _, _) -> g = u | _ -> false in
+    let found = ref false in
+    let rec tail (x : texpr) = match x.e with
+      | XIf (_, a, b) -> tail a; tail b
+      | XMatch (_, arms) -> List.iter (fun a -> tail a.body) arms
+      | XBlock (_, v) -> tail v
+      | XVariant (_, _, _, fs) -> if List.exists is_self fs then found := true
+      | _ -> () in
+    tail body;
+    walk_texpr (fun _ -> ()) (fun s -> match s.st with SReturn x -> tail x | _ -> ()) body;
+    !found in
+  let candidates = ref [] in
+  Hashtbl.iter (fun u (f : tfn) ->
+      let sg = f.fsig in
+      if not sg.sexport && prog.main <> Some u && sg.slend = None && not (Hashtbl.mem methods u) && not (Hashtbl.mem valued u)
+         && not (List.exists (fun (m, _, _, _) -> m = MMut) sg.sparams) && not (loop_shaped u f.fbody) then
+        List.iteri (fun i ((v : var), (m, _, _, _)) ->
+            if m = MTake && not v.vcell && not v.vcaptured then candidates := (u, i, v, f.fbody) :: !candidates)
+          (List.combine f.fparams sg.sparams)) prog.fns;
+  List.iter (fun (u, i, _, _) -> Hashtbl.replace st.demoted (u, i) ()) !candidates;
+  let only_read (v : var) (body : texpr) =
+    let derived = Hashtbl.create 8 in
+    Hashtbl.replace derived v.vid ();
+    let ok = ref true in
+    let rec root (x : texpr) = match x.e with
+      | XVar w -> Hashtbl.mem derived w.vid
+      | XField (b, _, _) | XTupleGet (b, _) -> root b
+      | _ -> false in
+    let rec bound = function
+      | TPVar w -> Hashtbl.replace derived w.vid ()
+      | TPVariant (_, _, _, ps) | TPStruct (_, _, ps) | TPTuple ps -> List.iter bound ps
+      | TPErrType (_, p) -> bound p
+      | TPWild | TPLit _ -> () in
+    let captures (lam : lambda) = if List.exists (fun (w : var) -> Hashtbl.mem derived w.vid) lam.lcaps then ok := false in
+    (* read: the value of x is looked at where it stands, and not kept *)
+    let rec go read (x : texpr) =
+      match x.e with
+      | XVar w -> if Hashtbl.mem derived w.vid && not read then ok := false
+      | XLit _ | XNone | XFnRef _ -> ()
+      | XField (b, _, _) | XTupleGet (b, _) -> go true b
+      | XIndex (a, i) -> go true a; go true i
+      | XSlice (a, lo, hi) -> go true a; go true lo; go true hi
+      | XBin (_, a, b) -> go true a; go true b
+      | XNeg a | XNot a | XConv a -> go true a
+      | XFStr parts -> List.iter (go true) parts
+      | XCall (cl, args, _) ->
+          (match cl with CClosure f -> go true f | _ -> ());
+          List.iteri (fun i a ->
+              match a.amode, cl with
+              | MBorrow, _ -> go true a.a
+              | MTake, CFn (g, _) when Hashtbl.mem st.demoted (g, i) -> go true a.a
+              | _ -> go false a.a) args
+      | XIf (c, a, b) -> go true c; go read a; go read b
+      | XBlock (ss, value) -> List.iter stmt ss; go read value
+      | XMatch (s, arms) ->
+          go true s;
+          if root s then List.iter (fun a -> bound a.pat) arms;
+          List.iter (fun a -> Option.iter (go true) a.guard; go read a.body) arms
+      | XLambda lam -> captures lam; go false lam.lbody
+      | XTuple es | XArray es | XStruct (_, _, es) | XVariant (_, _, _, es) -> List.iter (go false) es
+      | XTry a | XFail a | XPack a -> go false a
+      | XComp (b, cs) ->
+          go false b;
+          List.iter (fun cp ->
+              (match cp.csrc with IRange (a, b) -> go true a; go true b | IArray (a, _) -> go true a);
+              Option.iter (go true) cp.ccond) cs
+    and stmt (s : tstmt) =
+      match s.st with
+      | SLet (_, e) | SVar (_, e) | SReturn e | SLend e | SCheck e -> go false e
+      | SExpr e | SAssert (e, _) | SAssertFails (_, e) -> go true e
+      | SAssign (p, e) ->
+          if Hashtbl.mem derived p.root.vid then ok := false;
+          Option.iter (go false) p.via;
+          List.iter (function PIndex i -> go true i | _ -> ()) p.path;
+          go false e
+      | SBreak | SContinue -> ()
+      | SWhile (c, b) -> go true c; go true b
+      | SFor (_, it, b) ->
+          (match it with IRange (a, b) -> go true a; go true b | IArray (a, _) -> go true a);
+          go true b
+      | SLocalFn (_, lam) -> captures lam; go false lam.lbody
+    in
+    go false body;
+    !ok in
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    List.iter (fun (u, i, v, body) ->
+        if Hashtbl.mem st.demoted (u, i) && not (only_read v body) then (Hashtbl.remove st.demoted (u, i); changed := true)) !candidates
+  done
+
 (* the generated functions that verify.ml reads: helpers, functions, and the entries main calls *)
 let verify_text st =
   Buffer.contents st.helpers ^ Buffer.contents st.funcs
@@ -3905,9 +4043,10 @@ let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~d
     protos = Buffer.create 4096; helpers = Buffer.create 4096; funcs = Buffer.create 16384;
     defined = Hashtbl.create 64; pending_boxed = Queue.create (); instances = Hashtbl.create 64;
     queue = Queue.create (); strlits = Hashtbl.create 64; dps = ref None; reuse = ref []; movable = ref []; pinned = Hashtbl.create 32; self_sliced = Hashtbl.create 16; view_vars = Hashtbl.create 16; loops = Hashtbl.create 64; in_main = ref false; entries = Hashtbl.create 8; entry_defs = Hashtbl.create 32; errtypes = Hashtbl.create 8;
-    layouts = Hashtbl.create 64; marking = ref false; cur = ref (Syntax.noloc, ""); marks = ref []; excused = ref []; records = ref []; names = ref []; explain = explain <> None; profile;
+    layouts = Hashtbl.create 64; marking = ref false; cur = ref (Syntax.noloc, ""); marks = ref []; excused = ref []; records = ref []; names = ref []; demoted = Hashtbl.create 16; explain = explain <> None; profile;
     debug; counter = 0 }
   in
+  note_demotions st;
   let main_u = match prog.main with
     | Some m -> m
     | None -> if check_only then "" else raise (Unsupported ("no main function", Syntax.noloc)) in

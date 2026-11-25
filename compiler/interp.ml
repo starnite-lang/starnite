@@ -893,6 +893,13 @@ and builtin env name (tys : ty list) (vals : value list) loc : value * value lis
       pure (VArr (Array.of_list (List.rev_map (fun p -> VStr p) !parts)))
   | "join@Array", [ VArr xs; VStr sep ] -> pure (VStr (String.concat sep (List.map as_str (Array.to_list xs))))
   | "trim@Str", [ VStr s ] -> pure (VStr (String.trim s))
+  | "find_or_end@Str", [ VStr s; VStr sub; VInt from ] ->
+      let n = String.length s and m = String.length sub in
+      if from < 0L || from > Int64.of_int n then pure (VInt (-1L))
+      else begin
+        let rec go i = if i > n - m then -1 else if String.sub s i m = sub then i else go (i + 1) in
+        pure (VInt (Int64.of_int (go (Int64.to_int from))))
+      end
   | "contains@Str", [ VStr s; VStr sub ] ->
       let n = String.length s and m = String.length sub in
       let rec go i = i <= n - m && (String.sub s i m = sub || go (i + 1)) in

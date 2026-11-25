@@ -20,6 +20,10 @@ for mode in "" --release; do
     "$starnite" run $mode --profile-copies tests/copies/copies.stn < /dev/null > "$tmp/out" 2>&1; echo "exit $?" >> "$tmp/out"
     check "profile ${mode:-debug}" "$here/copies/copies.profile"
 done
+# take parameters that are only read are passed without a count (section 9.4): the counts that
+# are left when tests/run/take_demotion.stn runs
+"$starnite" run --profile-copies tests/run/take_demotion.stn < /dev/null > "$tmp/out" 2>&1; echo "exit $?" >> "$tmp/out"
+check "take demotion" "$here/copies/take_demotion.profile"
 # a program that copies nothing says so, and the flags change nothing else it prints
 "$starnite" run --profile-copies tests/run/basics.stn < /dev/null > "$tmp/out" 2>/dev/null; echo "exit $?" >> "$tmp/out"
 check "output unchanged" "$here/run/basics.out"

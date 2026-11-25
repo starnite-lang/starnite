@@ -85,7 +85,10 @@ void stn_release_defer(void* p, void (*release)(void*)) {
 void stn_release_drain(int fresh) {
     if (fresh) stn_release_left = stn_release_budget;
     while (stn_release_pending != 0 && --stn_release_left >= 0) {
+        /* the release goes in through stn_release_enter again, now at no depth; the budget it
+           takes there is the one this turn of the loop counted */
         StnPending e = stn_pending[--stn_release_pending];
+        stn_release_left++;
         stn_release_depth = 1;
         e.release(e.p);
         stn_release_depth = 0;
@@ -446,8 +449,12 @@ StnStr stn_show_char(uint32_t c) { char b[4]; int n = stn_utf8_encode(b, c); ret
 void stn_array_release(void* p) {
     StnArray* a = (StnArray*)p;
     if (a->ops->drop) {
+        if (stn_release_enter(p, stn_array_release)) return;
         size_t sz = a->ops->size;
         for (int64_t i = 0; i < a->len; i++) a->ops->drop(a->data + (size_t)i * sz);
+        stn_free(a);
+        stn_release_leave();
+        return;
     }
     stn_free(a);
 }
@@ -1234,7 +1241,9 @@ StnMap* stn_map_with_capacity(const StnMapOps* ops, int64_t n) {
 void stn_map_release(void* p) {
     StnMap* m = (StnMap*)p;
     const StnMapOps* ops = m->ops;
-    if (ops->kdrop || ops->vdrop)
+    int nests = ops->kdrop || ops->vdrop;
+    if (nests && stn_release_enter(p, stn_map_release)) return;
+    if (nests)
         for (int64_t i = 0; i < m->used; i++) {
             char* e = m->entries + (size_t)i * m->stride;
             if (stn_map_dead(m, i, e)) continue;
@@ -1243,6 +1252,7 @@ void stn_map_release(void* p) {
         }
     free(m->index); free(m->entries); free(m->dead);
     stn_free(m);
+    if (nests) stn_release_leave();
 }
 
 /* A write needs the box unshared (section 4.5): the copy keeps the order and shares nothing. */
@@ -1618,6 +1628,15 @@ uint8_t stn_str_contains_slow(const StnStr* s, const StnStr* sub) {
     const char* sub_data = stn_str_span(sub, &m);
     const char* data = stn_str_span(s, &n);
     return m == 0 || stn_find_bytes(data, (size_t)n, sub_data, (size_t)m) != NULL;
+}
+int64_t stn_str_find(const StnStr* s, const StnStr* sub, int64_t from) {
+    int64_t m, n;
+    const char* sub_data = stn_str_span(sub, &m);
+    const char* data = stn_str_span(s, &n);
+    if (from < 0 || from > n) return -1;
+    if (m == 0) return from;
+    const char* at = stn_find_bytes(data + from, (size_t)(n - from), sub_data, (size_t)m);
+    return at ? (int64_t)(at - data) : -1;
 }
 StnStr stn_str_repeat(const StnStr* s, int64_t n, const char* file, int line, int col) {
     if (n < 0) stn_trap("invalid argument", file, line, col, "negative repeat count");

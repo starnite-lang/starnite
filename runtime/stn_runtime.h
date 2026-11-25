@@ -46,11 +46,13 @@ void stn_check_header(void* p);
 #endif
 
 /* ---- releasing large structures (section 9.7) ---- */
-/* A release function drops what its object holds, and so can start other releases. Those nest
-   only STN_RELEASE_DEPTH deep: past that, and once STN_FREE_BUDGET objects have been released in
-   one go, an object whose count reached zero is put on a list instead, and released when the
-   nesting has unwound, or at a later allocation when it was the budget that stopped it. The
-   stack a release needs is therefore bounded whatever the shape of the structure. */
+/* A release function that drops what its object holds can start other releases. Each such
+   function goes in through stn_release_enter, which lets them nest only STN_RELEASE_DEPTH deep:
+   past that, and once STN_FREE_BUDGET objects have been released in one go, the object is put on
+   a list instead, and released when the nesting has unwound, or at a later allocation when it was
+   the budget that stopped it. The stack a release needs is therefore bounded whatever the shape
+   of the structure. A release that drops nothing, a string's or an array of numbers', does not
+   take part and costs what it did. */
 #define STN_RELEASE_DEPTH 256
 extern int32_t stn_release_depth;      /* releases now running, one inside another */
 extern int64_t stn_release_left;       /* objects that may still be released before a pause */
@@ -59,14 +61,17 @@ extern size_t  stn_release_pending;    /* objects on the list */
 void stn_release_defer(void* p, void (*release)(void*));
 void stn_release_drain(int fresh);
 
-/* releases p, whose count has just reached zero, now or later */
-static inline void stn_release(void* p, void (*release)(void*)) {
+/* at the start of release, for p: 1 when p was put on the list instead, and release must return */
+static inline int stn_release_enter(void* p, void (*release)(void*)) {
     if (__builtin_expect(stn_release_depth >= STN_RELEASE_DEPTH || --stn_release_left < 0, 0)) {
         stn_release_defer(p, release);
-        return;
+        return 1;
     }
     stn_release_depth++;
-    release(p);
+    return 0;
+}
+/* at the end of a release that went in */
+static inline void stn_release_leave(void) {
     if (--stn_release_depth == 0) {
         /* what nesting put off is released now; what the budget put off waits for an allocation */
         if (__builtin_expect(stn_release_pending != 0, 0)) stn_release_drain(0);
@@ -80,10 +85,10 @@ static inline void stn_drop(void* p, void (*release)(void*)) {
 #ifdef STN_DEBUG
     stn_check_header(p);
 #endif
-    if (h->flags == 0) { if (--h->rc == 0) stn_release(p, release); return; }
+    if (h->flags == 0) { if (--h->rc == 0) release(p); return; }
     if (h->flags & STN_NOCOUNT) return;
     if (atomic_fetch_sub_explicit((_Atomic uint32_t*)&h->rc, 1, memory_order_acq_rel) == 1)
-        stn_release(p, release);
+        release(p);
 }
 
 /* ---- counters of --profile-copies (section 9.8) ---- */
@@ -465,6 +470,8 @@ StnStr  stn_str_join_parts(const StnStr* parts, int64_t n, StnStr sep);
 StnStr  stn_str_join(StnArray* xs, StnStr sep);
 StnStr  stn_str_trim(const StnStr* s);
 uint8_t stn_str_contains_slow(const StnStr* s, const StnStr* sub);
+/* the offset of the first sub in s at or after from; -1 for none, or for a from outside s */
+int64_t stn_str_find(const StnStr* s, const StnStr* sub, int64_t from);
 static inline uint8_t stn_str_contains(const StnStr* s, const StnStr* sub) {
 #if defined(__SSE2__) && defined(STN_STR_WORDS)
     /* A four-byte needle can be verified without a memcmp call. Scan a final overlapping vector

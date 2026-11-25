@@ -1,0 +1,9 @@
+7 none 0 none 0
+62 7 none 66
+none none 0 -1
+[0, 1, 2] [10] [0, 1, 2, 3]
+[name|value] [|] [a|b=c] [no =] [no =]
+[one, two, , four] [] [] [end] [] [ab]
+[the, quick, brown, fox] [] [] [one] [naïve, café]
+18 and its second line 0 a 2
+exit 0

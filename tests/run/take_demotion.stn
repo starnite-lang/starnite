@@ -1,0 +1,63 @@
+# Demoting take to borrow (section 9.4). A private function that only reads a take parameter is
+# given it as a read-only one, so its callers update no count. The output is the same either
+# way; what changes is how many counts are raised, which tests/copies.sh counts for this program.
+type List = Nil | Cons(head: Int, tail: List)
+type Named = struct(name: Str, items: Array[Int])
+
+# only read, down a list: the cells are not taken apart, and nothing is counted
+fn length(take xs: List) -> Int:
+    match xs:
+        Nil -> 0
+        Cons(_, rest) -> 1 + length(take rest)
+
+fn total(take xs: Array[Int]) -> Int:
+    var t = 0
+    for x in xs:
+        t = t + x
+    t
+
+# passes its parameter on to a function that only reads it
+fn twice_total(take xs: Array[Int]) -> Int:
+    total(take xs) * 2
+
+# a field is read, and a copy of it returned: the struct itself is only read
+fn name_of(take n: Named) -> Str:
+    n.name
+
+# not demoted: each of these needs the reference a take parameter brings
+fn keep(take xs: Array[Int]) -> Array[Int]:
+    xs
+
+fn wrap(take xs: List) -> List:
+    Cons(0, xs)
+
+fn bump(take xs: List) -> List:
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) -> Cons(x + 1, bump(take rest))
+
+fn grow(take xs: Array[Int]) -> Int:
+    var mine = xs
+    mine.push(1)
+    len(mine)
+
+fn held(take xs: Array[Int]) -> fn() -> Int:
+    fn(): len(xs)
+
+# used as a value, so it keeps the signature it was written with
+fn count(take xs: Array[Int]) -> Int:
+    len(xs)
+
+fn apply(f: fn(take Array[Int]) -> Int, take xs: Array[Int]) -> Int:
+    f(take xs)
+
+fn main() ! io:
+    let l = Cons(1, Cons(2, Cons(3, Nil)))
+    let a = [1, 2, 3]
+    let n = Named("a name long enough to live in a buffer", [4, 5])
+    var sum = 0
+    for i in 0..4:
+        sum = sum + length(l) + total(a) + twice_total(a) + len(name_of(n)) + i
+    print(f"{sum} {length(wrap(bump(l)))} {len(keep(a))} {grow(a)} {held(a)()} {apply(count, a)} {length(l)} {len(a)}")
+    # a value made for the call is released when the call is over
+    print(f"{length(Cons(7, Nil))} {total([1, 2])} {name_of(Named("x", []))}")
