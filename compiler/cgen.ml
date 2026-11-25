@@ -826,6 +826,12 @@ let array_index fc v (index : texpr) value len loc =
   | Some limit, Some upper when upper <= limit -> value
   | _ -> Printf.sprintf "stn_index(%s, %s, %s)" value len (loc_args loc)
 
+(* The cells for reuse that are left after an if or a match: those that no branch spent. Each
+   branch starts with what there was before, so each may use a cell; after them all, a cell that
+   any of them used is gone. *)
+let unspent before (afters : (string * string * Buffer.t) list list) =
+  List.filter (fun (tok, _, _) -> List.for_all (fun after -> List.exists (fun (t', _, _) -> t' = tok) after) afters) before
+
 let note fc (at : Syntax.loc * string) =
   let st = fc.st in
   if !(st.marking) then begin
@@ -972,11 +978,15 @@ and expr_at fc (e : texpr) : r =
       | TUnit | TNever ->
           line fc "if (%s) {" cv;
           fc.ind <- fc.ind + 1;
+          let before = !(st.reuse) in
           discard fc a;
+          let after_a = !(st.reuse) in
+          st.reuse := before;
           fc.ind <- fc.ind - 1;
           line fc "} else {";
           fc.ind <- fc.ind + 1;
           discard fc b;
+          st.reuse := unspent before [ after_a; !(st.reuse) ];
           fc.ind <- fc.ind - 1;
           line fc "}";
           { c = "0"; owned = false }
@@ -985,11 +995,15 @@ and expr_at fc (e : texpr) : r =
           line fc "%s %s;" (ct fc t) res;
           line fc "if (%s) {" cv;
           fc.ind <- fc.ind + 1;
+          let before = !(st.reuse) in
           assign_into fc res a t;
+          let after_a = !(st.reuse) in
+          st.reuse := before;
           fc.ind <- fc.ind - 1;
           line fc "} else {";
           fc.ind <- fc.ind + 1;
           assign_into fc res b t;
+          st.reuse := unspent before [ after_a; !(st.reuse) ];
           fc.ind <- fc.ind - 1;
           line fc "}";
           { c = res; owned = true })
@@ -1178,12 +1192,21 @@ and construct fc t i (vals : string list) : r =
         let n = fresh st "_b" in
         (* the cell of a value of this type that a match around this took apart is used again
            (section 9.3); it is a counted cell that nothing else held, so its header stands *)
-        (match List.find_opt (fun (_, m, b) -> m = mangle t && b == fc.b) !(st.reuse) with
+        (* not from inside a loop of the program that the cell was taken apart outside of: the
+           loop would find it there once and allocate every other time round *)
+        let outside_loop tok =
+          let rec go = function
+            | [] -> true
+            | (f : frame) :: rest -> if List.exists (fun (o, _) -> o = tok) f.owned then true else if f.fk = FLoop then false else go rest in
+          go fc.frames in
+        (match List.find_opt (fun (tok, m, b) -> m = mangle t && b == fc.b && outside_loop tok) !(st.reuse) with
          | Some (tok, _, _) ->
              (* allocated only when the cell taken apart was shared, and so not a token *)
              let from = Buffer.length fc.b in
              line fc "%s %s = %s ? %s : (%s)stn_alloc(sizeof(struct box_%s));" (ct fc t) n tok tok (ct fc t) (mangle t);
              st.excused := (fc.b, from, Buffer.length fc.b) :: !(st.excused);
+             (* the cell is spent: a later constructor on this path allocates, and says so *)
+             st.reuse := List.filter (fun (t', _, _) -> t' <> tok) !(st.reuse);
              line fc "%s = NULL;" tok
          | None -> line fc "%s %s = (%s)stn_alloc(sizeof(struct box_%s));" (ct fc t) n (ct fc t) (mangle t));
         line fc "%s->h.tag = %d;" n i;
@@ -1966,11 +1989,15 @@ and dps_tail fc cname params dst (e : texpr) : unit =
       let cv = cond fc c in
       line fc "if (%s) {" cv;
       fc.ind <- fc.ind + 1;
+      let before = !(st.reuse) in
       again a;
+      let after_a = !(st.reuse) in
+      st.reuse := before;
       fc.ind <- fc.ind - 1;
       line fc "} else {";
       fc.ind <- fc.ind + 1;
       again b;
+      st.reuse := unspent before [ after_a; !(st.reuse) ];
       fc.ind <- fc.ind - 1;
       line fc "}"
   | XMatch (s, arms) -> ignore (match_ ~tail:again fc e.ty s arms)
@@ -2038,6 +2065,8 @@ and match_ ?tail fc t (s : texpr) arms : r =
   if rc fc s.ty && not lent then own_in fc sv s.ty;
   let has_value = match repr t with TUnit | TNever -> false | _ -> true in
   let res = fresh st "_r" and endl = fresh st "match_end" in
+  (* the cells for reuse there were before the match, and what each arm left of them *)
+  let outer = !(st.reuse) and arm_afters = ref [] in
   if has_value then line fc "%s %s;" (ct fc t) res;
   List.iter
     (fun arm ->
@@ -2093,6 +2122,7 @@ and match_ ?tail fc t (s : texpr) arms : r =
          | Some emit -> emit arm.body   (* which leaves the function, or goes round its loop *)
          | None -> if has_value then assign_into fc res arm.body t else discard fc arm.body);
         pop fc;
+        arm_afters := !(st.reuse) :: !arm_afters;
         st.reuse := saved;
         line fc "goto %s;" endl
       in
@@ -2108,6 +2138,7 @@ and match_ ?tail fc t (s : texpr) arms : r =
       fc.ind <- fc.ind - 1;
       line fc "}")
     arms;
+  st.reuse := unspent outer !arm_afters;
   line fc "stn_trap(\"unreachable\", %s, \"no match arm applied\");" (loc_args s.l);
   line fc "%s:;" endl;
   { c = (if has_value then res else "0"); owned = has_value }
@@ -4121,10 +4152,10 @@ let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~d
     List.iter at [ "stn_array_make_unique"; "stn_array_copy_for_write"; "stn_array_push_slow"; "stn_array_reserve"; "stn_array_extend";
                    "stn_array_insert"; "stn_array_remove"; "stn_array_clear"; "stn_array_sort_i64"; "stn_array_reverse_i64";
                    "stn_map_make_unique_for_write"; "stn_map_put"; "stn_map_slot"; "stn_map_slot_ref"; "stn_map_remove"; "stn_map_clear" ];
-    let count name = pr out "#define %s(...) (stn_profile_at(__FILE__, __LINE__), stn_profile_event(STN_PROFILE_DUP), %s(__VA_ARGS__))\n" name name in
-    List.iter count ([ "stn_dup"; "stn_error_dup" ] @ Verify.dup_helpers (Buffer.contents st.helpers));
-    (* keeping a string raises a count, or copies it when it is a view, which the runtime reports *)
-    pr out "#define stn_str_dup(...) (stn_profile_at(__FILE__, __LINE__), stn_profile_event(STN_PROFILE_DUP), stn_str_dup(__VA_ARGS__))\n"
+    (* The runtime reports a count where one is raised, and a view where one is copied: keeping a
+       string that is inline does neither, and keeping a struct raises one count for each counted
+       field. These only say where. *)
+    List.iter at ([ "stn_dup"; "stn_error_dup"; "stn_str_dup" ] @ Verify.dup_helpers (Buffer.contents st.helpers))
   end;
   Buffer.add_buffer out st.funcs;
   Hashtbl.iter (fun name _ ->

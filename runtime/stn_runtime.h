@@ -40,10 +40,23 @@ extern uint64_t stn_count_allocs, stn_count_bytes, stn_count_copies, stn_count_o
 #define STN_COUNT_COPY() ((void)0)
 #endif
 
+/* ---- counters of --profile-copies (section 9.8) ---- */
+/* Generated code names the statement it is in before anything that can copy or raise a count;
+   the runtime reports what then happens there. Compiled in only for a profiled build. */
+#ifdef STN_PROFILE_COPIES
+enum { STN_PROFILE_ARRAY, STN_PROFILE_MAP, STN_PROFILE_VIEW, STN_PROFILE_DUP };
+void stn_profile_at(const char* file, int line);
+void stn_profile_event(int kind);
+#endif
+
 static inline void stn_dup(void* p) {
     if ((uintptr_t)p & 1) return;                 /* field-less variant */
     STN_COUNT_OP();
     stn_header* h = (stn_header*)p;
+#ifdef STN_PROFILE_COPIES
+    /* only where a count does change: not for a field-less variant, nor a value never counted */
+    if (!(h->flags & STN_NOCOUNT)) stn_profile_event(STN_PROFILE_DUP);
+#endif
     if (h->flags == 0) {
         if (__builtin_expect(++h->rc == UINT32_MAX, 0)) h->flags |= STN_NOCOUNT;
         return;
@@ -105,15 +118,6 @@ static inline void stn_drop(void* p, void (*release)(void*)) {
     if (atomic_fetch_sub_explicit((_Atomic uint32_t*)&h->rc, 1, memory_order_acq_rel) == 1)
         release(p);
 }
-
-/* ---- counters of --profile-copies (section 9.8) ---- */
-/* Generated code names the statement it is in before anything that can copy or raise a count;
-   the runtime reports what then happens there. Compiled in only for a profiled build. */
-#ifdef STN_PROFILE_COPIES
-enum { STN_PROFILE_ARRAY, STN_PROFILE_MAP, STN_PROFILE_VIEW, STN_PROFILE_DUP };
-void stn_profile_at(const char* file, int line);
-void stn_profile_event(int kind);
-#endif
 
 static inline int stn_unique(void* p) {
     return ((stn_header*)p)->flags == 0 && ((stn_header*)p)->rc == 1;
