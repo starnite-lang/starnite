@@ -1,0 +1,19 @@
+13:abcdefghijklm
+14:abcdefghijklmn
+15:abcdefghijklmno
+16:abcdefghijklmnop
+17:abcdefghijklmnopq
+18:abcdefghijklmnopqr
+true true true true true
+true true true true
+abcdefghijklmnop abcabcabcabcabc 15 18
+seven77eight888 a-b-c
+18 €€€€€ 15 6 €€€€€
+[fifteen bytes] [sixteen bytes!] [noop]
+[one, a much longer second field, , three-is-sixteen] 26 16
+true false true true
+123456789012345 -1234567890123456 100000.0 0.0025
+{abcdefghijklm: 1013, abcdefghijklmn: 14, abcdefghijklmno: 15, abcdefghijklmnop: 16, abcdefghijklmnopq: 117, abcdefghijklmnopqr: 18}
+6 true false
+00000000 10000000 10000000 10000000 10000000 10000000 10000000 10000000 11000000 11101110 11100000 11100000 11100000 11100000 11100000 11100000 11100001 11100000 11100000 11100000 11100000 11100000 11100000 11100000 11100000 11100000 11110000 
+exit 0

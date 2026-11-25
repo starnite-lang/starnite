@@ -1,0 +1,13 @@
+[the quick brown fox] [jumps over the lazy dog, again and again and again] [over the lazy dog, again]
+19 true false true true
+supercalifragilisticexpialidocious
+[quick brown fox jumps over the , jumps over the lazy dog, again and again and again, over the lazy dog, again] {the quick brown fox jumps: 2, over the lazy dog, again: 5}
+0:alpha
+7:beta
+12:gamma-is-a-longer-token-than-fifteen-bytes
+55:delta
+d a tail long enough to live in a buffer of it|and a tail long enough to live in a buffer of it
+4938271562.0 123456789012345678 2500.0 false
+€€€€€€€€ 24 8 false
+bcdefghijabcdefghijabcde b17true c17true d17true e17true f17true g17true h17true i17true 
+exit 0

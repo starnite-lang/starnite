@@ -21,19 +21,22 @@ while [ $# -gt 0 ]; do
 done
 if [ -n "$output" ] && [ -d "$output" ]; then echo "run.sh: --output $output is a directory; give a file path" >&2; exit 2; fi
 cc=${CC:-gcc}
+# every C build is laid out the same way a release build is (compiler/backend.ml), so that a
+# comparison measures the code and not where it happened to land
+align="-falign-functions=64 -falign-loops=64"
 rustc=${RUSTC:-rustc}
 out=$(mktemp -d); trap 'rm -rf "$out"' EXIT
 
 build_starnite() {
     local checkout=$1 name=$2
     (cd "$checkout" && "$checkout/_build/default/compiler/main.exe" build --release --keep-c "$here/maps.stn" -o "$out/$name-generated")
-    "$cc" -O3 -std=c11 -fno-strict-aliasing -I"$checkout/runtime" "$out/$name-generated.c" "$checkout/runtime/stn_runtime.c" -lm -o "$out/$name"
+    "$cc" -O3 $align -std=c11 -fno-strict-aliasing -I"$checkout/runtime" "$out/$name-generated.c" "$checkout/runtime/stn_runtime.c" -lm -o "$out/$name"
 }
 variants="starnite rust c-siphash c-fast"
 build_starnite "$repo" starnite
 "$rustc" -C opt-level=3 -C overflow-checks=yes "$here/maps.rs" -o "$out/rust"
-"$cc" -O3 -std=c11 -Wall -Wextra -Werror "$here/maps.c" -o "$out/c-siphash"
-"$cc" -O3 -std=c11 -Wall -Wextra -Werror -DFAST_HASH "$here/maps.c" -o "$out/c-fast"
+"$cc" -O3 $align -std=c11 -Wall -Wextra -Werror "$here/maps.c" -o "$out/c-siphash"
+"$cc" -O3 $align -std=c11 -Wall -Wextra -Werror -DFAST_HASH "$here/maps.c" -o "$out/c-fast"
 if [ -n "$base" ]; then build_starnite "$base" previous-starnite; variants="previous-starnite $variants"; fi
 "$cc" -O2 -std=c11 "$here/rusage.c" -o "$out/rusage"
 

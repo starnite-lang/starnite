@@ -25,6 +25,12 @@ type st = {
   instances : (string, unit) Hashtbl.t;
   queue : (string * string * ty list) Queue.t;
   strlits : (string, string) Hashtbl.t;
+  self_sliced : (int, unit) Hashtbl.t;   (* variables assigned a slice of themselves somewhere *)
+  view_vars : (int, unit) Hashtbl.t;     (* variables that hold only views of strings that outlive them *)
+  loops : (string, bool) Hashtbl.t;   (* whether a function loops, itself or through a call *)
+  in_main : bool ref;                  (* the body being generated is main's *)
+  entries : (string, string * string) Hashtbl.t;  (* entry wrappers that main calls: prototype and definition, by instance *)
+  entry_defs : (string, string * string) Hashtbl.t;  (* the entry wrapper each instance could have *)
   errtypes : (string, int * ty) Hashtbl.t;
   layouts : (string, layout) Hashtbl.t;
   debug : bool;
@@ -165,8 +171,8 @@ let rec size_of st t =
   | TFloat | TDur | TBytes -> 8
   | TF32 | TChar -> 4
   | TBool | TUnit | TNever -> 1
-  | TStr | TArray _ | TFn _ -> 8
-  | TErr _ | TAny _ -> 16
+  | TArray _ | TFn _ -> 8
+  | TStr | TErr _ | TAny _ -> 16
   | TTuple ts -> List.fold_left (fun a t -> a + max 8 (size_of st t)) 0 ts
   | TNamed _ when is_struct st t -> List.fold_left (fun a (_, t) -> a + max 1 (size_of st t)) 0 (struct_fields st t)
   | TNamed _ when is_data st t -> if layout st t = LBoxed then 8 else 1 + payload_size st t
@@ -349,9 +355,11 @@ and emit_helpers st t =
 
 and dup_stmt st t e =
   match repr t with
-  | TStr | TArray _ | TFn _ | TNamed (("Map" | "Set"), _) -> Printf.sprintf "stn_dup(%s);" e
+  (* a Str is assigned its duplicate: the duplicate of a view is a buffer of its own *)
+  | TStr -> Printf.sprintf "%s = stn_str_dup(%s);" e e
+  | TArray _ | TFn _ | TNamed (("Map" | "Set"), _) -> Printf.sprintf "stn_dup(%s);" e
   | TErr _ -> Printf.sprintf "stn_error_dup(%s);" e
-  | _ -> ensure_type st t; Printf.sprintf "dup_%s(%s);" (mangle t) e
+  | _ -> ensure_type st t; Printf.sprintf "%s = dup_%s(%s);" e (mangle t) e
 
 and drop_stmt st t e =
   match repr t with
@@ -369,7 +377,8 @@ let dup_expr st t e =
   if not (needs_rc st t) then e
   else
     match repr t with
-    | TStr | TArray _ | TFn _ | TNamed (("Map" | "Set"), _) -> Printf.sprintf "(stn_dup(%s), %s)" e e
+    | TStr -> Printf.sprintf "stn_str_dup(%s)" e
+    | TArray _ | TFn _ | TNamed (("Map" | "Set"), _) -> Printf.sprintf "(stn_dup(%s), %s)" e e
     | TErr _ -> Printf.sprintf "stn_error_dup(%s)" e
     | _ -> Printf.sprintf "dup_%s(%s)" (mangle t) e
 
@@ -411,9 +420,33 @@ let str_lit st s =
   | None ->
       let n = fresh st "strlit" in
       Hashtbl.replace st.strlits s n;
-      pr st.helpers "static struct { stn_header h; int64_t len; char data[%d]; } %s_obj = { { 1, 0, STN_NOCOUNT, 0 }, %d, %s };\n"
-        (String.length s + 1) n (String.length s) (c_string s);
-      pr st.helpers "#define %s ((StnStr)&%s_obj)\n" n n;
+      let len = String.length s in
+      if len <= 15 then begin
+        (* inline: the bytes in two little-endian words, the length in the last byte *)
+        let word lo hi =
+          let w = ref 0L in
+          for i = hi - 1 downto lo do
+            let b = if i < len then Char.code s.[i] else if i = 15 then len else 0 in
+            w := Int64.logor (Int64.shift_left !w 8) (Int64.of_int b)
+          done;
+          !w
+        in
+        (* and for a big-endian target, where the length is the first byte and the bytes follow it *)
+        let big lo hi =
+          let w = ref 0L in
+          for i = lo to hi - 1 do
+            let b = if i = 0 then len else if i - 1 < len then Char.code s.[i - 1] else 0 in
+            w := Int64.logor (Int64.shift_left !w 8) (Int64.of_int b)
+          done;
+          !w
+        in
+        pr st.helpers "#define %s STN_STR_SHORT(UINT64_C(0x%016Lx), UINT64_C(0x%016Lx), UINT64_C(0x%016Lx), UINT64_C(0x%016Lx))\n"
+          n (word 0 8) (word 8 16) (big 0 8) (big 8 16)
+      end else begin
+        pr st.helpers "static struct { stn_header h; int64_t len; char data[%d]; } %s_obj = { { 1, 0, STN_NOCOUNT, 0 }, %d, %s };\n"
+          (len + 1) n len (c_string s);
+        pr st.helpers "#define %s ((StnStr){ .ptr = %s_obj.data, .w1 = UINT64_C(%d) | STN_STR_HEAP_BIT })\n" n n len
+      end;
       n
 
 let err_id st t =
@@ -487,6 +520,42 @@ let tmp fc t init =
   line fc "%s %s = %s;" (ct fc t) n init;
   n
 
+(* The address of a Str, for the runtime's string functions, which read a string where it already
+   is. Passing an inline string by value would store its two words on the callee's stack just before
+   its bytes are read back, and a read that spans both words cannot be forwarded from those stores.
+   A name or an indexed element is used in place; anything else is held in a temporary first. *)
+let sref fc (c : string) : string =
+  let is_ident x =
+    x <> "" && (match x.[0] with '0' .. '9' -> false | _ -> true)
+    && String.for_all (fun ch -> ch = '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) x in
+  (* the position of the bracket that closes at the end of c, if c ends with one *)
+  let opening () =
+    let n = String.length c in
+    if n = 0 || c.[n - 1] <> ']' then None
+    else
+      let rec go i depth =
+        if i < 0 then None
+        else match c.[i] with
+          | ']' -> go (i - 1) (depth + 1)
+          | '[' -> if depth = 1 then Some i else go (i - 1) (depth - 1)
+          | _ -> go (i - 1) depth in
+      go (n - 1) 0 in
+  let indexed () =
+    match opening () with
+    | Some i ->
+        let base = String.sub c 0 i in
+        let pre = "((StnStr*)(" and post = ")->data)" in
+        let lp = String.length pre and lq = String.length post and lb = String.length base in
+        (* a name, or an element of the data of an array that has a name *)
+        is_ident base
+        || (lb > lp + lq && String.sub base 0 lp = pre && String.sub base (lb - lq) lq = post
+            && is_ident (String.sub base lp (lb - lp - lq)))
+    | None -> false in
+  let n = String.length c in
+  if n > 3 && String.sub c 0 2 = "(*" && c.[n - 1] = ')' && is_ident (String.sub c 2 (n - 3)) then String.sub c 2 (n - 3)
+  else if is_ident c || indexed () then "&" ^ c
+  else "&" ^ tmp fc TStr c
+
 (* A value for code that is never reached, such as the end of a function whose body always
    fails. 0 is not an initializer for every type, a struct among them, so it is zeroed. *)
 let dead_value fc (t : ty) : string =
@@ -503,6 +572,46 @@ let borrow fc (x : r) t =
     own_in fc n t;
     n
   end else x.c
+
+(* An expression that cannot assign anything: it makes no calls and runs no statements. *)
+let rec writes_nothing (e : texpr) =
+  match e.e with
+  | XLit _ | XVar _ | XFnRef _ | XNone | XLambda _ -> true
+  | XField (x, _, _) | XTupleGet (x, _) | XNeg x | XNot x | XConv x -> writes_nothing x
+  | XIndex (a, i) -> writes_nothing a && writes_nothing i
+  | XSlice (a, lo, hi) -> writes_nothing a && writes_nothing lo && writes_nothing hi
+  | XBin (_, a, b) -> writes_nothing a && writes_nothing b
+  | XTuple xs | XArray xs | XStruct (_, _, xs) | XVariant (_, _, _, xs) | XFStr xs -> List.for_all writes_nothing xs
+  (* a length is read, whatever it is the length of *)
+  | XCall (CBuiltin (name, _), args, _) when String.length name > 4 && String.sub name 0 4 = "len@" ->
+      List.for_all (fun a -> a.amode = MBorrow && writes_nothing a.a) args
+  | _ -> false
+
+(* [first] is a borrowed Str whose use waits for [later], which is about to be generated. Operands
+   and arguments are evaluated left to right (section 4.4), and a Str is read by address, so
+   [first] is settled now: held with a count of its own, registered before [later] can fail, when
+   [later] may assign the variable or element it names; otherwise, when it is an element whose
+   index is still to be checked, by its address. A name or a literal is read as it is. *)
+let hold_str fc (first : string) (later : texpr) =
+  let is_ident x = x <> "" && String.for_all (fun ch -> ch = '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) x in
+  let literal = String.length first > 6 && String.sub first 0 6 = "strlit" in
+  let named_element =
+    (* a name bound, by its address, to an element of an array that does not change *)
+    let n = String.length first in
+    n > 3 && String.sub first 0 2 = "(*" && first.[n - 1] = ')' && is_ident (String.sub first 2 (n - 3)) in
+  if literal then first
+  else if not (writes_nothing later) then begin
+    let held = tmp fc TStr (dup_expr fc.st TStr first) in
+    own_in fc held TStr;
+    held
+  end
+  else if is_ident first || named_element then first
+  else if first <> "" && first.[String.length first - 1] = ']' then begin
+    let p = fresh fc.st "_p" in
+    line fc "StnStr const* %s = &%s;" p first;
+    "(*" ^ p ^ ")"
+  end
+  else tmp fc TStr first
 
 (* drop everything up to (not including) the first frame satisfying [stop] *)
 let drop_until fc stop =
@@ -550,6 +659,10 @@ let sig_can_fail (sg : fsig) =
   sg.seff.errs <> [] || List.exists (fun (_, _, t, _) -> is_poly_param t) sg.sparams
 
 let fn_can_fail_ty (f : fnty) = f.feff.errs <> [] || f.feff.poly
+
+(* The entry main calls a looping function through: every function's own name starts fn_, so a
+   name that starts stn_entry_ cannot be one. *)
+let entry_name cname = "stn_entry_" ^ cname
 
 let inst_name uname targs =
   "fn_" ^ c_ident uname ^ (if targs = [] then "" else "__" ^ String.concat "__" (List.map mangle_eff targs))
@@ -679,7 +792,14 @@ let rec expr fc (e : texpr) : r =
   | XLit l -> lit fc t l
   | XNone -> { c = "0"; owned = false }
   | XFStr ps ->
-      let parts = List.map (fun p -> borrow fc (expr fc p) TStr) ps in
+      (* each part is held against the code of the parts after it *)
+      let rec parts_of = function
+        | [] -> []
+        | p :: rest ->
+            let c = borrow fc (expr fc p) TStr in
+            let c = if rest = [] then c else hold_str fc c { p with e = XFStr rest } in
+            c :: parts_of rest in
+      let parts = parts_of ps in
       (match parts with
        | [ p ] -> { c = p; owned = false }
        | _ -> { c = tmp fc TStr (Printf.sprintf "stn_str_concat_n(%d, (StnStr[]){ %s })" (List.length parts) (String.concat ", " parts)); owned = true })
@@ -709,10 +829,16 @@ let rec expr fc (e : texpr) : r =
       { c = Printf.sprintf "((%s*)(%s)->data)[stn_index(%s, stn_len(%s), %s)]" (ct fc t) av iv av (loc_args e.l); owned = false }
   | XSlice (a, lo, hi) ->
       let av = borrow fc (expr fc a) a.ty in
+      (* a string is read by address: it is settled before its bounds, which may assign it *)
+      let av = if repr (ts fc a.ty) = TStr then hold_str fc av { lo with e = XTuple [ lo; hi ] } else av in
       let lov = tmp fc (TInt IInt) (expr fc lo).c in
       let hiv = tmp fc (TInt IInt) (expr fc hi).c in
       (match repr (ts fc a.ty) with
-       | TStr -> { c = tmp fc t (Printf.sprintf "stn_str_slice(%s, %s, %s, %s)" av lov hiv (loc_args e.l)); owned = true }
+       (* a slice of a string that cannot change while it is in scope is a view of it: nothing
+          is copied until the slice is stored or returned, when its duplicate is a copy *)
+       | TStr when view_source fc a && writes_nothing lo && writes_nothing hi ->
+           { c = tmp fc t (Printf.sprintf "stn_str_view(%s, %s, %s, %s)" (sref fc av) lov hiv (loc_args e.l)); owned = false }
+       | TStr -> { c = tmp fc t (Printf.sprintf "stn_str_slice(%s, %s, %s, %s)" (sref fc av) lov hiv (loc_args e.l)); owned = true }
        | _ -> { c = tmp fc t (Printf.sprintf "stn_array_slice(%s, %s, %s, %s)" av lov hiv (loc_args e.l)); owned = true })
   | XTuple es ->
       let vs = List.map (fun x -> own fc (expr fc x) x.ty) es in
@@ -1139,6 +1265,14 @@ and call_instance fc (e : texpr) uname tys (sg : fsig) targs convs : r =
   let st = fc.st in
   let t = ts fc e.ty in
   let name = !request_instance st uname tys in
+  (* main is not compiled hot (see emit_fn), and a function that loops, inlined into it, would lose
+     that; main calls it through an entry that is hot and never inlined, where it is inlined *)
+  let name =
+    let is_main = match st.prog.main with Some m -> m = uname | None -> false in
+    if !(st.in_main) && sg.slend = None && not is_main && loops st uname then begin
+      if not (Hashtbl.mem st.entries name) then Hashtbl.replace st.entries name ("", "");
+      entry_name name
+    end else name in
   let s = List.combine (List.map fst sg.stparams) tys in
   let ps = List.map (fun (m, _, pt, _) -> (m, subst s pt)) sg.sparams in
   if sg.slend <> None then begin
@@ -1238,7 +1372,7 @@ and show_call fc t (a : string) : string =
   | TBool -> Printf.sprintf "stn_show_bool(%s)" a
   | TChar -> Printf.sprintf "stn_show_char(%s)" a
   | TUnit | TNever -> "stn_show_unit()"
-  | TStr -> Printf.sprintf "(stn_dup(%s), %s)" a a
+  | TStr -> Printf.sprintf "stn_str_dup(%s)" a
   | TDur -> Printf.sprintf "stn_show_dur(%s)" a
   | TBytes -> Printf.sprintf "stn_show_bytes(%s)" a
   | TErr _ -> Printf.sprintf "stn_show_error(%s)" a
@@ -1316,7 +1450,7 @@ and eq_call fc t a b : string =
 and hash_call fc t a : string =
   let st = fc.st in
   match repr t with
-  | TStr -> Printf.sprintf "stn_hash_bytes((%s)->data, (size_t)(%s)->len)" a a
+  | TStr -> Printf.sprintf "stn_str_hash(%s)" a
   | TInt _ | TBool | TChar | TDur | TBytes -> Printf.sprintf "stn_hash_u64((uint64_t)(%s))" a
   | TFloat | TF32 -> Printf.sprintf "stn_hash_f64((double)(%s))" a
   | TUnit | TNever -> "((uint64_t)0)"
@@ -1410,7 +1544,7 @@ and map_find_call (kt : ty) m k =
 and cmp_call fc t a b : string =
   let st = fc.st in
   match repr t with
-  | TStr -> Printf.sprintf "((int64_t)stn_str_cmp(%s, %s))" a b
+  | TStr -> Printf.sprintf "((int64_t)stn_str_cmp(%s, %s))" (sref fc a) (sref fc b)
   | TInt _ | TFloat | TF32 | TBool | TChar | TDur | TBytes -> Printf.sprintf "((int64_t)(((%s) > (%s)) - ((%s) < (%s))))" a b a b
   | _ -> (
       match Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) "Ord" [] "cmp" t with
@@ -1421,6 +1555,7 @@ and binop fc (e : texpr) op (a : texpr) (b : texpr) : r =
   let st = fc.st in
   let at = ts fc a.ty in
   let ab = borrow fc (expr fc a) a.ty in
+  let ab = if repr at = TStr then hold_str fc ab b else ab in
   (* Operands are evaluated left to right (section 4.4), but C leaves the order of a
      call's arguments open, and either side may trap. So the left operand stays an
      expression only when it is a variable or a literal and the right one emits no
@@ -1428,7 +1563,8 @@ and binop fc (e : texpr) op (a : texpr) (b : texpr) : r =
   let mark = Buffer.length fc.b in
   let bb = borrow fc (expr fc b) b.ty in
   let ab =
-    if rc fc a.ty || (Buffer.length fc.b = mark && simple_operand ab) then ab
+    if repr at = TStr then ab
+    else if rc fc a.ty || (Buffer.length fc.b = mark && simple_operand ab) then ab
     else begin
       let right = Buffer.sub fc.b mark (Buffer.length fc.b - mark) in
       Buffer.truncate fc.b mark;
@@ -1444,10 +1580,10 @@ and binop fc (e : texpr) op (a : texpr) (b : texpr) : r =
       let c = match op with
         | Eq -> Printf.sprintf "stn_str_eq(%s, %s)" ab bb
         | Ne -> Printf.sprintf "(!stn_str_eq(%s, %s))" ab bb
-        | Lt -> Printf.sprintf "(stn_str_cmp(%s, %s) < 0)" ab bb
-        | Le -> Printf.sprintf "(stn_str_cmp(%s, %s) <= 0)" ab bb
-        | Gt -> Printf.sprintf "(stn_str_cmp(%s, %s) > 0)" ab bb
-        | _ -> Printf.sprintf "(stn_str_cmp(%s, %s) >= 0)" ab bb in
+        | Lt -> Printf.sprintf "(stn_str_cmp(%s, %s) < 0)" (sref fc ab) (sref fc bb)
+        | Le -> Printf.sprintf "(stn_str_cmp(%s, %s) <= 0)" (sref fc ab) (sref fc bb)
+        | Gt -> Printf.sprintf "(stn_str_cmp(%s, %s) > 0)" (sref fc ab) (sref fc bb)
+        | _ -> Printf.sprintf "(stn_str_cmp(%s, %s) >= 0)" (sref fc ab) (sref fc bb) in
       { c; owned = false }
   | (Eq | Ne), (TUnit | TNever) -> { c = (if op = Eq then "1" else "0"); owned = false }
   | Eq, _ -> plain "=="
@@ -1456,7 +1592,7 @@ and binop fc (e : texpr) op (a : texpr) (b : texpr) : r =
   | Le, _ -> plain "<="
   | Gt, _ -> plain ">"
   | Ge, _ -> plain ">="
-  | Add, TStr -> { c = tmp fc TStr (Printf.sprintf "stn_str_concat(%s, %s)" ab bb); owned = true }
+  | Add, TStr -> { c = tmp fc TStr (Printf.sprintf "stn_str_concat(%s, %s)" (sref fc ab) (sref fc bb)); owned = true }
   | Add, TInt (IInt | I64) when natural_bound fc e <> None -> plain "+"
   | Mul, TInt (IInt | I64) when natural_bound fc e <> None -> plain "*"
   | Mod, TInt (IInt | I64) when natural_bound fc e <> None ->
@@ -2198,6 +2334,26 @@ and walk_texpr (fe : texpr -> unit) (fs : tstmt -> unit) (e : texpr) =
   | XLambda lam -> we lam.lbody
   | XComp (b, cs) -> we b; List.iter (fun cp -> wit cp.csrc; Option.iter we cp.ccond) cs
 
+(* Whether a function loops, itself or through a function it calls by name. *)
+and loops st uname =
+  match Hashtbl.find_opt st.loops uname with
+  | Some b -> b
+  | None ->
+      Hashtbl.replace st.loops uname false;   (* a cycle of calls adds nothing *)
+      let found = ref false in
+      (match Hashtbl.find_opt st.prog.fns uname with
+       | Some tf ->
+           walk_texpr
+             (fun (x : texpr) -> match x.e with
+                | XComp _ -> found := true
+                | XCall (CFn (u, _), _, _) -> if not !found && loops st u then found := true
+                | _ -> ())
+             (fun (s : tstmt) -> match s.st with SWhile _ | SFor _ -> found := true | _ -> ())
+             tf.fbody
+       | None -> ());
+      Hashtbl.replace st.loops uname !found;
+      !found
+
 (* Check length once for up to two arrays with bounded subscripts. The
    fallback retains the per-access trap and its original source location. *)
 and guarded_indices fc body =
@@ -2405,12 +2561,46 @@ and declare_var ?(owned = true) fc (v : var) (init : string) =
 and stable_string_source fc (e : texpr) =
   let immutable v =
     match Hashtbl.find_opt fc.vars v.vid with
-    | Some (VDirect _) -> not v.vmut && v.vkind <> VParam MMut
+    (* VPtr: a let that names an element of an array that does not change *)
+    | Some (VDirect _ | VPtr _) -> not v.vmut && v.vkind <> VParam MMut
     | _ -> false
   in
   match e.e with
   | XLit (LStr _) -> true
   | XVar v | XIndex ({ e = XVar v; _ }, _) -> immutable v
+  | _ -> false
+
+(* The variables of a body whose every assignment is a slice of themselves, `v = v[a..b]` with
+   bounds that write nothing, and which are never passed as mut: candidates to be kept as views. *)
+and note_self_sliced st (body : texpr) =
+  let sliced = Hashtbl.create 8 and spoiled = Hashtbl.create 8 in
+  walk_texpr
+    (fun (x : texpr) -> match x.e with
+       | XCall (_, args, _) ->
+           List.iter (fun a -> if a.amode = MMut then iter_vars (fun v -> Hashtbl.replace spoiled v.vid ()) a.a) args
+       | _ -> ())
+    (fun (s : tstmt) -> match s.st with
+       | SAssign ({ via = None; path = []; root; _ }, { e = XSlice ({ e = XVar src; _ }, lo, hi); _ })
+         when src.vid = root.vid && writes_nothing lo && writes_nothing hi -> Hashtbl.replace sliced root.vid ()
+       | SAssign (p, _) -> Hashtbl.replace spoiled p.root.vid ()
+       | SFor (_, IArray (a, MMut), _) -> iter_vars (fun v -> Hashtbl.replace spoiled v.vid ()) a
+       | _ -> ())
+    body;
+  Hashtbl.iter (fun vid () -> if not (Hashtbl.mem spoiled vid) then Hashtbl.replace st.self_sliced vid ()) sliced
+
+(* A string that a view may point into: a binding that cannot change and lives to the end of its
+   scope, or a variable that is itself kept as a view of one. *)
+and view_source fc (e : texpr) =
+  stable_string_source fc e
+  || (match e.e with
+      | XVar v -> Hashtbl.mem fc.st.view_vars v.vid
+      | _ -> false)
+
+(* A let or var of a slice of such a string keeps the view. *)
+and binds_view fc (v : var) (e : texpr) =
+  match repr (ts fc e.ty), e.e with
+  (* bounds that may assign make the slice a copy of a held string, not a view (see XSlice) *)
+  | TStr, XSlice (a, lo, hi) when not v.vcell -> view_source fc a && writes_nothing lo && writes_nothing hi
   | _ -> false
 
 and borrows_array_string fc (v : var) (e : texpr) =
@@ -2449,11 +2639,46 @@ and stmt fc (s : tstmt) =
   push fc FStmt;
   (match s.st with
    | SLet (TPVar v, e) when borrows_array_string fc v e ->
-       let init = tmp fc e.ty (expr fc e).c in
+       let c = (expr fc e).c in
        let f = List.hd fc.frames in
        fc.frames <- List.tl fc.frames;
        emit_drops fc f;
-       declare_var ~owned:false fc v init;
+       (* the element of an array that does not change is named where it is, not copied: a Str is
+          read by address, and a copy would be stored to the stack only to be read back *)
+       (match sref fc c with
+        | addr when addr = "&" ^ c ->
+            let n = var_name v in
+            line fc "StnStr const* %s = %s;" n addr;
+            Hashtbl.replace fc.vars v.vid (VPtr n)
+        | _ -> declare_var ~owned:false fc v (tmp fc e.ty c));
+       fc.frames <- { fk = FStmt; owned = [] } :: fc.frames
+   | SLet (TPVar v, e) when binds_view fc v e ->
+       (* the view is the variable: it is not counted, and it cannot outlive what it views *)
+       let c = (expr fc e).c in
+       let f = List.hd fc.frames in
+       fc.frames <- List.tl fc.frames;
+       emit_drops fc f;
+       declare_var ~owned:false fc v c;
+       fc.frames <- { fk = FStmt; owned = [] } :: fc.frames
+   | SVar (v, e) when Hashtbl.mem st.self_sliced v.vid && not v.vcell && repr (ts fc v.vty) = TStr ->
+       (* a variable whose only assignments are slices of itself (`rest = rest[k..]`) is kept as a
+          view, which each of them moves along. It views a string that outlives it: the binding it
+          starts from when that cannot change, otherwise a value held here, beside it, to the end
+          of its scope. *)
+       let x = expr fc e in
+       let borrowed = (not x.owned) && (view_source fc e || binds_view fc v e || (match e.e with XLit _ -> true | _ -> false)) in
+       let f = List.hd fc.frames in
+       fc.frames <- List.tl fc.frames;
+       let from =
+         if borrowed then tmp fc e.ty x.c
+         else begin
+           let held = tmp fc e.ty (own fc x e.ty) in
+           own_in fc held e.ty;   (* in the enclosing scope, where the variable is *)
+           held
+         end in
+       emit_drops fc f;
+       declare_var ~owned:false fc v (Printf.sprintf "stn_str_as_view(%s)" from);
+       Hashtbl.replace st.view_vars v.vid ();
        fc.frames <- { fk = FStmt; owned = [] } :: fc.frames
    | SLet (TPVar v, e) | SVar (v, e) ->
        let x = expr fc e in
@@ -2499,6 +2724,14 @@ and stmt fc (s : tstmt) =
        let rv = tmp fc (TInt IInt) (borrow fc x rhs.ty) in
        let dst = var_read fc root in
        line fc "if (__builtin_add_overflow(%s, %s, &%s)) stn_overflow(%s);" dst rv dst (loc_args e.l)
+   | SAssign ({ via = None; path = []; root; _ }, { e = XSlice ({ e = XVar src; _ }, lo, hi); l; _ })
+     when src.vid = root.vid && not root.vcell && repr (ts fc root.vty) = TStr
+          && (match Hashtbl.find_opt fc.vars root.vid with Some (VDirect _) -> true | _ -> false)
+          && writes_nothing lo && writes_nothing hi ->
+       (* `v = v[a..b]`: a view moves, a buffer of v's own is cut down in place *)
+       let lov = tmp fc (TInt IInt) (expr fc lo).c in
+       let hiv = tmp fc (TInt IInt) (expr fc hi).c in
+       line fc "stn_str_slice_self(&%s, %s, %s, %s);" (var_read fc root) lov hiv (loc_args l)
    | SAssign (p, e) ->
        let x = expr fc e in
        let nv = tmp fc p.pty (own fc x e.ty) in
@@ -2585,6 +2818,10 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
   let la = loc_args e.l in
   let arg i = List.nth targs i in
   let b i = borrow fc (expr fc (arg i).a) (arg i).a.ty in
+  (* the first two arguments as Str, the first held against the code of the second *)
+  let b2 () =
+    let x = hold_str fc (b 0) (arg 1).a in
+    (x, b 1) in
   let o i = tmp fc (arg i).a.ty (own fc (expr fc (arg i).a) (arg i).a.ty) in
   let m i = place_lvalue_of_expr fc (arg i).a in
   (* a receiver whose address is taken after the other arguments have run, as for any mut place *)
@@ -2594,7 +2831,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
   let owned c = { c = tmp fc t c; owned = true } in
   let elt () = match tys with [ x ] -> x | _ -> TUnit in
   match name with
-  | "print@Str" -> line fc "stn_print(%s);" (b 0); unit_ ()
+  | "print@Str" -> line fc "stn_print(%s);" (sref fc (b 0)); unit_ ()
   | "read_line@" ->
       let s = fresh st "_s" in
       line fc "StnStr %s;" s;
@@ -2615,7 +2852,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       match (arg 0).a.e with
       | XVar v when Hashtbl.mem fc.cached v.vid -> value (snd (Hashtbl.find fc.cached v.vid))
       | _ -> value (Printf.sprintf "stn_len(%s)" (b 0)))
-  | "len@Str" -> value (Printf.sprintf "(%s)->len" (b 0))
+  | "len@Str" -> value (Printf.sprintf "stn_str_len(%s)" (b 0))
   | "push@Array" ->
       let fin = md 0 in
       let x = o 1 in
@@ -2907,17 +3144,17 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       let x = expr fc (arg 0).a in
       { c = tmp fc t (own fc x t); owned = true }
   | "unreachable@Str" ->
-      line fc "stn_trap(\"unreachable\", %s, (%s)->data);" la (b 0);
+      line fc "stn_trap_str(\"unreachable\", %s, %s);" la (b 0);
       let res = fresh st "_r" in
       line fc "%s %s;" (ct fc t) res;
       line fc "memset(&%s, 0, sizeof %s);" res res;
       { c = res; owned = false }
   | "byte_at_or_end@Str" ->
-      let s = b 0 in
+      let s = hold_str fc (b 0) (arg 1).a in
       let i = tmp fc (TInt IInt) (b 1) in
-      value (Printf.sprintf "stn_str_byte_at_or_end(%s, %s)" s i)
-  | "chars@Str" -> owned (Printf.sprintf "stn_str_chars(%s, %s)" (b 0) (elem_ops st TChar))
-  | "split@Str" -> let s = b 0 in let sep = b 1 in owned (Printf.sprintf "stn_str_split(%s, %s, %s, %s)" s sep (elem_ops st TStr) la)
+      value (Printf.sprintf "stn_str_byte_at_or_end(%s, %s)" (sref fc s) i)
+  | "chars@Str" -> owned (Printf.sprintf "stn_str_chars(%s, %s)" (sref fc (b 0)) (elem_ops st TChar))
+  | "split@Str" -> let s, sep = b2 () in let s = sref fc s and sep = sref fc sep in owned (Printf.sprintf "stn_str_split(%s, %s, %s, %s)" s sep (elem_ops st TStr) la)
   | "join@Array" -> (
       match (arg 0).a.e with
       | XArray parts ->
@@ -2936,20 +3173,16 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
           let xs = b 0 in
           let sep = b 1 in
           owned (Printf.sprintf "stn_str_join(%s, %s)" xs sep))
-  | "trim@Str" -> owned (Printf.sprintf "stn_str_trim(%s)" (b 0))
-  | "contains@Str" -> let s = b 0 in let x = b 1 in value (Printf.sprintf "stn_str_contains(%s, %s)" s x)
+  | "trim@Str" -> owned (Printf.sprintf "stn_str_trim(%s)" (sref fc (b 0)))
+  | "contains@Str" -> let s, x = b2 () in let s = sref fc s and x = sref fc x in value (Printf.sprintf "stn_str_contains(%s, %s)" s x)
   | ("starts_with@Str" | "ends_with@Str") ->
       let prefix = name = "starts_with@Str" in
       (match (arg 1).a.e with
        | XLit (LStr literal) ->
-           let s =
-             match (arg 0).a.e with
-             | XVar v when not v.vcell -> var_read fc v
-             | _ -> tmp fc TStr (b 0)
-           in
+           let s = sref fc (b 0) in
            let n = String.length literal in
-           let offset = if prefix then "" else Printf.sprintf " + (%s->len - %d)" s n in
-           let data = Printf.sprintf "(%s->data%s)" s offset in
+           let offset = if prefix then "" else Printf.sprintf " + (stn_str_len(*%s) - %d)" s n in
+           let data = Printf.sprintf "(stn_str_ptr(%s)%s)" s offset in
            let cmp at width =
              let bytes = c_string (String.sub literal at width) in
              if width = 2 || width = 4 || width = 8 then
@@ -2966,14 +3199,28 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
                if n = width then cmp 0 width
                else Printf.sprintf "(%s & %s)" (cmp 0 width) (cmp (n - width) width)
            in
-           value (Printf.sprintf "(%s->len >= %d && %s)" s n same)
+           if n >= 1 && n <= 8 then begin
+             (* a literal of up to eight bytes is compared as one word: the first or last eight
+                bytes of the string, read from its words when it is inline *)
+             let w = ref 0L in
+             for i = n - 1 downto 0 do w := Int64.logor (Int64.shift_left !w 8) (Int64.of_int (Char.code literal.[i])) done;
+             if prefix then
+               let mask = if n = 8 then "UINT64_MAX" else Printf.sprintf "UINT64_C(0x%Lx)" (Int64.sub (Int64.shift_left 1L (8 * n)) 1L) in
+               value (Printf.sprintf "stn_str_starts8(%s, %d, %s, UINT64_C(0x%Lx))" s n mask !w)
+             else value (Printf.sprintf "stn_str_ends8(%s, %d, UINT64_C(0x%Lx))" s n !w)
+           end else
+           value (Printf.sprintf "(stn_str_len(*%s) >= %d && %s)" s n same)
        | _ ->
-           let s = tmp fc TStr (b 0) in
-           let p = b 1 in
+           let s, p = b2 () in
+           let s = sref fc s and p = sref fc p in
            value (Printf.sprintf "stn_str_%s(%s, %s)" (if prefix then "starts_with" else "ends_with") s p))
-  | "repeat@Str" -> let s = b 0 in let n = tmp fc (TInt IInt) (expr fc (arg 1).a).c in owned (Printf.sprintf "stn_str_repeat(%s, %s, %s)" s n la)
+  | "repeat@Str" ->
+      (* the string is settled before the count is evaluated, which may assign it *)
+      let held = hold_str fc (b 0) (arg 1).a in
+      let n = tmp fc (TInt IInt) (expr fc (arg 1).a).c in
+      let s = sref fc held in owned (Printf.sprintf "stn_str_repeat(%s, %s, %s)" s n la)
   | "parse_int@Str" | "parse_float@Str" ->
-      let s = b 0 in
+      let s = sref fc (b 0) in
       let is_int = name = "parse_int@Str" in
       let out = fresh st "_v" in
       line fc "%s %s;" (if is_int then "int64_t" else "double") out;
@@ -2982,7 +3229,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       ignore (err_id st pe);
       line fc "if (%s) {" rcv;
       fc.ind <- fc.ind + 1;
-      let sd = tmp fc TStr (dup_expr st TStr s) in
+      let sd = tmp fc TStr (dup_expr st TStr ("(*" ^ s ^ ")")) in
       let inv = construct fc pe 0 [ sd ] in
       let oor = construct fc pe 1 [ sd ] in
       let ev = fresh st "_e" in
@@ -3037,7 +3284,21 @@ let compile_instance st cname uname tys =
      the C compiler loses what the restrict parameters of the functions it inlines said (the
      spectral-norm benchmark ran 2.1 times as long) *)
   let is_main = match st.prog.main with Some m -> m = uname | None -> false in
+  note_self_sliced st tf.fbody;
   pr b "%s%s {\n" (if is_main then "" else "STN_HOT ") header;
+  (* the entry main calls this through, if it loops: the same parameters, hot, never inlined *)
+  if not (is_main || lend) then begin
+    let entry = entry_name cname in
+    let names = List.map (fun (v, _, _) -> var_name v) params in
+    let args = String.concat ", " ((if can_fail then [ "_out"; "_err" ] else []) @ names) in
+    let eheader =
+      if can_fail then Printf.sprintf "static uint8_t %s(%s* _out, StnError* _err%s)" entry (cty st ret) (String.concat "" (List.map (fun p -> ", " ^ p) plist))
+      else Printf.sprintf "static %s %s(%s)" (cty st ret) entry (if plist = [] then "void" else String.concat ", " plist) in
+    Hashtbl.replace st.entry_defs cname
+      (Printf.sprintf "STN_NOINLINE %s;\n" eheader,
+       Printf.sprintf "STN_HOT STN_NOINLINE %s { return %s(%s); }\n" eheader cname args)
+  end;
+  st.in_main := is_main;
   push fc FFun;
   List.iter
     (fun (v, m, t) ->
@@ -3083,6 +3344,7 @@ let compile_instance st cname uname tys =
   pop fc;
   if can_fail then (line fc "*_out = %s;" r; line fc "return 0;") else line fc "return %s;" r;
   pr b "}\n\n";
+  st.in_main := false;
   Buffer.add_buffer st.funcs b
   end
 
@@ -3122,7 +3384,7 @@ let emit (prog : tprog) ~debug : string =
     prog; fwd = Buffer.create 1024; typedefs = Buffer.create 4096; boxed_bodies = Buffer.create 1024;
     protos = Buffer.create 4096; helpers = Buffer.create 4096; funcs = Buffer.create 16384;
     defined = Hashtbl.create 64; pending_boxed = Queue.create (); instances = Hashtbl.create 64;
-    queue = Queue.create (); strlits = Hashtbl.create 64; errtypes = Hashtbl.create 8;
+    queue = Queue.create (); strlits = Hashtbl.create 64; self_sliced = Hashtbl.create 16; view_vars = Hashtbl.create 16; loops = Hashtbl.create 64; in_main = ref false; entries = Hashtbl.create 8; entry_defs = Hashtbl.create 32; errtypes = Hashtbl.create 8;
     layouts = Hashtbl.create 64; debug; counter = 0 }
   in
   let main_u = match prog.main with Some m -> m | None -> raise (Unsupported ("no main function", Syntax.noloc)) in
@@ -3155,16 +3417,24 @@ let emit (prog : tprog) ~debug : string =
   Buffer.add_buffer out st.boxed_bodies;
   pr out "\n";
   Buffer.add_buffer out st.protos;
+  Hashtbl.iter (fun name _ ->
+      match Hashtbl.find_opt st.entry_defs name with
+      | Some (proto, _) -> Buffer.add_string out proto
+      | None -> ()) st.entries;
   pr out "\n";
   Buffer.add_buffer out st.helpers;
   pr out "\n";
   Buffer.add_buffer out st.funcs;
+  Hashtbl.iter (fun name _ ->
+      match Hashtbl.find_opt st.entry_defs name with
+      | Some (_, def) -> Buffer.add_string out def
+      | None -> ()) st.entries;
   Buffer.add_buffer out show_err2;
   pr out "\nint main(void) {\n  stn_runtime_init();\n";
   if sig_can_fail main_sg then begin
     pr out "  StnUnit r; StnError e;\n  if (%s(&r, &e)) {\n" main_c;
     pr out "    StnStr s = stn_show_error(e);\n    fflush(stdout);\n";
-    pr out "    stn_runtime_flush_for_error();\n    fprintf(stderr, \"error: %%.*s\\n\", (int)s->len, s->data);\n";
+    pr out "    stn_runtime_flush_for_error();\n    fprintf(stderr, \"error: %%.*s\\n\", (int)stn_str_len(s), stn_str_ptr(&s));\n";
     pr out "    STN_STR_DROP(s); stn_error_drop(e);\n    stn_runtime_exit(1);\n  }\n"
   end else pr out "  %s();\n" main_c;
   pr out "  stn_runtime_exit(0);\n  return 0;\n}\n";

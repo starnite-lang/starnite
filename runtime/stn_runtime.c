@@ -116,54 +116,184 @@ void stn_check_char(int64_t c, const char* file, int line, int col) {
 /* ---- strings ---- */
 void stn_str_release(void* p) { stn_free(p); }
 
-StnStr stn_str_new(const char* data, int64_t len) {
-    StnStr s = (StnStr)stn_alloc(sizeof(StnStrBuf) + (size_t)len + 1);
-    s->len = len;
-    if (len) memcpy(s->data, data, (size_t)len);
-    s->data[len] = 0;
+char* stn_str_start(StnStr* s, int64_t len) {
+    if (len <= STN_STR_INLINE_MAX) {
+        s->w0 = 0;
+        s->w1 = (uint64_t)len << 56;
+        return (char*)s + STN_STR_INLINE_AT;
+    }
+    StnStrBuf* b = (StnStrBuf*)stn_alloc(sizeof(StnStrBuf) + (size_t)len + 1);
+    b->len = len;
+    b->data[len] = 0;
+    s->ptr = b->data;
+    s->w1 = (uint64_t)len | STN_STR_HEAP_BIT;
+    return b->data;
+}
+
+_Noreturn void stn_trap_str(const char* kind, const char* file, int line, int col, StnStr msg) {
+    int64_t n = stn_str_len(msg);
+    char* text = malloc((size_t)n + 1);
+    if (!text) stn_trap(kind, file, line, col, "");
+    memcpy(text, stn_str_ptr(&msg), (size_t)n);
+    text[n] = 0;
+    stn_trap(kind, file, line, col, text);
+}
+
+StnStr stn_str_new_heap(const char* data, int64_t len) {
+    StnStr s;
+    char* d = stn_str_start(&s, len);
+    memcpy(d, data, (size_t)len);
     return s;
 }
 
-StnStr stn_str_concat(StnStr a, StnStr b) {
-    StnStr s = (StnStr)stn_alloc(sizeof(StnStrBuf) + (size_t)(a->len + b->len) + 1);
-    s->len = a->len + b->len;
-    memcpy(s->data, a->data, (size_t)a->len);
-    memcpy(s->data + a->len, b->data, (size_t)b->len);
-    s->data[s->len] = 0;
+#if defined(__SIZEOF_INT128__) && defined(STN_STR_WORDS)
+/* A 128-bit integer is an extension; __extension__ keeps a strict ISO build (-pedantic-errors)
+   accepting it, as both GCC and Clang allow. */
+__extension__ typedef unsigned __int128 stn_u128;
+/* the bytes of an inline string as one number, without its length */
+static inline stn_u128 stn_str_bits(const StnStr* s) {
+    return (stn_u128)s->w0 | ((stn_u128)(s->w1 & ~(UINT64_C(0xFF) << 56)) << 64);
+}
+#endif
+
+#if defined(__SIZEOF_INT128__) && defined(STN_STR_WORDS)
+/* Both parts are inline: shift and combine their words. Kept out of line, so the registers it
+   needs are not saved on every call that builds a buffer. */
+static __attribute__((noinline)) StnStr stn_str_concat_small(const StnStr* a, const StnStr* b, int64_t an, int64_t bn) {
+    StnStr s;
+    stn_u128 v = stn_str_bits(a) | (stn_str_bits(b) << (8 * an));
+    s.w0 = (uint64_t)v;
+    s.w1 = (uint64_t)(v >> 64) | ((uint64_t)(an + bn) << 56);
+    return s;
+}
+
+static __attribute__((noinline)) StnStr stn_str_concat_n_small(int n, const StnStr* parts, int64_t total) {
+    StnStr s;
+    stn_u128 v = 0;
+    int64_t at = 0;
+    for (int i = 0; i < n; i++) {
+        int64_t k = stn_str_len(parts[i]);
+        if (k) v |= stn_str_bits(&parts[i]) << (8 * at);
+        at += k;
+    }
+    s.w0 = (uint64_t)v;
+    s.w1 = (uint64_t)(v >> 64) | ((uint64_t)total << 56);
+    return s;
+}
+#endif
+
+StnStr stn_str_concat(const StnStr* a, const StnStr* b) {
+    int64_t an, bn;
+    const char* ad = stn_str_span(a, &an);
+    const char* bd = stn_str_span(b, &bn);
+    StnStr s;
+#if defined(__SIZEOF_INT128__) && defined(STN_STR_WORDS)
+    if (an + bn <= STN_STR_INLINE_MAX) return stn_str_concat_small(a, b, an, bn);
+#endif
+    char* d = stn_str_start(&s, an + bn);
+    memcpy(d, ad, (size_t)an);
+    memcpy(d + an, bd, (size_t)bn);
     return s;
 }
 
 StnStr stn_str_concat_n(int n, StnStr* parts) {
     int64_t total = 0;
-    for (int i = 0; i < n; i++) total += parts[i]->len;
-    StnStr s = (StnStr)stn_alloc(sizeof(StnStrBuf) + (size_t)total + 1);
-    s->len = total;
+    for (int i = 0; i < n; i++) total += stn_str_len(parts[i]);
+    StnStr s;
+#if defined(__SIZEOF_INT128__) && defined(STN_STR_WORDS)
+    if (total <= STN_STR_INLINE_MAX) return stn_str_concat_n_small(n, parts, total);
+#endif
+    char* d = stn_str_start(&s, total);
     int64_t at = 0;
-    for (int i = 0; i < n; i++) { memcpy(s->data + at, parts[i]->data, (size_t)parts[i]->len); at += parts[i]->len; }
-    s->data[total] = 0;
+    for (int i = 0; i < n; i++) {
+        int64_t k;
+        const char* pd = stn_str_span(&parts[i], &k);
+        memcpy(d + at, pd, (size_t)k);
+        at += k;
+    }
     return s;
 }
 
-int stn_str_cmp(StnStr a, StnStr b) {
-    int64_t n = a->len < b->len ? a->len : b->len;
-    int c = memcmp(a->data, b->data, (size_t)n);
+int stn_str_cmp(const StnStr* a, const StnStr* b) {
+    int64_t an, bn;
+    const char* ad = stn_str_span(a, &an);
+    const char* bd = stn_str_span(b, &bn);
+    int64_t n = an < bn ? an : bn;
+    int c = memcmp(ad, bd, (size_t)n);
     if (c) return c < 0 ? -1 : 1;
-    return a->len < b->len ? -1 : a->len > b->len ? 1 : 0;
+    return an < bn ? -1 : an > bn ? 1 : 0;
 }
 
-static int stn_boundary(StnStr s, int64_t i) {
-    return i == 0 || i == s->len || ((unsigned char)s->data[i] & 0xC0) != 0x80;
+static int stn_boundary(const char* d, int64_t n, int64_t i) {
+    return i == 0 || i == n || ((unsigned char)d[i] & 0xC0) != 0x80;
 }
 
-StnStr stn_str_slice(StnStr s, int64_t lo, int64_t hi, const char* file, int line, int col) {
-    if (lo < 0 || hi > s->len || lo > hi) {
+StnStr stn_str_slice(const StnStr* s, int64_t lo, int64_t hi, const char* file, int line, int col) {
+    int64_t n;
+    const char* d = stn_str_span(s, &n);
+    if (lo < 0 || hi > n || lo > hi) {
         char buf[96];
-        snprintf(buf, sizeof buf, "slice %lld..%lld, length %lld", (long long)lo, (long long)hi, (long long)s->len);
+        snprintf(buf, sizeof buf, "slice %lld..%lld, length %lld", (long long)lo, (long long)hi, (long long)n);
         stn_trap("index out of range", file, line, col, buf);
     }
-    if (!stn_boundary(s, lo) || !stn_boundary(s, hi))
+    if (!stn_boundary(d, n, lo) || !stn_boundary(d, n, hi))
         stn_trap("index out of range", file, line, col, "slice does not fall on character boundaries");
-    return stn_str_new(s->data + lo, hi - lo);
+    if (lo == 0 && hi == n) return stn_str_dup(*s);
+    return stn_str_new(d + lo, hi - lo);
+}
+
+static void stn_slice_check(const char* d, int64_t n, int64_t lo, int64_t hi, const char* file, int line, int col) {
+    if (lo < 0 || hi > n || lo > hi) {
+        char buf[96];
+        snprintf(buf, sizeof buf, "slice %lld..%lld, length %lld", (long long)lo, (long long)hi, (long long)n);
+        stn_trap("index out of range", file, line, col, buf);
+    }
+    if (!stn_boundary(d, n, lo) || !stn_boundary(d, n, hi))
+        stn_trap("index out of range", file, line, col, "slice does not fall on character boundaries");
+}
+
+/* the bytes at d, n of them and more than fit inline, as a view */
+static inline StnStr stn_view_of(const char* d, int64_t n) {
+    StnStr v;
+    v.ptr = d;
+    v.w1 = (uint64_t)n | STN_STR_HEAP_BIT | STN_STR_VIEW_BIT;
+    return v;
+}
+
+_Noreturn void stn_slice_trap(int64_t n, int64_t lo, int64_t hi, const char* file, int line, int col) {
+    if (lo < 0 || hi > n || lo > hi) {
+        char buf[96];
+        snprintf(buf, sizeof buf, "slice %lld..%lld, length %lld", (long long)lo, (long long)hi, (long long)n);
+        stn_trap("index out of range", file, line, col, buf);
+    }
+    stn_trap("index out of range", file, line, col, "slice does not fall on character boundaries");
+}
+
+/* s = s[lo..hi]. A view moves along its bytes; a buffer nothing else holds is cut down in place;
+   a shared one is left to its other holders. */
+void stn_str_slice_self(StnStr* s, int64_t lo, int64_t hi, const char* file, int line, int col) {
+    int64_t n;
+    const char* d = stn_str_span(s, &n);
+    stn_slice_check(d, n, lo, hi, file, line, col);
+    int64_t k = hi - lo;
+    if (k == n) return;
+    if (k <= STN_STR_INLINE_MAX) {
+        StnStr t = stn_str_small(d + lo, k);
+        stn_str_drop(*s);
+        *s = t;
+    } else if (s->w1 & STN_STR_VIEW_BIT) {
+        *s = stn_view_of(d + lo, k);
+    } else if (stn_unique(stn_str_buf(*s))) {
+        StnStrBuf* b = stn_str_buf(*s);
+        if (lo) memmove(b->data, b->data + lo, (size_t)k);
+        b->data[k] = 0;
+        b->len = k;
+        s->w1 = (uint64_t)k | STN_STR_HEAP_BIT;
+    } else {
+        StnStr t = stn_str_new_heap(d + lo, k);
+        stn_str_drop(*s);
+        *s = t;
+    }
 }
 
 StnStr stn_show_i64(int64_t v) { char b[32]; int n = snprintf(b, sizeof b, "%lld", (long long)v); return stn_str_new(b, n); }
@@ -645,11 +775,14 @@ _Noreturn void stn_index_trap(int64_t i, int64_t len, const char* file, int line
 }
 
 /* ---- console ---- */
-void stn_print(StnStr s) {
-    if (stn_outlen + (size_t)s->len + 1 > sizeof stn_outbuf) stn_flush();
-    if ((size_t)s->len + 1 > sizeof stn_outbuf) { fwrite(s->data, 1, (size_t)s->len, stdout); fputc('\n', stdout); return; }
-    memcpy(stn_outbuf + stn_outlen, s->data, (size_t)s->len);
-    stn_outlen += (size_t)s->len;
+void stn_print(const StnStr* s) {
+    int64_t len;
+    const char* d = stn_str_span(s, &len);
+    size_t n = (size_t)len;
+    if (stn_outlen + n + 1 > sizeof stn_outbuf) stn_flush();
+    if (n + 1 > sizeof stn_outbuf) { fwrite(d, 1, n, stdout); fputc('\n', stdout); return; }
+    memcpy(stn_outbuf + stn_outlen, d, n);
+    stn_outlen += n;
     stn_outbuf[stn_outlen++] = '\n';
 }
 
@@ -759,7 +892,7 @@ StnStr stn_read_all(const char* file, int line, int col) {
             cap = (size_t)(info.st_size - offset) + 1;
     }
 
-    StnStr s = (StnStr)stn_alloc(sizeof(StnStrBuf) + cap + 1);
+    StnStrBuf* s = (StnStrBuf*)stn_alloc(sizeof(StnStrBuf) + cap + 1);
     size_t len = 0;
     for (;;) {
         len += fread(s->data + len, 1, cap - len, stdin);
@@ -770,19 +903,27 @@ StnStr stn_read_all(const char* file, int line, int col) {
                 (uint64_t)cap > (uint64_t)STN_MAX_ALLOC / 2)
                 stn_too_large(file, line, col);
             cap *= 2;
-            StnStr grown = realloc(s, sizeof(StnStrBuf) + cap + 1);
+            StnStrBuf* grown = realloc(s, sizeof(StnStrBuf) + cap + 1);
             if (!grown) stn_trap("out of memory", file, line, col, "could not grow input buffer");
             s = grown;
         }
     }
     if (!stn_utf8_valid(s->data, len)) {
         StnStr text = stn_str_replace_invalid_utf8(s->data, len);
-        STN_STR_DROP(s);
+        stn_free(s);
+        return text;
+    }
+    if (len <= STN_STR_INLINE_MAX) {
+        StnStr text = stn_str_new(s->data, (int64_t)len);
+        stn_free(s);
         return text;
     }
     s->len = (int64_t)len;
     s->data[len] = 0;
-    return s;
+    StnStr text;
+    text.ptr = s->data;
+    text.w1 = (uint64_t)len | STN_STR_HEAP_BIT;
+    return text;
 }
 
 int64_t stn_clock_ns(void) {
@@ -839,6 +980,19 @@ uint64_t stn_hash_bytes(const void* p, size_t n) {
     return v0 ^ v1 ^ v2 ^ v3;
 }
 
+uint64_t stn_hash_inline(uint64_t w0, uint64_t w1) {
+    uint64_t v0 = stn_hash_k0 ^ UINT64_C(0x736f6d6570736575), v1 = stn_hash_k1 ^ UINT64_C(0x646f72616e646f6d);
+    uint64_t v2 = stn_hash_k0 ^ UINT64_C(0x6c7967656e657261), v3 = stn_hash_k1 ^ UINT64_C(0x7465646279746573);
+    uint64_t n = w1 >> 56, b;
+    if (n >= 8) {
+        v3 ^= w0; STN_SIPROUND; v0 ^= w0;
+        b = w1;                      /* bytes 8 to n-1, zeros, and n in the last byte */
+    } else b = w0 | (n << 56);       /* w0 is zero past byte n, and w1 holds only the length */
+    v3 ^= b; STN_SIPROUND; v0 ^= b;
+    v2 ^= 0xff; STN_SIPROUND; STN_SIPROUND; STN_SIPROUND;
+    return v0 ^ v1 ^ v2 ^ v3;
+}
+
 /* The hash word of an entry: never 0, which marks a tombstone. */
 static inline uint64_t stn_map_word(uint64_t h) { return h | (uint64_t)(h == 0); }
 
@@ -846,7 +1000,7 @@ static inline uint64_t stn_map_word(uint64_t h) { return h | (uint64_t)(h == 0);
    through the functions of its table. */
 static inline uint64_t stn_key_word(const StnMapOps* ops, const void* key) {
     if (ops->kind == STN_KEY_I64) return stn_map_word(stn_hash_u64(*(const uint64_t*)key));
-    if (ops->kind == STN_KEY_STR) { StnStr s = *(const StnStr*)key; return stn_map_word(stn_hash_bytes(s->data, (size_t)s->len)); }
+    if (ops->kind == STN_KEY_STR) return stn_map_word(stn_str_hash(*(const StnStr*)key));
     return stn_map_word(ops->hash(key));
 }
 static inline int stn_key_eq(const StnMapOps* ops, const void* a, const void* b) {
@@ -1232,17 +1386,18 @@ StnMap* stn_set_difference(const StnMap* a, const StnMap* b) {
 }
 
 /* ---- string built-ins ---- */
-StnArray* stn_str_chars(StnStr s, const StnElemOps* ops) {
-    StnArray* a = stn_array_new(ops, s->len > 0 ? s->len : 1);
-    const unsigned char* p = (const unsigned char*)s->data;
+StnArray* stn_str_chars(const StnStr* s, const StnElemOps* ops) {
+    int64_t n;
+    const unsigned char* p = (const unsigned char*)stn_str_span(s, &n);
+    StnArray* a = stn_array_new(ops, n > 0 ? n : 1);
     int64_t i = 0;
-    while (i < s->len) {
+    while (i < n) {
         uint32_t c = p[i];
         int len = 1;
 #if defined(__SSE2__)
         /* a run of ASCII widens sixteen bytes at a time; the block is all inside the string, and
            the array has room for one Char per byte */
-        if (c < 0x80 && i + 16 <= s->len) {
+        if (c < 0x80 && i + 16 <= n) {
             const __m128i block = _mm_loadu_si128((const __m128i_u*)(p + i));
             if (_mm_movemask_epi8(block) == 0) {
                 const __m128i zero = _mm_setzero_si128();
@@ -1259,7 +1414,7 @@ StnArray* stn_str_chars(StnStr s, const StnElemOps* ops) {
         }
 #endif
         /* strings are valid UTF-8; the bound keeps a decode inside the buffer regardless */
-        if ((c >= 0xF0 && i + 4 > s->len) || (c >= 0xE0 && i + 3 > s->len) || (c >= 0xC0 && i + 2 > s->len)) c = 0xFFFD, len = 0;
+        if ((c >= 0xF0 && i + 4 > n) || (c >= 0xE0 && i + 3 > n) || (c >= 0xC0 && i + 2 > n)) c = 0xFFFD, len = 0;
         if (len == 0) len = 1;
         else if (c >= 0xF0) { c = ((c & 7) << 18) | ((p[i+1] & 0x3F) << 12) | ((p[i+2] & 0x3F) << 6) | (p[i+3] & 0x3F); len = 4; }
         else if (c >= 0xE0) { c = ((c & 15) << 12) | ((p[i+1] & 0x3F) << 6) | (p[i+2] & 0x3F); len = 3; }
@@ -1305,16 +1460,18 @@ static const char* stn_find_bytes(const char* haystack, size_t n, const char* ne
     return NULL;
 }
 
-StnArray* stn_str_split(StnStr s, StnStr sep, const StnElemOps* ops, const char* file, int line, int col) {
-    if (sep->len == 0) stn_trap("invalid argument", file, line, col, "split with an empty separator");
+StnArray* stn_str_split(const StnStr* s, const StnStr* sep, const StnElemOps* ops, const char* file, int line, int col) {
+    int64_t sep_len, s_len;
+    const char* sep_data = stn_str_span(sep, &sep_len);
+    if (sep_len == 0) stn_trap("invalid argument", file, line, col, "split with an empty separator");
     StnArray* a = stn_array_new(ops, 4);
-    const char* field = s->data;
-    const char* end = s->data + s->len;
+    const char* field = stn_str_span(s, &s_len);
+    const char* end = field + s_len;
     const char* hit;
-    while ((hit = stn_find_bytes(field, (size_t)(end - field), sep->data, (size_t)sep->len))) {
+    while ((hit = stn_find_bytes(field, (size_t)(end - field), sep_data, (size_t)sep_len))) {
         StnStr part = stn_str_new(field, (int64_t)(hit - field));
         STN_PUSH(&a, StnStr, part);
-        field = hit + sep->len;
+        field = hit + sep_len;
     }
     StnStr last = stn_str_new(field, (int64_t)(end - field));
     STN_PUSH(&a, StnStr, last);
@@ -1322,27 +1479,34 @@ StnArray* stn_str_split(StnStr s, StnStr sep, const StnElemOps* ops, const char*
 }
 
 StnStr stn_str_join_parts(const StnStr* parts, int64_t n, StnStr sep) {
-    size_t total = 0;
-    size_t limit = SIZE_MAX - sizeof(StnStrBuf) - 1;
-    if (limit > INT64_MAX) limit = INT64_MAX;
+    /* The total is kept in 64 bits and checked once per part against a limit that is both the
+       largest allocation and what a size_t of this target can hold beside the buffer's header, so
+       it cannot wrap and the narrowing below loses nothing. */
+    int64_t sep_n;
+    const char* sep_data = stn_str_span(&sep, &sep_n);
+    size_t sep_len = (size_t)sep_n;
+    uint64_t limit = (uint64_t)STN_MAX_ALLOC, room = (uint64_t)SIZE_MAX - sizeof(StnStrBuf) - 1;
+    if (limit > room) limit = room;
+    uint64_t sum = 0;
     for (int64_t i = 0; i < n; i++) {
-        if ((uint64_t)parts[i]->len > limit - total ||
-            (i && (uint64_t)sep->len > limit - total - (size_t)parts[i]->len))
-            stn_too_large("<runtime>", 0, 0);
-        total += (size_t)parts[i]->len + (i ? (size_t)sep->len : 0);
+        /* each term is the length of a string that exists, so the two cannot wrap 64 bits */
+        uint64_t k = (uint64_t)stn_str_len(parts[i]) + (i ? (uint64_t)sep_n : 0);
+        if (k > limit - sum) stn_too_large("<runtime>", 0, 0);
+        sum += k;
     }
-    StnStr s = (StnStr)stn_alloc(sizeof(StnStrBuf) + total + 1);
-    s->len = (int64_t)total;
-    size_t at = 0;
+    size_t total = (size_t)sum;
+    StnStr s;
+    char* d = stn_str_start(&s, (int64_t)total);
     for (int64_t i = 0; i < n; i++) {
         if (i) {
-            memcpy(s->data + at, sep->data, (size_t)sep->len);
-            at += (size_t)sep->len;
+            memcpy(d, sep_data, sep_len);
+            d += sep_len;
         }
-        memcpy(s->data + at, parts[i]->data, (size_t)parts[i]->len);
-        at += (size_t)parts[i]->len;
+        int64_t k;
+        const char* pd = stn_str_span(&parts[i], &k);
+        memcpy(d, pd, (size_t)k);
+        d += k;
     }
-    s->data[total] = 0;
     return s;
 }
 
@@ -1352,31 +1516,39 @@ StnStr stn_str_join(StnArray* xs, StnStr sep) {
 
 static int stn_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
 
-StnStr stn_str_trim(StnStr s) {
-    int64_t lo = 0, hi = s->len;
-    while (lo < hi && stn_space(s->data[lo])) lo++;
-    while (hi > lo && stn_space(s->data[hi - 1])) hi--;
-    return stn_str_new(s->data + lo, hi - lo);
+StnStr stn_str_trim(const StnStr* s) {
+    int64_t n;
+    const char* d = stn_str_span(s, &n);
+    int64_t lo = 0, hi = n;
+    while (lo < hi && stn_space(d[lo])) lo++;
+    while (hi > lo && stn_space(d[hi - 1])) hi--;
+    if (lo == 0 && hi == n) return stn_str_dup(*s);
+    return stn_str_new(d + lo, hi - lo);
 }
 
-uint8_t stn_str_contains_slow(StnStr s, StnStr sub) {
-    return sub->len == 0 || stn_find_bytes(s->data, (size_t)s->len, sub->data, (size_t)sub->len) != NULL;
+uint8_t stn_str_contains_slow(const StnStr* s, const StnStr* sub) {
+    int64_t m, n;
+    const char* sub_data = stn_str_span(sub, &m);
+    const char* data = stn_str_span(s, &n);
+    return m == 0 || stn_find_bytes(data, (size_t)n, sub_data, (size_t)m) != NULL;
 }
-StnStr stn_str_repeat(StnStr s, int64_t n, const char* file, int line, int col) {
+StnStr stn_str_repeat(const StnStr* s, int64_t n, const char* file, int line, int col) {
     if (n < 0) stn_trap("invalid argument", file, line, col, "negative repeat count");
-    if (n > 0 && s->len > STN_MAX_ALLOC / n) stn_too_large(file, line, col);
-    StnStr r = (StnStr)stn_alloc(sizeof(StnStrBuf) + (size_t)(s->len * n) + 1);
-    r->len = s->len * n;
-    for (int64_t i = 0; i < n; i++) memcpy(r->data + i * s->len, s->data, (size_t)s->len);
-    r->data[r->len] = 0;
+    int64_t k;
+    const char* src = stn_str_span(s, &k);
+    if (n > 0 && k > STN_MAX_ALLOC / n) stn_too_large(file, line, col);
+    StnStr r;
+    char* d = stn_str_start(&r, k * n);
+    for (int64_t i = 0; i < n; i++) memcpy(d + i * k, src, (size_t)k);
     return r;
 }
 
-int stn_parse_int(StnStr s, int64_t* out) {
-    int64_t i = 0, n = s->len;
+int stn_parse_int(const StnStr* s, int64_t* out) {
+    int64_t i = 0, n;
+    const char* text = stn_str_span(s, &n);
     if (n == 0) return 1;
-    int neg = s->data[0] == '-';
-    if (s->data[0] == '-' || s->data[0] == '+') i = 1;
+    int neg = text[0] == '-';
+    if (text[0] == '-' || text[0] == '+') i = 1;
     if (i == n) return 1;
     int64_t acc = 0;
     if (n - i <= 18) {
@@ -1385,7 +1557,7 @@ int stn_parse_int(StnStr s, int64_t* out) {
            combine them; at most eighteen digits in all, so nothing here can overflow */
         for (; n - i >= 8; i += 8) {
             uint64_t v;
-            memcpy(&v, s->data + i, 8);
+            memcpy(&v, text + i, 8);
             if (((v & UINT64_C(0xF0F0F0F0F0F0F0F0)) |
                  (((v + UINT64_C(0x0606060606060606)) & UINT64_C(0xF0F0F0F0F0F0F0F0)) >> 4)) !=
                 UINT64_C(0x3333333333333333)) return 1;
@@ -1396,26 +1568,26 @@ int stn_parse_int(StnStr s, int64_t* out) {
         }
 #endif
         for (; n - i >= 4; i += 4) {
-            unsigned a = (unsigned char)s->data[i] - (unsigned)'0';
-            unsigned b = (unsigned char)s->data[i+1] - (unsigned)'0';
-            unsigned c = (unsigned char)s->data[i+2] - (unsigned)'0';
-            unsigned d = (unsigned char)s->data[i+3] - (unsigned)'0';
+            unsigned a = (unsigned char)text[i] - (unsigned)'0';
+            unsigned b = (unsigned char)text[i+1] - (unsigned)'0';
+            unsigned c = (unsigned char)text[i+2] - (unsigned)'0';
+            unsigned d = (unsigned char)text[i+3] - (unsigned)'0';
             if (a > 9 || b > 9 || c > 9 || d > 9) return 1;
             acc = acc * 10000 - (int64_t)(1000*a + 100*b + 10*c + d);
         }
         for (; i < n; i++) {
-            unsigned digit = (unsigned char)s->data[i] - (unsigned)'0';
+            unsigned digit = (unsigned char)text[i] - (unsigned)'0';
             if (digit > 9) return 1;
             acc = acc * 10 - digit;
         }
     } else {
         for (; i < n; i++) {
-            unsigned digit = (unsigned char)s->data[i] - (unsigned)'0';
+            unsigned digit = (unsigned char)text[i] - (unsigned)'0';
             if (digit > 9) return 1;
             if (acc < INT64_MIN / 10 || acc * 10 < INT64_MIN + digit) {
                 /* Invalid syntax has priority over a range error. */
                 for (i++; i < n; i++)
-                    if (s->data[i] < '0' || s->data[i] > '9') return 1;
+                    if (text[i] < '0' || text[i] > '9') return 1;
                 return 2;
             }
             acc = acc * 10 - digit;
@@ -1457,16 +1629,34 @@ static int stn_parse_short_float(const char* data, int64_t n, double* out) {
     return 1;
 }
 
-int stn_parse_float(StnStr s, double* out) {
-    if (s->len == 0) return 1;
-    if (stn_parse_short_float(s->data, s->len, out)) return 0;
-    for (int64_t i = 0; i < s->len; i++) {
-        char c = s->data[i];
+int stn_parse_float(const StnStr* s, double* out) {
+    int64_t n;
+    const char* d = stn_str_span(s, &n);
+    if (n == 0) return 1;
+    if (stn_parse_short_float(d, n, out)) return 0;
+    for (int64_t i = 0; i < n; i++) {
+        char c = d[i];
         if (!((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E')) return 1;
     }
+    /* strtod needs a terminator, which only a buffer of the string's own has: inline bytes and
+       the bytes of a view are copied out */
+    char text[64];
+    char* copy = NULL;
+    if (!stn_str_heap(*s) || (s->w1 & STN_STR_VIEW_BIT)) {
+        char* to = text;
+        if ((size_t)n >= sizeof text) {
+            copy = to = malloc((size_t)n + 1);
+            if (!to) stn_trap("out of memory", "<runtime>", 0, 0, "could not copy a number");
+        }
+        memcpy(to, d, (size_t)n);
+        to[n] = 0;
+        d = to;
+    }
     char* end;
-    *out = strtod(s->data, &end);
-    return end != s->data + s->len;
+    *out = strtod(d, &end);
+    int bad = end != d + n;
+    free(copy);
+    return bad;
 }
 
 void stn_runtime_flush_for_error(void) { stn_flush(); }

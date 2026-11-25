@@ -7,6 +7,21 @@
 #include <time.h>
 #include "stn_runtime.h"
 
+/* These kernels call the runtime of the baseline checkout, whose Str was a pointer to a buffer
+   before strings of up to 15 bytes were stored inline, and is a 16-byte value read by address
+   since. STN_STR_INLINE_MAX is defined by the second. */
+#ifdef STN_STR_INLINE_MAX
+#  define SREF(s) (&(s))
+#  define SLEN(s) stn_str_len(s)
+#  define SBYTE(s, i) ((unsigned char)stn_str_ptr(&(s))[i])
+#  define SOBSERVE(s) observe(&(s))
+#else
+#  define SREF(s) (s)
+#  define SLEN(s) ((s)->len)
+#  define SBYTE(s, i) ((unsigned char)(s)->data[i])
+#  define SOBSERVE(s) observe(s)
+#endif
+
 static void require(int valid) {
     if (!valid) exit(2);
 }
@@ -161,7 +176,7 @@ int main(void) {
             for (size_t i = 0; i < 200000; ++i) {
                 size_t key = (i * 7 + 13) % 128;
                 size_t text = i % 128;
-                if (stn_str_contains(strings[text], needles[key])) ++check;
+                if (stn_str_contains(SREF(strings[text]), SREF(needles[key]))) ++check;
             }
         } else {
             for (size_t i = 0; i < 500000; ++i) {
@@ -191,7 +206,7 @@ int main(void) {
         if (integer) {
             for (size_t i = 0; i < 300000; ++i) {
                 int64_t value;
-                require(stn_parse_int(strings[i % 128], &value) == 0);
+                require(stn_parse_int(SREF(strings[i % 128]), &value) == 0);
                 check = add(check, value);
             }
             end = now();
@@ -199,7 +214,7 @@ int main(void) {
             double sum = 0;
             for (size_t i = 0; i < 300000; ++i) {
                 double value;
-                require(stn_parse_float(strings[i % 128], &value) == 0);
+                require(stn_parse_float(SREF(strings[i % 128]), &value) == 0);
                 sum += value;
             }
             end = now();

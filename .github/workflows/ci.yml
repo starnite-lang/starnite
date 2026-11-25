@@ -41,6 +41,25 @@ jobs:
         # fuzzer's own checks (tests/fuzz/selftest.sh)
         run: tests/run.sh
 
+  portable:
+    name: portable (byte-wise and big-endian)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OCaml, dune, a cross compiler for s390x and qemu
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ocaml-nox ocaml-dune gcc gcc-s390x-linux-gnu libc6-dev-s390x-cross qemu-user-static
+      - name: Build
+        run: dune build
+      - name: String tests on the byte-wise paths and on a big-endian target
+        # the Str layout has fast paths for little-endian targets; every other target, and
+        # this build of it, takes the byte-wise ones (tests/portable.sh)
+        env:
+          REQUIRE_BIG_ENDIAN: 1
+        run: tests/portable.sh
+
   fuzz:
     name: fuzz
     runs-on: ubuntu-24.04
