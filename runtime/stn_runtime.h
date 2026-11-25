@@ -67,6 +67,8 @@ _Noreturn void stn_div_zero(const char* file, int line, int col);
    length in the last byte. A longer one points to a counted buffer and holds its length, with the
    top bit of the second word set. The form follows from the length alone, so two equal strings
    have the same form, and two inline strings are equal exactly when their words are. */
+/* len is how many bytes data has room for, before its terminator: at least the length of the
+   string, which the Str itself holds, and more after an append has grown the buffer. */
 typedef struct StnStrBuf { stn_header h; int64_t len; char data[]; } StnStrBuf;
 /* The first word of a string in a buffer is the address of its bytes: of the data of a buffer it
    counts, or, for a view, of bytes inside another string. Only a string that counts its buffer
@@ -147,6 +149,27 @@ static inline __attribute__((always_inline)) void stn_str_drop(StnStr s) {
 #endif
     stn_drop(stn_str_buf(s), stn_str_release);
 }
+#define STN_MAX_ALLOC ((int64_t)1 << 40)
+/* The most bytes a string may have where a size_t holds up to size_max: the largest allocation,
+   or what a size_t can count beside the buffer's header and terminator, whichever is less. Sizes
+   are worked out in 64 bits against this before they are narrowed to a size_t; the functions take
+   the bound as an argument so that a narrow target's arithmetic can be checked on a wide one
+   (tests/str_limits.c). */
+static inline uint64_t stn_str_limit_for(uint64_t size_max) {
+    uint64_t room = size_max - sizeof(StnStrBuf) - 1;
+    return (uint64_t)STN_MAX_ALLOC < room ? (uint64_t)STN_MAX_ALLOC : room;
+}
+#define STN_STR_LIMIT stn_str_limit_for((uint64_t)SIZE_MAX)
+/* The capacity for a buffer of capacity cap that must hold need bytes: half as much again as it
+   has, so that a run of appends copies each byte a bounded number of times, but never less than
+   need nor more than limit. 0 when need itself is over the limit. */
+static inline uint64_t stn_str_grown(uint64_t cap, uint64_t need, uint64_t limit) {
+    if (need > limit) return 0;
+    if (cap > limit) cap = limit;
+    uint64_t room = cap + cap / 2;
+    if (room > limit) room = limit;
+    return room < need ? need : room;
+}
 /* Starts a string of len bytes in *s and returns where its bytes go. The caller writes all len. */
 char*  stn_str_start(StnStr* s, int64_t len);
 /* An inline string of len <= 15 bytes, assembled in registers by loads that stay inside the
@@ -184,6 +207,9 @@ static inline StnStr stn_str_new(const char* data, int64_t len) {
 _Noreturn void stn_trap_str(const char* kind, const char* file, int line, int col, StnStr msg);
 StnStr stn_str_from_bytes(const char* data, int64_t len);   /* makes the bytes valid UTF-8 */
 StnStr stn_str_concat(const StnStr* a, const StnStr* b);
+/* a + b for an a that the caller owns and gives up: appended in place when nothing else holds
+   its buffer (section 9.3), which makes growing a string by assignment linear */
+StnStr stn_str_append(StnStr a, const StnStr* b);
 StnStr stn_str_concat_n(int n, StnStr* parts);   /* borrows parts */
 /* Fixed-size comparisons may start at unaligned byte offsets. */
 static inline uint16_t stn_load_u16(const char* p) {
@@ -345,7 +371,6 @@ _Noreturn void stn_index_trap(int64_t i, int64_t len, const char* file, int line
    traps beyond it (stn_array_new, stn_array_reserve, stn_array_filled). Saying so
    when a length is read lets the C compiler bound loop counters and index arithmetic
    derived from it, and drop the overflow and sign checks it can then prove redundant. */
-#define STN_MAX_ALLOC ((int64_t)1 << 40)
 static inline int64_t stn_len(const StnArray* a) {
     int64_t n = a->len;
     if (n < 0 || n > STN_MAX_ALLOC) __builtin_unreachable();
