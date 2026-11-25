@@ -41,6 +41,11 @@ type env = {
 
 let out = Buffer.create 65536
 
+(* what `assert_snapshot` does with the text of its value: the test runner puts in a comparison
+   with the stored copy (section 20.2) *)
+let snapshot : (string -> Syntax.loc -> unit) ref =
+  ref (fun _ l -> raise (Assert_failed ("assert_snapshot is for test blocks", l)))
+
 (* Shared cells currently lent out by a long access (section 13.3), by identity. Each
    statement restores the list when it ends, as the C backend clears busy flags when
    the statement's frame ends. *)
@@ -782,6 +787,7 @@ and set_add env k ks key = match set_find env k ks key with Some _ -> ks | None 
 and builtin env name (tys : ty list) (vals : value list) loc : value * value list =
   let pure v = (v, vals) in
   match (name, vals) with
+  | "assert_snapshot_text@Str", [ VStr s ] -> !snapshot s loc; pure VUnit
   | "print@Str", [ VStr s ] -> Buffer.add_string out s; Buffer.add_char out '\n';
       if Buffer.length out > 60000 then flush_out ();
       pure VUnit

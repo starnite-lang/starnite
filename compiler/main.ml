@@ -22,6 +22,9 @@ options:
   --keep-c        keep the generated C file
   --explain-copies  list where a write may copy a shared value, and where a loop raises a count
   --profile-copies  count those at run time and print the totals when the program ends
+  --cases <n>     inputs each property test is run on (default 100)
+  --seed <n>      the seed of the inputs, as a failing property test printed it
+  --update-snapshots  accept what assert_snapshot now gives as the stored copy
 |}
 
 let json = ref false
@@ -75,13 +78,6 @@ let load_prelude () =
   Parser.allow_bodiless := false;
   p
 
-let front_end file =
-  let src = read_file file in
-  let pre = load_prelude () in
-  let user = Parser.parse_file file src in
-  let imported = Loader.load ~entry:file user in
-  (user, imported, Typecheck.check_program pre imported user)
-
 let trap_exit kind (l : loc) msg =
   Interp.flush_out ();
   Printf.eprintf "trap: %s at %s:%d:%d\n%s\n" kind l.file l.line l.col msg;
@@ -110,25 +106,129 @@ let run_interp (prog : Types.tprog) =
       (* the same report as the C backend's trap for a failed assert *)
       | Interp.Assert_failed (_, l) -> trap_exit "assertion failed" l "assert")
 
+(* Doc tests (section 20.2). In a doc comment, which starts with ##, a line `>>> expr` is run and
+   the lines after it, up to a blank one or the end of the comment, are what Show must give for
+   its value. Each becomes a test at the end of the module, where it sees the module's private
+   items: `assert f"{expr}" == "expected"`. *)
+let doc_tests (src : string) : string =
+  let lines = Array.of_list (String.split_on_char '\n' src) in
+  let doc l = let t = String.trim l in if String.length t >= 2 && String.sub t 0 2 = "##" then Some (String.sub t 2 (String.length t - 2)) else None in
+  let quote text =
+    let b = Buffer.create (String.length text + 2) in
+    String.iter (fun ch -> match ch with
+        | '"' -> Buffer.add_string b "\\\"" | '\\' -> Buffer.add_string b "\\\\" | '\n' -> Buffer.add_string b "\\n"
+        | ch -> Buffer.add_char b ch) text;
+    Buffer.contents b in
+  let out = Buffer.create 256 in
+  let n = Array.length lines in
+  let i = ref 0 in
+  while !i < n do
+    (match doc lines.(!i) with
+     | Some body when (let t = String.trim body in String.length t > 3 && String.sub t 0 3 = ">>>") ->
+         let t = String.trim body in
+         let expr = String.trim (String.sub t 3 (String.length t - 3)) in
+         (* the expected lines keep what indentation they have beyond that of the >>> line *)
+         let indent = let k = ref 0 in while !k < String.length body && body.[!k] = ' ' do incr k done; !k in
+         let at = !i + 1 in
+         let expected = ref [] in
+         let j = ref (!i + 1) in
+         let stop = ref false in
+         while not !stop && !j < n do
+           (match doc lines.(!j) with
+            | Some b when String.trim b <> "" && not (let t = String.trim b in String.length t >= 3 && String.sub t 0 3 = ">>>") ->
+                let cut = min indent (String.length b) in
+                let cut = if String.trim (String.sub b 0 cut) = "" then cut else 0 in
+                expected := String.sub b cut (String.length b - cut) :: !expected; incr j
+            | _ -> stop := true)
+         done;
+         Printf.bprintf out "\ntest \"doc line %d: %s\":\n    assert f\"{%s}\" == \"%s\"\n" at (quote expr) expr
+           (quote (String.concat "\n" (List.rev !expected)));
+         i := !j
+     | _ -> incr i)
+  done;
+  Buffer.contents out
+
+let front_end ?(docs = false) file =
+  let src = read_file file in
+  (* the examples in doc comments are tests of the module (section 20.2) *)
+  let src = if docs then src ^ doc_tests src else src in
+  let pre = load_prelude () in
+  let user = Parser.parse_file file src in
+  let imported = Loader.load ~entry:file user in
+  (user, imported, Typecheck.check_program pre imported user)
+
+(* where the snapshot of a test is kept: snapshots/<module>/<test>.snap beside the source, and
+   <test>-2.snap for a second assert_snapshot in the same test *)
+let snapshot_path file test nth =
+  let safe = String.map (fun ch -> match ch with 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '-' | '_' -> ch | _ -> '_') test in
+  let dir = Filename.concat (Filename.concat (Filename.dirname file) "snapshots") (Filename.remove_extension (Filename.basename file)) in
+  (dir, Filename.concat dir (if nth = 1 then safe ^ ".snap" else Printf.sprintf "%s-%d.snap" safe nth))
+
+let rec mkdirs d = if d <> "" && d <> "." && d <> "/" && not (Sys.file_exists d) then (mkdirs (Filename.dirname d); Unix.mkdir d 0o755)
+
 (* starnite test: each test runs alone; a trap fails only that test (section 22.1). *)
-let run_tests_interp file (user : Syntax.file) imported (prog : Types.tprog) =
+let run_tests_interp ~cases ~seed ~update file (user : Syntax.file) imported (prog : Types.tprog) =
   let pass = ref 0 and failn = ref 0 in
   List.iter
-    (fun (name, body, (l : loc)) ->
+    (fun (name, body, (l : loc), inputs, cond) ->
       let env = { Interp.prog; vars = Hashtbl.create 16; sub = [] } in
       let fail_with msg =
         incr failn;
         Interp.flush_out ();
         Printf.printf "FAIL %s (%s:%d)\n     %s\n" name l.file l.line msg
       in
-      match Interp.eval env body with
-      | _ | (exception Interp.Return _) ->
-          (* a return in a test block ends the test normally *)
-          incr pass; Interp.flush_out (); Printf.printf "ok   %s\n" name
-      | exception Interp.Failed (t, v) -> fail_with ("failed with " ^ Interp.show_value env t v)
-      | exception Interp.Assert_failed (msg, al) -> fail_with (Printf.sprintf "%s at %s:%d:%d" msg al.file al.line al.col)
-      | exception Values.Trap (kind, tl, msg) -> fail_with (Printf.sprintf "trap: %s at %s:%d:%d: %s" kind tl.file tl.line tl.col msg)
-      | exception Stack_overflow -> fail_with "trap: stack overflow")
+      (* a snapshot that is missing is written, and the test fails so that it gets read *)
+      let nth = ref 0 and written = ref [] in
+      Interp.snapshot := (fun text sl ->
+          incr nth;
+          let dir, path = snapshot_path file name !nth in
+          let write () = mkdirs dir; Out_channel.with_open_bin path (fun oc -> output_string oc text; output_char oc '\n') in
+          let stored = if Sys.file_exists path then Some (In_channel.with_open_bin path In_channel.input_all) else None in
+          match stored with
+          | Some s when s = text ^ "\n" -> ()
+          | _ when update -> write ()
+          (* the test goes on, so that every snapshot it has is written in one run *)
+          | None -> write (); written := path :: !written
+          | Some s ->
+              raise (Interp.Assert_failed
+                       (Printf.sprintf "snapshot differs from %s (--update-snapshots accepts the new one)\n     stored: %s\n     now:    %s"
+                          path (String.trim s) text, sl)));
+      (* None when the body passes, Some why when it does not *)
+      let attempt () =
+        match Interp.eval env body with
+        | _ | (exception Interp.Return _) ->   (* a return in a test block ends the test normally *)
+            if !written = [] then None
+            else Some (Printf.sprintf "snapshot written to %s; read it, then run the tests again" (String.concat ", " (List.rev !written)))
+        | exception Interp.Failed (t, v) -> Some ("failed with " ^ Interp.show_value env t v)
+        | exception Interp.Assert_failed (msg, al) -> Some (Printf.sprintf "%s at %s:%d:%d" msg al.file al.line al.col)
+        | exception Values.Trap (kind, tl, msg) -> Some (Printf.sprintf "trap: %s at %s:%d:%d: %s" kind tl.file tl.line tl.col msg)
+        | exception Stack_overflow -> Some "trap: stack overflow" in
+      if inputs = [] then begin
+        match attempt () with
+        | None -> incr pass; Interp.flush_out (); Printf.printf "ok   %s\n" name
+        | Some why -> fail_with why
+      end else begin
+        let bind_all vs = List.iter2 (fun (v : Types.var) x -> Interp.bind env v x) inputs vs in
+        let valid vs =
+          bind_all vs;
+          match cond with
+          | None -> true
+          | Some c -> (match Interp.eval env c with Interp.VBool b -> b | _ -> false | exception _ -> false) in
+        (* what a failing case printed is dropped: only the smallest case is reported *)
+        let run vs =
+          bind_all vs;
+          let before = Buffer.length Interp.out in
+          let r = attempt () in
+          if r <> None then Buffer.truncate Interp.out before;
+          r in
+        let s = Proptest.seed_of name seed in
+        match Proptest.check env ~cases ~seed:s inputs ~valid ~run with
+        | Proptest.Passed n -> incr pass; Interp.flush_out (); Printf.printf "ok   %s (%d cases)\n" name n
+        | Proptest.Too_few (ok, made) -> fail_with (Printf.sprintf "too few valid inputs: the where clause passed %d of %d" ok made)
+        | Proptest.Cannot t -> fail_with (Printf.sprintf "no inputs can be generated for the type %s" (Types.show_ty t))
+        | Proptest.Failed_case (why, shown, s) ->
+            fail_with (Printf.sprintf "%s\n     smallest failing input: %s\n     seed %d (--seed %d runs it again)" why (String.concat ", " shown) s s)
+      end)
     prog.tests;
   (* rejection tests: the body must fail to compile with the given code *)
   List.iter
@@ -148,6 +248,7 @@ let run_tests_interp file (user : Syntax.file) imported (prog : Types.tprog) =
 let () =
   let args = List.tl (Array.to_list Sys.argv) in
   let interp = ref false and release = ref false and out = ref None and cc = ref None and keep = ref false and explain = ref None and profile = ref false in
+  let update = ref false and cases = ref 100 and seed = ref None in
   let rec parse_opts acc = function
     | "--interp" :: rest -> interp := true; parse_opts acc rest
     | "--release" :: rest -> release := true; parse_opts acc rest
@@ -155,6 +256,9 @@ let () =
     | "--keep-c" :: rest -> keep := true; parse_opts acc rest
     | "--explain-copies" :: rest -> explain := Some (ref []); parse_opts acc rest
     | "--profile-copies" :: rest -> profile := true; parse_opts acc rest
+    | "--update-snapshots" :: rest -> update := true; parse_opts acc rest
+    | "--cases" :: n :: rest when int_of_string_opt n <> None -> cases := int_of_string n; parse_opts acc rest
+    | "--seed" :: n :: rest when int_of_string_opt n <> None -> seed := int_of_string_opt n; parse_opts acc rest
     | "-o" :: p :: rest -> out := Some p; parse_opts acc rest
     | "--cc" :: p :: rest -> cc := Some p; parse_opts acc rest
     | x :: rest -> parse_opts (x :: acc) rest
@@ -167,7 +271,7 @@ let () =
     | _ -> print_string usage; exit (if pos = [] then 0 else 2)
   in
   try
-    let user, imported, prog = front_end file in
+    let user, imported, prog = front_end ~docs:(cmd = "test") file in
     (match cmd with "check" | "test" -> Cgen.check ?explain:!explain prog | "run" when !interp -> Cgen.check ?explain:!explain prog | _ -> ());
     (* the list of --explain-copies, once the code that it describes has been generated *)
     let explained () =
@@ -179,7 +283,7 @@ let () =
     match cmd with
     | "check" -> ()
     | "run" when !interp -> run_interp prog
-    | "test" -> run_tests_interp file user imported prog
+    | "test" -> run_tests_interp ~cases:!cases ~seed:!seed ~update:!update file user imported prog
     | "run" | "build" | "emit-c" ->
         let opts = { Backend.release = !release; cc = !cc; keep_c = !keep; profile = !profile; explain = !explain } in
         (match cmd with

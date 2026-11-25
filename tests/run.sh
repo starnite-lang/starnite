@@ -68,6 +68,12 @@ for f in "$here"/unit/*.stn; do
     else note "FAIL unit/$(basename "$f")"; cat "$tmp/unit"; fail=$((fail + 1)); fi
 done
 
+# property and snapshot tests that fail (section 20.2): what the runner reports, with each input
+# shrunk and its seed, against tests/testing/failing.out
+(cd "$root" && "$starnite" test tests/testing/failing.stn) > "$tmp/failing" 2>&1; echo "exit $?" >> "$tmp/failing"
+if cmp -s "$tmp/failing" "$here/testing/failing.out"; then pass=$((pass + 1))
+else note "FAIL testing/failing"; diff "$here/testing/failing.out" "$tmp/failing" | head -10; fail=$((fail + 1)); fi
+
 # the fuzzer's own checks (tests/fuzz/selftest.sh): negative fuzzing against this compiler, and the
 # fuzzer against compilers with a fault put in, to see that it finds it and shrinks the program
 fuzz=${FUZZ:-"$root/_build/default/tests/fuzz/fuzz.exe"}

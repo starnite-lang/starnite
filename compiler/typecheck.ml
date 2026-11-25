@@ -2630,7 +2630,11 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
       c.in_try <- c.in_try - 1;
       c.errs <- saved;
       mks (SAssertFails (et, te))
-  | AssertSnapshot _ -> err "E0100" l "snapshot tests arrive in milestone 2"
+  (* the value as Show formats it goes to the test runner, which holds the stored copy *)
+  | AssertSnapshot e ->
+      let shown = { d = FStr [ FExpr e ]; loc = l } in
+      let call = { d = Call ({ d = Name "assert_snapshot_text"; loc = l }, [ { aname = None; amode = None; aexpr = shown; aloc = l } ]); loc = l } in
+      mks (SExpr (infer c call))
   | Expr e -> mks (SExpr (infer c e))
   | If _ | Match _ -> mks (SExpr (check_stmt_expr c s None))
   | For (true, _, _, _, _) -> err "E0700" l "par for arrives in milestone 6"
@@ -3361,9 +3365,16 @@ let check_program (prelude : Syntax.file) (imported : (string * Syntax.file) lis
                        sdeclared = false; sexport = false; smods = []; sloc = t.tsloc; smodule = entry; slend = None } in
             in_module tb entry @@ fun () ->
             let c = new_ctx tb sg None in
+            (* the inputs of a property test are variables of its body and of its where clause *)
+            let inputs = List.map (fun (p : param) ->
+                let pt = match p.pty with Some pt -> conv_ty c.tb c.tnames c.self_ty pt | None -> err "E0104" p.ploc "input '%s' needs a type" p.pname in
+                let v = new_var p.pname pt false VLocal in
+                bind c v p.ploc;
+                v) t.tsparams in
+            let cond = Option.map (fun e -> zonk_e (check c e TBool)) t.tswhere in
             let body = check_block c t.tsbody (Some TUnit) t.tsloc in
             finish_ctx c t.tsloc;
-            [ (t.tsname, zonk_e body, t.tsloc) ]
+            [ (t.tsname, zonk_e body, t.tsloc, inputs, cond) ]
         | _ -> [])
       user.items
   in

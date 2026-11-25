@@ -3938,7 +3938,7 @@ let note_demotions st =
   List.iter (fun (im : impl_info) -> List.iter (fun (_, g) -> Hashtbl.replace methods g ()) im.imethods_) prog.impls;
   let bodies =
     Hashtbl.fold (fun _ (f : tfn) acc -> f.fbody :: acc) prog.fns []
-    @ List.map (fun (_, b, _) -> b) prog.tests @ List.map (fun (l : lambda) -> l.lbody) prog.lambdas in
+    @ List.map (fun (_, b, _, _, _) -> b) prog.tests @ List.map (fun (l : lambda) -> l.lbody) prog.lambdas in
   List.iter (walk_texpr (fun (x : texpr) -> match x.e with XFnRef (u, _) -> Hashtbl.replace valued u () | _ -> ()) (fun _ -> ())) bodies;
   let loop_shaped u (body : texpr) =
     let is_self (x : texpr) = match x.e with XCall (CFn (g, _), _, _) -> g = u | _ -> false in

@@ -1,0 +1,21 @@
+FAIL wrong: no array is longer than three (tests/testing/failing.stn:25)
+     assertion failed: left = 4, right = 3 at tests/testing/failing.stn:26:5
+     smallest failing input: xs = [0, 0, 0, 0]
+     seed 83735982 (--seed 83735982 runs it again)
+FAIL wrong: areas are small (tests/testing/failing.stn:28)
+     assertion failed: left = 75, right = 50 at tests/testing/failing.stn:29:5
+     smallest failing input: s = Circle(5)
+     seed 841821407 (--seed 841821407 runs it again)
+FAIL wrong: where nothing passes (tests/testing/failing.stn:31)
+     too few valid inputs: the where clause passed 0 of 1000
+FAIL wrong: traps on a sum (tests/testing/failing.stn:34)
+     trap: integer overflow at tests/testing/failing.stn:35:14: the result does not fit its type
+     smallest failing input: a = -1, b = -9223372036854775808
+     seed 1019446681 (--seed 1019446681 runs it again)
+FAIL wrong: a snapshot that differs (tests/testing/failing.stn:37)
+     snapshot differs from tests/testing/snapshots/failing/wrong__a_snapshot_that_differs.snap (--update-snapshots accepts the new one)
+     stored: 8
+     now:    9 at tests/testing/failing.stn:38:5
+
+0 passed, 5 failed
+exit 1

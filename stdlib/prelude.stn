@@ -42,6 +42,8 @@ trait IndexMut*[K, V]:
 
 # ---- console ----
 fn print*(s: Str) ! io
+# what `assert_snapshot e` becomes: the text of e, compared by the test runner with its stored copy
+fn assert_snapshot_text*(s: Str) ! io
 fn read_line*() -> Str? ! io
 fn read_all*() -> Str ! io
 fn clock_ns*() -> Int ! io
