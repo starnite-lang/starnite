@@ -1,0 +1,10 @@
+75 15 46350
+((. a long enough to live in a buffer! .) root long enough to live in a buffer! (. b! .)) ((. a long enough to live in a buffer .) root long enough to live in a buffer (. b .))
+(. alone long enough to live in a buffer? .)
+outer long enough to live in a buffer none root long enough to live in a buffer!
+((. l .) trimmed .) ((. r .) short (. l .))
+((. seed long enough to live in a buffer (. right .)) tagged long enough to live in a buffer .) (((. seed long enough to live in a buffer#0 .) seed long enough to live in a buffer#1 .) seed long enough to live in a buffer#2 .)
+(((. a long enough to live in a buffer .) root long enough to live in a buffer (. b .)) tagged long enough to live in a buffer .) (. root long enough to live in a buffer#0 .)
+false (. right .)
+(. ok+ .)
+exit 0

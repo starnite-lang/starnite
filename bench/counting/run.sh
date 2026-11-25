@@ -20,7 +20,7 @@ build() {
 build "$base" previous-starnite
 build "$repo" starnite
 printf '%-12s %14s %14s %7s\n' case previous-ms starnite-ms ratio
-for case in accumulate alias push_last grow; do
+for case in accumulate alias push_last grow list_map; do
     declare -A best sum
     for v in previous-starnite starnite; do
         best[$v]=

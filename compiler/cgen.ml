@@ -25,6 +25,7 @@ type st = {
   instances : (string, unit) Hashtbl.t;
   queue : (string * string * ty list) Queue.t;
   strlits : (string, string) Hashtbl.t;
+  reuse : (string * string * Buffer.t) list ref;   (* cells a match took apart, free for a constructor of the same type: C name, type, and the function's code, which a closure inside it does not share *)
   movable : texpr list ref;              (* the last occurrences of owned variables, which may move them (section 9.2) *)
   pinned : (int, unit) Hashtbl.t;        (* variables something borrows from to the end of their scope: never moved *)
   self_sliced : (int, unit) Hashtbl.t;   (* variables assigned a slice of themselves somewhere *)
@@ -367,6 +368,8 @@ and drop_stmt st t e =
   match repr t with
   | TNamed ("__cell", [ ct_ ]) -> Printf.sprintf "stn_drop(%s, release_cell_%s);" e (mangle ct_)
   | TNamed ("__unbusy", _) -> Printf.sprintf "%s->busy = 0;" e
+  (* a cell that no constructor took over *)
+  | TNamed ("__token", _) -> Printf.sprintf "if (%s) stn_free(%s);" e e
   | TNamed ("__array_length", _) -> e ^ ";"
   | TStr -> Printf.sprintf "STN_STR_DROP(%s);" e
   | TArray _ -> Printf.sprintf "stn_drop(%s, stn_array_release);" e
@@ -1079,7 +1082,13 @@ and construct fc t i (vals : string list) : r =
       if vals = [] then { c = Printf.sprintf "((%s)(uintptr_t)((%d << 1) | 1))" (ct fc t) i; owned = false }
       else begin
         let n = fresh st "_b" in
-        line fc "%s %s = (%s)stn_alloc(sizeof(struct box_%s));" (ct fc t) n (ct fc t) (mangle t);
+        (* the cell of a value of this type that a match around this took apart is used again
+           (section 9.3); it is a counted cell that nothing else held, so its header stands *)
+        (match List.find_opt (fun (_, m, b) -> m = mangle t && b == fc.b) !(st.reuse) with
+         | Some (tok, _, _) ->
+             line fc "%s %s = %s ? %s : (%s)stn_alloc(sizeof(struct box_%s));" (ct fc t) n tok tok (ct fc t) (mangle t);
+             line fc "%s = NULL;" tok
+         | None -> line fc "%s %s = (%s)stn_alloc(sizeof(struct box_%s));" (ct fc t) n (ct fc t) (mangle t));
         line fc "%s->h.tag = %d;" n i;
         List.iteri (fun j x -> line fc "%s->u.%s.f%d = %s;" n (c_ident v.vname_) j x) vals;
         { c = n; owned = true }
@@ -1784,8 +1793,48 @@ and match_ fc t (s : texpr) arms : r =
       line fc "if (%s) {" test;
       fc.ind <- fc.ind + 1;
       bind_pattern fc binds;
+      (* An arm that takes a boxed value apart into variables consumes it (section 9.3). If
+         nothing else holds the value, its fields move into the variables and its cell is kept
+         for a constructor of the same type in the arm; otherwise the variables are duplicated
+         and the value released. Either way the variables are owned, and the match's own
+         reference is spent. *)
+      let fields =
+        match arm.pat with
+        | TPVariant (_, _, i, ps)
+          when ps <> [] && is_data st (ts fc s.ty) && layout st (ts fc s.ty) = LBoxed
+               && List.for_all (function TPVar _ | TPWild -> true | _ -> false) ps ->
+            let vinfo, fs = List.nth (variants st (ts fc s.ty)) i in
+            Some (List.mapi (fun j (p, (_, ft)) -> (p, ft, variant_field st (ts fc s.ty) vinfo j sv)) (List.combine ps fs))
+        | _ -> None in
       let body () =
+        push fc FScope;
+        let saved = !(st.reuse) in
+        (match fields with
+         | Some fs ->
+             let sty = ts fc s.ty in
+             let tok = fresh st "_tok" in
+             line fc "%s %s = NULL;" (cty st sty) tok;
+             line fc "if (stn_unique(%s)) {" sv;
+             line fc "  %s = %s;" tok sv;
+             List.iter (fun (p, ft, path) -> match p with
+                 | TPWild when needs_rc st ft -> line fc "  %s" (drop_stmt st ft path)
+                 | _ -> ()) fs;
+             line fc "} else {";
+             List.iter (fun (p, ft, _) -> match p with
+                 | TPVar v when needs_rc st ft -> line fc "  %s" (dup_stmt st ft (var_name v))
+                 | _ -> ()) fs;
+             line fc "  %s" (drop_stmt st sty sv);
+             line fc "}";
+             line fc "%s = (%s)(void*)1;" sv (cty st sty);
+             own_in fc tok (TNamed ("__token", []));
+             List.iter (fun (p, ft, _) -> match p with
+                 | TPVar v when needs_rc st ft -> own_in fc (var_name v) ft
+                 | _ -> ()) fs;
+             st.reuse := (tok, mangle sty, fc.b) :: saved
+         | None -> ());
         if has_value then assign_into fc res arm.body t else discard fc arm.body;
+        pop fc;
+        st.reuse := saved;
         line fc "goto %s;" endl
       in
       (match arm.guard with
@@ -2645,7 +2694,16 @@ and note_moves st (owned_params : var list) (body : texpr) =
     | XSlice (a, b, c) -> pin a; w a; w b; w c
     | XIf (a, b, c) -> w a; w b; w c
     | XBlock (ss, v) -> List.iter (ws ctx) ss; we (fresh ()) ctx v
-    | XMatch (s, arms) -> pin s; w s; List.iter (fun a -> Option.iter w a.guard; w a.body) arms
+    | XMatch (s, arms) ->
+        (* the match holds a reference of its own, so its arms borrow from that, not from s;
+           the variables an arm takes a value apart into may be owned (see match_) *)
+        w s;
+        let rec bound = function
+          | TPVar v -> Hashtbl.replace decl v.vid ctx
+          | TPVariant (_, _, _, ps) | TPStruct (_, _, ps) | TPTuple ps -> List.iter bound ps
+          | TPErrType (_, p) -> bound p
+          | TPWild | TPLit _ -> () in
+        List.iter (fun a -> bound a.pat; Option.iter w a.guard; w a.body) arms
     | XLambda lam -> we stmt (fresh ()) lam.lbody
     | XComp (b, cs) ->
         let inner = fresh () in
@@ -3539,7 +3597,7 @@ let emit (prog : tprog) ~debug : string =
     prog; fwd = Buffer.create 1024; typedefs = Buffer.create 4096; boxed_bodies = Buffer.create 1024;
     protos = Buffer.create 4096; helpers = Buffer.create 4096; funcs = Buffer.create 16384;
     defined = Hashtbl.create 64; pending_boxed = Queue.create (); instances = Hashtbl.create 64;
-    queue = Queue.create (); strlits = Hashtbl.create 64; movable = ref []; pinned = Hashtbl.create 32; self_sliced = Hashtbl.create 16; view_vars = Hashtbl.create 16; loops = Hashtbl.create 64; in_main = ref false; entries = Hashtbl.create 8; entry_defs = Hashtbl.create 32; errtypes = Hashtbl.create 8;
+    queue = Queue.create (); strlits = Hashtbl.create 64; reuse = ref []; movable = ref []; pinned = Hashtbl.create 32; self_sliced = Hashtbl.create 16; view_vars = Hashtbl.create 16; loops = Hashtbl.create 64; in_main = ref false; entries = Hashtbl.create 8; entry_defs = Hashtbl.create 32; errtypes = Hashtbl.create 8;
     layouts = Hashtbl.create 64; debug; counter = 0 }
   in
   let main_u = match prog.main with Some m -> m | None -> raise (Unsupported ("no main function", Syntax.noloc)) in
