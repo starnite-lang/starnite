@@ -45,16 +45,45 @@ void stn_check_header(void* p);
 #  define STN_CHECK_HEADER(p) ((void)0)
 #endif
 
+/* ---- releasing large structures (section 9.7) ---- */
+/* A release function drops what its object holds, and so can start other releases. Those nest
+   only STN_RELEASE_DEPTH deep: past that, and once STN_FREE_BUDGET objects have been released in
+   one go, an object whose count reached zero is put on a list instead, and released when the
+   nesting has unwound, or at a later allocation when it was the budget that stopped it. The
+   stack a release needs is therefore bounded whatever the shape of the structure. */
+#define STN_RELEASE_DEPTH 256
+extern int32_t stn_release_depth;      /* releases now running, one inside another */
+extern int64_t stn_release_left;       /* objects that may still be released before a pause */
+extern int64_t stn_release_budget;     /* STN_FREE_BUDGET, or INT64_MAX without one */
+extern size_t  stn_release_pending;    /* objects on the list */
+void stn_release_defer(void* p, void (*release)(void*));
+void stn_release_drain(int fresh);
+
+/* releases p, whose count has just reached zero, now or later */
+static inline void stn_release(void* p, void (*release)(void*)) {
+    if (__builtin_expect(stn_release_depth >= STN_RELEASE_DEPTH || --stn_release_left < 0, 0)) {
+        stn_release_defer(p, release);
+        return;
+    }
+    stn_release_depth++;
+    release(p);
+    if (--stn_release_depth == 0) {
+        /* what nesting put off is released now; what the budget put off waits for an allocation */
+        if (__builtin_expect(stn_release_pending != 0, 0)) stn_release_drain(0);
+        else stn_release_left = stn_release_budget;
+    }
+}
+
 static inline void stn_drop(void* p, void (*release)(void*)) {
     if ((uintptr_t)p & 1) return;
     stn_header* h = (stn_header*)p;
 #ifdef STN_DEBUG
     stn_check_header(p);
 #endif
-    if (h->flags == 0) { if (--h->rc == 0) release(p); return; }
+    if (h->flags == 0) { if (--h->rc == 0) stn_release(p, release); return; }
     if (h->flags & STN_NOCOUNT) return;
     if (atomic_fetch_sub_explicit((_Atomic uint32_t*)&h->rc, 1, memory_order_acq_rel) == 1)
-        release(p);
+        stn_release(p, release);
 }
 
 /* ---- counters of --profile-copies (section 9.8) ---- */

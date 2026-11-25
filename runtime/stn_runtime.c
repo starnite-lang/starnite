@@ -35,6 +35,8 @@ void* stn_alloc(size_t size) {
     size_t cls = size <= (size_t)STN_CLASSES * 16 ? (size + 15) / 16 : STN_CLASSES + 1;
     if (cls <= STN_CLASSES) {
         if (cls == 0) cls = 1;
+        /* a release that STN_FREE_BUDGET stopped goes on here, a budget's worth at a time */
+        if (__builtin_expect(stn_release_pending != 0, 0) && stn_release_depth == 0) stn_release_drain(1);
         stn_free_node* n = stn_free_lists[cls];
         if (n) { stn_free_lists[cls] = n->next; h = (stn_header*)n; }
         else {
@@ -52,6 +54,52 @@ void* stn_alloc(size_t size) {
     stn_live_objects++;
 #endif
     return h;
+}
+
+/* ---- releasing large structures (section 9.7) ---- */
+int32_t stn_release_depth = 0;
+int64_t stn_release_left = INT64_MAX;
+int64_t stn_release_budget = INT64_MAX;
+size_t  stn_release_pending = 0;
+typedef struct { void* p; void (*release)(void*); } StnPending;
+static StnPending* stn_pending;
+static size_t stn_pending_cap;
+
+void stn_release_defer(void* p, void (*release)(void*)) {
+    if (stn_release_pending == stn_pending_cap) {
+        size_t cap = stn_pending_cap ? stn_pending_cap * 2 : 256;
+        StnPending* grown = (StnPending*)realloc(stn_pending, cap * sizeof *grown);
+        /* without room for the list the object is released at once, as deep as that goes */
+        if (!grown) { release(p); return; }
+        stn_pending = grown; stn_pending_cap = cap;
+    }
+    stn_pending[stn_release_pending].p = p;
+    stn_pending[stn_release_pending].release = release;
+    stn_release_pending++;
+}
+
+/* Releases what is on the list, last in first out, so the list stays as short as the structure
+   is wide. Stops when the budget of this go is spent; what is left waits for an allocation, which
+   starts a fresh go. Until the list is empty the budget stays spent, so that whatever else reaches
+   zero meanwhile joins the list. */
+void stn_release_drain(int fresh) {
+    if (fresh) stn_release_left = stn_release_budget;
+    while (stn_release_pending != 0 && --stn_release_left >= 0) {
+        StnPending e = stn_pending[--stn_release_pending];
+        stn_release_depth = 1;
+        e.release(e.p);
+        stn_release_depth = 0;
+    }
+    if (stn_release_pending == 0) stn_release_left = stn_release_budget;
+}
+
+static void stn_release_setup(void) {
+    const char* s = getenv("STN_FREE_BUDGET");
+    if (s && *s) {
+        char* end;
+        long long n = strtoll(s, &end, 10);
+        if (*end == 0 && n > 0) { stn_release_budget = n; stn_release_left = n; }
+    }
 }
 
 void stn_free(void* p) {
@@ -1726,6 +1774,7 @@ static void stn_on_fault(int sig, siginfo_t* si, void* ctx) {
 }
 void stn_runtime_init(void) {
     stn_hash_init();
+    stn_release_setup();
     struct rlimit rl;
     char here;
     stn_stack_high = (uintptr_t)&here;
@@ -1744,7 +1793,7 @@ void stn_runtime_init(void) {
     sigaction(SIGBUS, &sa, NULL);
 }
 #else
-void stn_runtime_init(void) { stn_hash_init(); }
+void stn_runtime_init(void) { stn_hash_init(); stn_release_setup(); }
 #endif
 
 /* ---- counters of --profile-copies (section 9.8) ---- */
@@ -1800,6 +1849,9 @@ static void stn_profile_report(void) {
 
 void stn_runtime_exit(int status) {
     stn_flush();
+    /* what a budget left for later is released now: nothing will allocate again */
+    stn_release_budget = INT64_MAX;
+    if (stn_release_depth == 0) stn_release_drain(1);
 #ifdef STN_PROFILE_COPIES
     stn_profile_report();
 #endif

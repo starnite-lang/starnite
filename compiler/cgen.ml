@@ -372,8 +372,8 @@ and emit_helpers st t =
                (variants st t))
         in
         pr st.helpers
-          "static void release_%s(void* p) { for (;;) { %s x = (%s)p; %s next = NULL; switch (x->h.tag) { %s default: break; } stn_free(p); if (next == NULL || ((uintptr_t)next & 1)) return; stn_header* h = (stn_header*)next; if (h->flags != 0) { stn_drop(next, release_%s); return; } STN_CHECK_HEADER(next); if (--h->rc != 0) return; p = next; } }\n"
-          m c c c arms m;
+          "static void release_%s(void* p) { for (;;) { %s x = (%s)p; %s next = NULL; switch (x->h.tag) { %s default: break; } stn_free(p); if (next == NULL || ((uintptr_t)next & 1)) return; stn_header* h = (stn_header*)next; if (h->flags != 0) { stn_drop(next, release_%s); return; } STN_CHECK_HEADER(next); if (--h->rc != 0) return; if (--stn_release_left < 0) { stn_release_defer(next, release_%s); return; } p = next; } }\n"
+          m c c c arms m m;
         pr st.helpers "static inline %s dup_%s(%s x) { stn_dup(x); return x; }\n" c m c;
         pr st.helpers "static inline void drop_%s(%s x) { stn_drop(x, release_%s); }\n" m c m
     | _ -> ()
