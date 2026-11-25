@@ -11,11 +11,16 @@ repo=$(cd "$here/../.." && pwd)
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 cc=${CC:-gcc}
-align="-falign-functions=64 -falign-loops=64"
+# Every C build takes the flags a release build takes (compiler/backend.ml): the same level of
+# optimization, so that what is measured is what `starnite build --release` gives, and the same
+# layout, so that a comparison measures the code and not where it happened to land. At -O3 GCC
+# inlines differently, a recursive function into itself among other things, and results moved by
+# up to 8% with changes elsewhere in the file.
+release="-O2 -falign-functions=64 -falign-loops=64"
 build() {
     local checkout=$1 name=$2
     (cd "$checkout" && "$checkout/_build/default/compiler/main.exe" build --release --keep-c "$here/counting.stn" -o "$out/$name-generated")
-    "$cc" -O3 $align -std=c11 -fno-strict-aliasing -I"$checkout/runtime" "$out/$name-generated.c" "$checkout/runtime/stn_runtime.c" -lm -o "$out/$name"
+    "$cc" $release -std=c11 -fno-strict-aliasing -I"$checkout/runtime" "$out/$name-generated.c" "$checkout/runtime/stn_runtime.c" -lm -o "$out/$name"
 }
 build "$base" previous-starnite
 build "$repo" starnite
