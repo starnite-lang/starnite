@@ -67,6 +67,8 @@ _Noreturn void stn_div_zero(const char* file, int line, int col);
    length in the last byte. A longer one points to a counted buffer and holds its length, with the
    top bit of the second word set. The form follows from the length alone, so two equal strings
    have the same form, and two inline strings are equal exactly when their words are. */
+/* len is how many bytes data has room for, before its terminator: at least the length of the
+   string, which the Str itself holds, and more after an append has grown the buffer. */
 typedef struct StnStrBuf { stn_header h; int64_t len; char data[]; } StnStrBuf;
 /* The first word of a string in a buffer is the address of its bytes: of the data of a buffer it
    counts, or, for a view, of bytes inside another string. Only a string that counts its buffer
@@ -184,6 +186,9 @@ static inline StnStr stn_str_new(const char* data, int64_t len) {
 _Noreturn void stn_trap_str(const char* kind, const char* file, int line, int col, StnStr msg);
 StnStr stn_str_from_bytes(const char* data, int64_t len);   /* makes the bytes valid UTF-8 */
 StnStr stn_str_concat(const StnStr* a, const StnStr* b);
+/* a + b for an a that the caller owns and gives up: appended in place when nothing else holds
+   its buffer (section 9.3), which makes growing a string by assignment linear */
+StnStr stn_str_append(StnStr a, const StnStr* b);
 StnStr stn_str_concat_n(int n, StnStr* parts);   /* borrows parts */
 /* Fixed-size comparisons may start at unaligned byte offsets. */
 static inline uint16_t stn_load_u16(const char* p) {

@@ -196,6 +196,41 @@ StnStr stn_str_concat(const StnStr* a, const StnStr* b) {
     return s;
 }
 
+_Noreturn static void stn_too_large(const char* file, int line, int col);
+
+StnStr stn_str_append(StnStr a, const StnStr* b) {
+    int64_t an, bn;
+    const char* ad = stn_str_span(&a, &an);
+    const char* bd = stn_str_span(b, &bn);
+    if (bn == 0) return a;
+    int64_t n = an + bn;
+    if ((a.w1 >> 62) == 2) {   /* in a buffer that a counts */
+        StnStrBuf* buf = stn_str_buf(a);
+        if (stn_unique(buf)) {
+            if (n > buf->len) {
+                /* grow by half again at least, so that a run of appends copies each byte a
+                   bounded number of times */
+                int64_t room = buf->len + buf->len / 2;
+                if (room < n) room = n;
+                if (room > STN_MAX_ALLOC) stn_too_large("<runtime>", 0, 0);
+                StnStrBuf* grown = (StnStrBuf*)stn_alloc(sizeof(StnStrBuf) + (size_t)room + 1);
+                grown->len = room;
+                memcpy(grown->data, ad, (size_t)an);
+                stn_free(buf);
+                buf = grown;
+                a.ptr = buf->data;
+            }
+            memcpy(buf->data + an, bd, (size_t)bn);
+            buf->data[n] = 0;
+            a.w1 = (uint64_t)n | STN_STR_HEAP_BIT;
+            return a;
+        }
+    }
+    StnStr s = stn_str_concat(&a, b);
+    stn_str_drop(a);
+    return s;
+}
+
 StnStr stn_str_concat_n(int n, StnStr* parts) {
     int64_t total = 0;
     for (int i = 0; i < n; i++) total += stn_str_len(parts[i]);
@@ -287,7 +322,6 @@ void stn_str_slice_self(StnStr* s, int64_t lo, int64_t hi, const char* file, int
         StnStrBuf* b = stn_str_buf(*s);
         if (lo) memmove(b->data, b->data + lo, (size_t)k);
         b->data[k] = 0;
-        b->len = k;
         s->w1 = (uint64_t)k | STN_STR_HEAP_BIT;
     } else {
         StnStr t = stn_str_new_heap(d + lo, k);

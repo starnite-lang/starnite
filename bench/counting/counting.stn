@@ -1,0 +1,76 @@
+# Counting workloads: time in ns and a checksum.
+type Person = struct(name: Str, tags: Array[Str], age: Int)
+
+fn extended(take xs: Array[Int], x: Int) -> Array[Int]:
+    var ys = xs
+    ys.push(x)
+    ys
+
+fn label(i: Int) -> Str:
+    f"a label long enough for a buffer {i}"
+
+fn people(n: Int) -> Array[Person]:
+    var out: Array[Person] = []
+    for i in 0..n:
+        out.push(Person(label(i), [label(i), label(i + 1)], i))
+    out
+
+# an array handed to a function and assigned back
+fn bench_accumulate(seed: Int) -> (Int, Int):
+    let start = clock_ns()
+    var acc: Array[Int] = []
+    for i in 0..20000 + seed:
+        acc = extended(take acc, i)
+    let elapsed = clock_ns() - start
+    (elapsed, len(acc) + acc[100])
+
+# lets that name a field or element of a binding that does not change
+fn bench_alias(seed: Int) -> (Int, Int):
+    let ps = people(256)
+    var sum = seed
+    let start = clock_ns()
+    for i in 0..2000000:
+        let p = ps[i % 256]
+        let n = p.name
+        let t = p.tags
+        sum += len(n) + len(t) + p.age
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+# a value built, then pushed at its last use
+fn bench_push_last(seed: Int) -> (Int, Int):
+    var sum = seed
+    let start = clock_ns()
+    for round in 0..200:
+        var out: Array[Str] = []
+        for i in 0..500:
+            let s = label(i)
+            out.push(s)
+        sum += len(out) + len(out[7])
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+# a string grown by assignment
+fn bench_grow(seed: Int) -> (Int, Int):
+    var sum = seed
+    let start = clock_ns()
+    for round in 0..200:
+        var text = ""
+        for i in 0..300:
+            text = text + "abcdefgh"
+        sum += len(text)
+    let elapsed = clock_ns() - start
+    (elapsed, sum)
+
+fn dispatch(name: Str) -> (Int, Int):
+    match name:
+        "accumulate" -> bench_accumulate(1)
+        "alias" -> bench_alias(1)
+        "push_last" -> bench_push_last(1)
+        "grow" -> bench_grow(1)
+        _ -> unreachable("unknown benchmark")
+
+fn main():
+    let name = unwrap(read_line())
+    let (elapsed, checksum) = dispatch(name)
+    print(f"{elapsed} {checksum}")

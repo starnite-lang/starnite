@@ -14,6 +14,11 @@ fn keep(take xs: Array[Str]) -> Int:
 fn both(a: Array[Str], take b: Array[Str]) -> Int:
     len(a) + len(b)
 
+fn extended(take xs: Array[Str], x: Str) -> Array[Str]:
+    var ys = xs
+    ys.push(x)
+    ys
+
 fn build(n: Int) -> Array[Str]:
     var out: Array[Str] = []
     for i in 0..n:
@@ -108,3 +113,31 @@ fn main():
     let top = Node(left, long("top"), right)
     let taller = Node(top, long("root"), Leaf)
     print(f"{depth(taller)}")
+
+    # an accumulator handed to a function and assigned back, in a loop and outside one
+    var acc: Array[Str] = []
+    for i in 0..4:
+        acc = extended(take acc, long(f"step {i}"))
+    acc = extended(take acc, long("last"))
+    var text = long("start")
+    for i in 0..3:
+        text = text + f"+{i}"
+    var kept_back = build(2)
+    for i in 0..3:
+        if i == 1:
+            continue
+        kept_back = extended(take kept_back, long("again"))
+    print(f"{len(acc)} {acc[4]} {text} {len(kept_back)}")
+
+    # a string grown by assignment appends in place while nothing else holds it, from inline
+    # through a buffer and its growth, and leaves a copy that was taken alone
+    var grown = ""
+    var copies: Array[Str] = []
+    for i in 0..40:
+        grown = grown + "ab"
+        if i % 13 == 5:
+            copies.push(grown)
+    let held = grown
+    grown = grown + "!"
+    let chain = long("a") + "-" + f"{len(grown)}" + "-" + long("z")
+    print(f"{len(grown)} {len(held)} {copies} {grown[70..81]} {chain}")

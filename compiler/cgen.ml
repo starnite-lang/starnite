@@ -1564,7 +1564,18 @@ and cmp_call fc t a b : string =
 and binop fc (e : texpr) op (a : texpr) (b : texpr) : r =
   let st = fc.st in
   let at = ts fc a.ty in
-  let ab = borrow fc (expr fc a) a.ty in
+  let xa = expr fc a in
+  if op = Add && repr at = TStr && xa.owned then begin
+    (* a + b where a is a value of this expression's own, a result or a variable at its last use:
+       b is appended to it in place when nothing else holds its buffer (section 9.3). It stays
+       registered for release until then, for the paths on which b fails, and is emptied after. *)
+    let av = borrow fc xa a.ty in
+    let bv = sref fc (borrow fc (expr fc b) b.ty) in
+    let res = tmp fc TStr (Printf.sprintf "stn_str_append(%s, %s)" av bv) in
+    line fc "%s = (StnStr){ .w0 = 0, .w1 = 0 };" av;
+    { c = res; owned = true }
+  end else
+  let ab = borrow fc xa a.ty in
   let ab = if repr at = TStr then hold_str fc ab b else ab in
   (* Operands are evaluated left to right (section 4.4), but C leaves the order of a
      call's arguments open, and either side may trap. So the left operand stays an
@@ -2611,6 +2622,9 @@ and note_moves st (owned_params : var list) (body : texpr) =
   let fresh () = incr next; !next in
   let occs : (int, (texpr option * int * int) list) Hashtbl.t = Hashtbl.create 32 in
   let decl : (int, int) Hashtbl.t = Hashtbl.create 32 in
+  (* statements that assign a whole variable, `x = e`, with no break or continue inside e *)
+  let kills : (int * int, int) Hashtbl.t = Hashtbl.create 16 in
+  let jumps = ref 0 in
   let use (v : var) node stmt ctx =
     Hashtbl.replace occs v.vid ((node, stmt, ctx) :: (try Hashtbl.find occs v.vid with Not_found -> [])) in
   let rec root (e : texpr) =
@@ -2643,17 +2657,27 @@ and note_moves st (owned_params : var list) (body : texpr) =
     let stmt = fresh () in
     let w = we stmt ctx in
     match s.st with
-    | SLet (p, e) -> pin e; w e; (match p with TPVar v -> Hashtbl.replace decl v.vid ctx | _ -> ())
-    | SVar (v, e) -> pin e; w e; Hashtbl.replace decl v.vid ctx
+    | SLet (p, e) ->
+        (* a let can only borrow from a binding that cannot change *)
+        (match root e with Some r when not r.vmut -> pin e | _ -> ());
+        w e;
+        (match p with TPVar v -> Hashtbl.replace decl v.vid ctx | _ -> ())
+    | SVar (v, e) ->
+        (* only a variable kept as a view borrows from what it starts as *)
+        if Hashtbl.mem st.self_sliced v.vid then pin e;
+        w e;
+        Hashtbl.replace decl v.vid ctx
     | SExpr e | SReturn e | SAssert (e, _) | SAssertFails (_, e) | SCheck e -> w e
     | SLend e -> pin e; w e
     | SAssign (p, e) ->
         Option.iter w p.via;
         List.iter (function PIndex i -> w i | _ -> ()) p.path;
+        let before = !jumps in
         w e;
         (* a write into the variable uses it; a write of the whole variable does not *)
         if p.path <> [] || p.via <> None then use p.root None stmt ctx
-    | SBreak | SContinue -> ()
+        else if !jumps = before then Hashtbl.replace kills (p.root.vid, stmt) ctx
+    | SBreak | SContinue -> incr jumps
     | SWhile (c, b) -> let inner = fresh () in we stmt inner c; we stmt inner b
     | SFor (_, it, b) ->
         (match it with IRange (a, b) -> w a; w b | IArray (a, _) -> pin a; w a);
@@ -2666,7 +2690,13 @@ and note_moves st (owned_params : var list) (body : texpr) =
       match Hashtbl.find_opt occs vid with
       | Some ((Some node, stmt, c) :: rest) when c = ctx && not (List.exists (fun (_, s, _) -> s = stmt) rest) ->
           st.movable := node :: !(st.movable)
-      | _ -> ()) decl
+      | _ -> ()) decl;
+  (* `x = f(take x)`: the one occurrence of x in a statement that then assigns x. Nothing can read
+     x between the two, so it moves wherever the statement is, in a loop too, and whatever follows. *)
+  Hashtbl.iter (fun (vid, stmt) ctx ->
+      match List.filter (fun (_, s, _) -> s = stmt) (try Hashtbl.find occs vid with Not_found -> []) with
+      | [ (Some node, _, c) ] when c = ctx && not (List.memq node !(st.movable)) -> st.movable := node :: !(st.movable)
+      | _ -> ()) kills
 
 (* The variables of a body whose every assignment is a slice of themselves, `v = v[a..b]` with
    bounds that write nothing, and which are never passed as mut: candidates to be kept as views. *)
