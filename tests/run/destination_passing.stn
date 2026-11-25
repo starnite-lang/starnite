@@ -1,0 +1,130 @@
+# Destination passing (section 9.5): a function that returns a constructor holding a call of
+# itself runs as a loop, in constant stack, and a list is released the same way (section 9.7).
+# The corpus runs it on a few thousand elements, which the reference interpreter can recurse
+# through; tests/deep.sh runs the C builds on a million, where the stack would run out without either.
+type List = Nil | Cons(head: Int, tail: List)
+type Words = End | Word(text: Str, more: Words, mark: Int)
+type Tree = Leaf | Node(left: Tree, label: Int, right: Tree)
+
+fn range(n: Int) -> List:
+    var out = Nil
+    var i = n
+    while i > 0:
+        i -= 1
+        out = Cons(i, out)
+    out
+
+fn total(xs: List) -> Int:
+    var t = 0
+    var cur = xs
+    var going = true
+    while going:
+        match cur:
+            Nil -> going = false
+            Cons(x, rest) ->
+                t += x
+                cur = rest
+    t
+
+# the call is the last field, and the list is taken apart: each cell is used again
+fn bump(take xs: List, by: Int) -> List:
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) -> Cons(x + by, bump(take rest, by))
+
+# a parameter passed on as it is, and one that changes on each turn
+fn append(take xs: List, ys: List, extra: Int) -> List:
+    match xs:
+        Nil -> if extra > 0: Cons(extra, ys) else: ys
+        Cons(x, rest) -> Cons(x, append(take rest, ys, extra + 1))
+
+# tail positions under if and return, a call that is not in a constructor, and a turn that
+# drops its element
+fn evens(take xs: List, limit: Int) -> List:
+    if limit == 0:
+        return Nil
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) ->
+            if x % 2 == 0:
+                Cons(x, evens(take rest, limit - 1))
+            else:
+                evens(take rest, limit)
+
+# a field after the call, which is a name, and a counted field before it
+fn tag(take ws: Words, mark: Int) -> Words:
+    match ws:
+        End -> End
+        Word(text, more, old) -> Word(text + "!", tag(take more, mark + old), mark)
+
+fn words(n: Int) -> Words:
+    var out = End
+    for i in 0..n:
+        out = Word(f"a word long enough for a buffer {i}", out, i)
+    out
+
+fn show(ws: Words) -> Str:
+    match ws:
+        End -> "."
+        Word(text, more, mark) -> f"{text}/{mark} {show(more)}"
+
+# two calls in one constructor: not a loop, and still right
+fn mirror(take t: Tree) -> Tree:
+    match t:
+        Leaf -> Leaf
+        Node(l, x, r) -> Node(mirror(take r), x, mirror(take l))
+
+fn sum_tree(t: Tree) -> Int:
+    match t:
+        Leaf -> 0
+        Node(l, x, r) -> sum_tree(l) * 2 + x + sum_tree(r)
+
+# the constructor is only under a return statement
+fn countdown(n: Int) -> List:
+    if n > 0:
+        return Cons(n, countdown(n - 1))
+    Nil
+
+# The call is inside a loop of the program: the next turn starts at the top of the function, with
+# what comes before the loop, not at the loop's next turn. A plain tail call from a loop does too.
+fn stepped(n: Int, skip: Int) -> List:
+    var seen = n * 2
+    while seen > 0:
+        if skip > 0:
+            return stepped(n, skip - 1)
+        return Cons(seen, stepped(n - 1, 0))
+    Nil
+
+type Marks = Stop | Mark(rest: Marks, mark: Int)
+
+# The field after the call is a variable that a closure changes while the call runs: it is read
+# after the call, so this stays a call, and each mark is the 1 its closure left.
+fn marked(n: Int, take run: fn()) -> Marks:
+    run()
+    if n == 0:
+        return Stop
+    var mark = 0
+    let next = fn(): mark += 1
+    Mark(marked(n - 1, take next), mark)
+
+fn show_marks(ms: Marks) -> Str:
+    match ms:
+        Stop -> "."
+        Mark(rest, mark) -> f"{mark} {show_marks(rest)}"
+
+fn main():
+    let big = bump(range(4000), 1)
+    print(f"{total(big)}")
+    let shared_tail = range(3)
+    let joined = append(range(4000), shared_tail, 0)
+    print(f"{total(joined)} {total(shared_tail)} {total(append(Nil, shared_tail, 0))} {total(append(Nil, shared_tail, 7))}")
+    print(f"{total(evens(range(4000), 1600))} {total(evens(range(10), 0))} {total(evens(range(9), 99))}")
+    print(show(tag(words(3), 10)))
+    let kept = range(5)
+    let other = kept
+    print(f"{total(bump(take kept, 100))} {total(other)}")
+    let t = Node(Node(Leaf, 1, Leaf), 2, Node(Node(Leaf, 3, Leaf), 4, Leaf))
+    print(f"{sum_tree(t)} {sum_tree(mirror(take t))}")
+    print(f"{total(countdown(4000))} {total(countdown(0))}")
+    print(show_marks(marked(3, fn(): print("first"))))
+    print(f"{total(stepped(4000, 3))} {total(stepped(3, 0))} {total(stepped(0, 5))}")

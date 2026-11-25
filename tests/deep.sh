@@ -1,0 +1,21 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Constant stack (sections 9.5 and 9.7). tests/run/destination_passing.stn goes through the
+# corpus on a few thousand elements, as deep as the reference interpreter can recurse. This runs
+# the same program on a million with the debug and release C builds: a function that returns a
+# constructor holding a call of itself must run as a loop, and a list must be released as one, or
+# the stack runs out. The expected output is in tests/deep/destination_passing.out.
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(dirname "$here")
+starnite=${STARNITE:-"$root/_build/default/compiler/main.exe"}
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+fail=0; pass=0
+sed 's/4000/1000000/g; s/1600/400000/' "$here/run/destination_passing.stn" > "$tmp/deep.stn"
+for mode in "" --release; do
+    "$starnite" run $mode "$tmp/deep.stn" < /dev/null > "$tmp/out" 2>&1; echo "exit $?" >> "$tmp/out"
+    if cmp -s "$tmp/out" "$here/deep/destination_passing.out"; then pass=$((pass + 1))
+    else echo "FAIL deep/destination_passing ${mode:-debug}"; diff "$here/deep/destination_passing.out" "$tmp/out" | head -10; fail=$((fail + 1)); fi
+done
+echo "$pass passed, $fail failed"
+[ "$fail" = 0 ]
