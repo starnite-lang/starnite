@@ -1,0 +1,110 @@
+# Counting (section 9): the last use of an owned variable moves its reference, and a let that only
+# names an unchanging binding borrows it. Neither can be seen in what a program prints; the debug
+# build checks that the counts balance at exit, whichever path was taken.
+type Person = struct(name: Str, tags: Array[Str])
+type Tree = Leaf | Node(left: Tree, label: Str, right: Tree)
+type Oops = Oops(why: Str)
+
+fn long(s: Str) -> Str:
+    s + " made long enough to live in a buffer"
+
+fn keep(take xs: Array[Str]) -> Int:
+    len(xs)
+
+fn both(a: Array[Str], take b: Array[Str]) -> Int:
+    len(a) + len(b)
+
+fn build(n: Int) -> Array[Str]:
+    var out: Array[Str] = []
+    for i in 0..n:
+        let s = long(f"item {i}")
+        out.push(s)
+    out
+
+fn pick(flag: Bool) -> Array[Str]:
+    let xs = build(3)
+    if flag:
+        return xs
+    let ys = build(1)
+    ys
+
+fn fails(n: Int) -> Int ! Oops:
+    if n > 1:
+        fail(Oops(long("too many")))
+    n
+
+fn depth(t: Tree) -> Int:
+    match t:
+        Leaf -> 0
+        Node(l, _, r) ->
+            let a = depth(l)
+            let b = depth(r)
+            1 + (if a > b: a else: b)
+
+fn main():
+    # returned, pushed and passed on at the last use
+    let made = build(4)
+    print(f"{len(made)} {made[3]} {len(pick(true))} {len(pick(false))}")
+    let handed = build(2)
+    print(f"{keep(take handed)}")
+
+    # the same variable borrowed and taken in one call keeps its value for the borrow
+    let twice = build(3)
+    print(f"{both(twice, take twice)}")
+
+    # moved on one path only, and in a loop that declares it
+    let maybe = build(2)
+    var total = 0
+    if len(maybe) > 5:
+        total += keep(take maybe)
+    for i in 0..3:
+        let each = build(i + 1)
+        total += keep(take each)
+    print(f"{total}")
+
+    # a variable declared outside a loop is used again on every turn
+    let outer = build(2)
+    var seen = 0
+    for i in 0..3:
+        var copy = outer
+        copy.push(long("more"))
+        seen += len(copy)
+    print(f"{seen} {len(outer)}")
+
+    # moved, then assigned again
+    var slot = build(1)
+    let first = keep(take slot)
+    slot = build(5)
+    print(f"{first} {len(slot)}")
+
+    # lets that name a field or an element of a binding that does not change
+    let people = [Person(long("Ada"), build(2)), Person(long("Grace"), build(3))]
+    var names: Array[Str] = []
+    for i in 0..len(people):
+        let p = people[i]
+        let n = p.name
+        let t = p.tags
+        names.push(n)
+        names.push(t[0])
+    let again = people[1]
+    let stored = again.tags
+    print(f"{names} {len(stored)} {len(people)}")
+
+    # a borrowed let that is consumed, and its source used after
+    let source = build(3)
+    let alias = source
+    print(f"{keep(take alias)} {len(source)} {source[2]}")
+
+    # an error raised after a move, and before one
+    let before = build(1)
+    let r1 = try fails(keep(take before))
+    let after = build(1)
+    let r2 = try fails(len(after) + 5)
+    print(f"{r1.is_ok()} {r2.is_ok()} {len(after)}")
+
+    # boxed data moved into a larger value
+    let left = Node(Leaf, long("l"), Leaf)
+    let right = Node(Leaf, long("r"), Leaf)
+    let top = Node(left, long("top"), right)
+    let taller = Node(top, long("root"), Leaf)
+    print(f"{depth(taller)}")

@@ -25,6 +25,8 @@ type st = {
   instances : (string, unit) Hashtbl.t;
   queue : (string * string * ty list) Queue.t;
   strlits : (string, string) Hashtbl.t;
+  movable : texpr list ref;              (* the last occurrences of owned variables, which may move them (section 9.2) *)
+  pinned : (int, unit) Hashtbl.t;        (* variables something borrows from to the end of their scope: never moved *)
   self_sliced : (int, unit) Hashtbl.t;   (* variables assigned a slice of themselves somewhere *)
   view_vars : (int, unit) Hashtbl.t;     (* variables that hold only views of strings that outlive them *)
   loops : (string, bool) Hashtbl.t;   (* whether a function loops, itself or through a call *)
@@ -809,6 +811,14 @@ let rec expr fc (e : texpr) : r =
         line fc "if (%s->busy) stn_trap(\"shared cell busy\", %s, \"a shared cell was accessed while it was lent out\");" p (loc_args e.l);
         if rc fc v.vty then { c = tmp fc v.vty (dup_expr st (ts fc v.vty) (var_read fc v)); owned = true }
         else { c = var_read fc v; owned = false }
+      end else if moves fc e v then begin
+        (* the last occurrence of an owned variable takes its reference with it (section 9.2): a
+           consuming use then needs no dup, and a read releases the value when its statement ends.
+           The variable is left holding a value that its release at the end of the scope ignores. *)
+        let n = var_read fc v in
+        let m = tmp fc v.vty n in
+        line fc "%s" (moved_out st (ts fc v.vty) n);
+        { c = m; owned = true }
       end else { c = var_read fc v; owned = false }
   | XFnRef (n, tys) -> { c = fn_closure fc n (List.map (ts fc) tys); owned = false }
   | XCall (cl, args, convs) -> call fc e cl args convs
@@ -2570,6 +2580,94 @@ and stable_string_source fc (e : texpr) =
   | XVar v | XIndex ({ e = XVar v; _ }, _) -> immutable v
   | _ -> false
 
+(* Whether this occurrence of v moves it: it is the last one (note_moves), nothing borrows from v
+   to the end of its scope, and v is a plain local that owns a value of a type whose release
+   ignores what moved_out leaves behind. *)
+and moves fc (e : texpr) (v : var) =
+  List.memq e !(fc.st.movable)
+  && not (Hashtbl.mem fc.st.pinned v.vid)
+  && not v.vcell
+  && (match Hashtbl.find_opt fc.vars v.vid with
+      | Some (VDirect n) -> List.exists (fun (f : frame) -> List.exists (fun (o, _) -> o = n) f.owned) fc.frames
+      | _ -> false)
+  && (match repr (ts fc v.vty) with
+      | TStr | TArray _ | TNamed (("Map" | "Set"), _) -> true
+      | TNamed _ as t -> is_data fc.st t && layout fc.st t = LBoxed
+      | _ -> false)
+
+(* what a moved variable is left holding: an empty string, or a pointer that stn_drop ignores *)
+and moved_out st t n =
+  match repr t with
+  | TStr -> Printf.sprintf "%s = (StnStr){ .w0 = 0, .w1 = 0 };" n
+  | _ -> Printf.sprintf "%s = (%s)(void*)1;" n (cty st t)
+
+(* Finds the occurrences that may move a variable (section 9.2). An occurrence qualifies when it
+   is the last of its variable in the order of evaluation, the only one in its statement (an
+   earlier one in the same statement may still be borrowed when this one is reached), and not in
+   a loop or closure that the variable was declared outside of. Variables that a slice, an alias,
+   a match or a loop borrows from are pinned: they keep their value to the end of their scope. *)
+and note_moves st (owned_params : var list) (body : texpr) =
+  let next = ref 0 in
+  let fresh () = incr next; !next in
+  let occs : (int, (texpr option * int * int) list) Hashtbl.t = Hashtbl.create 32 in
+  let decl : (int, int) Hashtbl.t = Hashtbl.create 32 in
+  let use (v : var) node stmt ctx =
+    Hashtbl.replace occs v.vid ((node, stmt, ctx) :: (try Hashtbl.find occs v.vid with Not_found -> [])) in
+  let rec root (e : texpr) =
+    match e.e with
+    | XVar v -> Some v
+    | XField (b, _, _) | XTupleGet (b, _) | XIndex (b, _) | XSlice (b, _, _) -> root b
+    | _ -> None in
+  let pin e = match root e with Some v -> Hashtbl.replace st.pinned v.vid () | None -> () in
+  let rec we stmt ctx (e : texpr) =
+    let w = we stmt ctx in
+    match e.e with
+    | XVar v -> use v (Some e) stmt ctx
+    | XLit _ | XNone | XFnRef _ -> ()
+    | XFStr es | XTuple es | XArray es | XStruct (_, _, es) | XVariant (_, _, _, es) -> List.iter w es
+    | XCall (cl, args, _) -> (match cl with CClosure f -> w f | _ -> ()); List.iter (fun a -> w a.a) args
+    | XField (b, _, _) | XTupleGet (b, _) | XNeg b | XNot b | XTry b | XConv b | XFail b | XPack b -> w b
+    | XIndex (a, b) | XBin (_, a, b) -> w a; w b
+    | XSlice (a, b, c) -> pin a; w a; w b; w c
+    | XIf (a, b, c) -> w a; w b; w c
+    | XBlock (ss, v) -> List.iter (ws ctx) ss; we (fresh ()) ctx v
+    | XMatch (s, arms) -> pin s; w s; List.iter (fun a -> Option.iter w a.guard; w a.body) arms
+    | XLambda lam -> we stmt (fresh ()) lam.lbody
+    | XComp (b, cs) ->
+        let inner = fresh () in
+        List.iter (fun cp ->
+            (match cp.csrc with IRange (a, b) -> we stmt inner a; we stmt inner b | IArray (a, _) -> pin a; we stmt inner a);
+            Option.iter (we stmt inner) cp.ccond) cs;
+        we stmt inner b
+  and ws ctx (s : tstmt) =
+    let stmt = fresh () in
+    let w = we stmt ctx in
+    match s.st with
+    | SLet (p, e) -> pin e; w e; (match p with TPVar v -> Hashtbl.replace decl v.vid ctx | _ -> ())
+    | SVar (v, e) -> pin e; w e; Hashtbl.replace decl v.vid ctx
+    | SExpr e | SReturn e | SAssert (e, _) | SAssertFails (_, e) | SCheck e -> w e
+    | SLend e -> pin e; w e
+    | SAssign (p, e) ->
+        Option.iter w p.via;
+        List.iter (function PIndex i -> w i | _ -> ()) p.path;
+        w e;
+        (* a write into the variable uses it; a write of the whole variable does not *)
+        if p.path <> [] || p.via <> None then use p.root None stmt ctx
+    | SBreak | SContinue -> ()
+    | SWhile (c, b) -> let inner = fresh () in we stmt inner c; we stmt inner b
+    | SFor (_, it, b) ->
+        (match it with IRange (a, b) -> w a; w b | IArray (a, _) -> pin a; w a);
+        we stmt (fresh ()) b
+    | SLocalFn (_, lam) -> we stmt (fresh ()) lam.lbody
+  in
+  List.iter (fun (v : var) -> Hashtbl.replace decl v.vid 0) owned_params;
+  we (fresh ()) 0 body;
+  Hashtbl.iter (fun vid ctx ->
+      match Hashtbl.find_opt occs vid with
+      | Some ((Some node, stmt, c) :: rest) when c = ctx && not (List.exists (fun (_, s, _) -> s = stmt) rest) ->
+          st.movable := node :: !(st.movable)
+      | _ -> ()) decl
+
 (* The variables of a body whose every assignment is a slice of themselves, `v = v[a..b]` with
    bounds that write nothing, and which are never passed as mut: candidates to be kept as views. *)
 and note_self_sliced st (body : texpr) =
@@ -2602,6 +2700,23 @@ and binds_view fc (v : var) (e : texpr) =
   (* bounds that may assign make the slice a copy of a held string, not a view (see XSlice) *)
   | TStr, XSlice (a, lo, hi) when not v.vcell -> view_source fc a && writes_nothing lo && writes_nothing hi
   | _ -> false
+
+(* A let that only names a binding that cannot change, or a field or element of one, borrows it
+   (section 9.1): the binding it names is pinned, so it keeps the value alive to the end of a
+   scope that encloses this one, and the let neither counts nor releases it. A use that consumes
+   the let duplicates it then, as for any borrowed variable. *)
+and borrows_stable fc (v : var) (e : texpr) =
+  let immutable (w : var) =
+    match Hashtbl.find_opt fc.vars w.vid with
+    | Some (VDirect _ | VPtr _) -> not w.vmut && w.vkind <> VParam MMut && not w.vcell
+    | _ -> false in
+  let rec stable (x : texpr) =
+    match x.e with
+    | XVar w -> immutable w
+    | XField (b, _, _) | XTupleGet (b, _) -> stable b
+    | XIndex (a, i) -> stable a && writes_nothing i
+    | _ -> false in
+  not v.vcell && not v.vcaptured && rc fc e.ty && stable e
 
 and borrows_array_string fc (v : var) (e : texpr) =
   match repr (ts fc e.ty), e.e with
@@ -2651,6 +2766,14 @@ and stmt fc (s : tstmt) =
             line fc "StnStr const* %s = %s;" n addr;
             Hashtbl.replace fc.vars v.vid (VPtr n)
         | _ -> declare_var ~owned:false fc v (tmp fc e.ty c));
+       fc.frames <- { fk = FStmt; owned = [] } :: fc.frames
+   | SLet (TPVar v, e) when borrows_stable fc v e && not (borrows_array_string fc v e) ->
+       let x = expr fc e in
+       let init = tmp fc e.ty (if x.owned then x.c else x.c) in
+       let f = List.hd fc.frames in
+       fc.frames <- List.tl fc.frames;
+       emit_drops fc f;
+       declare_var ~owned:x.owned fc v init;
        fc.frames <- { fk = FStmt; owned = [] } :: fc.frames
    | SLet (TPVar v, e) when binds_view fc v e ->
        (* the view is the variable: it is not counted, and it cannot outlive what it views *)
@@ -3285,6 +3408,8 @@ let compile_instance st cname uname tys =
      spectral-norm benchmark ran 2.1 times as long) *)
   let is_main = match st.prog.main with Some m -> m = uname | None -> false in
   note_self_sliced st tf.fbody;
+  st.movable := [];
+  note_moves st (List.filter_map (fun (v, m, _) -> if m = MTake then Some v else None) params) tf.fbody;
   pr b "%s%s {\n" (if is_main then "" else "STN_HOT ") header;
   (* the entry main calls this through, if it loops: the same parameters, hot, never inlined *)
   if not (is_main || lend) then begin
@@ -3384,7 +3509,7 @@ let emit (prog : tprog) ~debug : string =
     prog; fwd = Buffer.create 1024; typedefs = Buffer.create 4096; boxed_bodies = Buffer.create 1024;
     protos = Buffer.create 4096; helpers = Buffer.create 4096; funcs = Buffer.create 16384;
     defined = Hashtbl.create 64; pending_boxed = Queue.create (); instances = Hashtbl.create 64;
-    queue = Queue.create (); strlits = Hashtbl.create 64; self_sliced = Hashtbl.create 16; view_vars = Hashtbl.create 16; loops = Hashtbl.create 64; in_main = ref false; entries = Hashtbl.create 8; entry_defs = Hashtbl.create 32; errtypes = Hashtbl.create 8;
+    queue = Queue.create (); strlits = Hashtbl.create 64; movable = ref []; pinned = Hashtbl.create 32; self_sliced = Hashtbl.create 16; view_vars = Hashtbl.create 16; loops = Hashtbl.create 64; in_main = ref false; entries = Hashtbl.create 8; entry_defs = Hashtbl.create 32; errtypes = Hashtbl.create 8;
     layouts = Hashtbl.create 64; debug; counter = 0 }
   in
   let main_u = match prog.main with Some m -> m | None -> raise (Unsupported ("no main function", Syntax.noloc)) in
