@@ -1,0 +1,8 @@
+# expect: E0602 4:5
+type List = Nil | Cons(head: Int, tail: List)
+inplace fn push_front(take xs: List, x: Int) -> List:
+    Cons(x, xs)
+fn main() ! io:
+    match push_front(Nil, 1):
+        Cons(x, _) -> print(f"{x}")
+        Nil -> print("none")

@@ -378,6 +378,7 @@ type fsig = {
   mutable seff : eff;
   sdeclared : bool;            (* effects were written in the signature *)
   sexport : bool;
+  smods : string list;         (* inplace, noalloc and the other words before fn (section 9.6) *)
   slend : bool option;         (* Some false: -> lend T; Some true: -> lend mut T (4.6) *)
   sloc : loc;
   smodule : string;

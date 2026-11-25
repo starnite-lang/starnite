@@ -164,6 +164,7 @@ let () =
   in
   try
     let user, imported, prog = front_end file in
+    (match cmd with "check" | "test" -> Cgen.check prog | "run" when !interp -> Cgen.check prog | _ -> ());
     match cmd with
     | "check" -> ()
     | "run" when !interp -> run_interp prog

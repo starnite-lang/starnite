@@ -1,0 +1,93 @@
+# `noalloc fn` and `inplace fn` (section 9.6). Each function here passes its check: the noalloc
+# ones never reach an allocation, and the inplace ones build every cell out of one they took
+# apart, raise no count, and call themselves only as a turn of a loop. What the checks refuse is
+# in tests/errors/E06*.stn.
+type List = Nil | Cons(head: Int, tail: List)
+type Point = struct(x: Int, y: Int)
+
+trait Step:
+    fn step(p: Self) -> Self
+
+impl Step for Point:
+    noalloc fn step(p: Point) -> Point:
+        Point(p.x + 1, p.y + 1)
+
+inplace fn bump(take xs: List, by: Int) -> List:
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) -> Cons(x + by, bump(take rest, by))
+
+# the last use of rest in each branch moves it: neither branch raises its count
+inplace fn keep_even(take xs: List) -> List:
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) ->
+            if x % 2 == 0:
+                Cons(x, keep_even(take rest))
+            else:
+                keep_even(take rest)
+
+# an inplace function may call another
+inplace fn bump_evens(take xs: List, by: Int) -> List:
+    bump(keep_even(take xs), by)
+
+noalloc fn total(xs: Array[Int]) -> Int:
+    var t = 0
+    for x in xs:
+        t = t + x
+    t
+
+noalloc fn length(xs: List) -> Int:
+    match xs:
+        Nil -> 0
+        Cons(_, rest) -> 1 + length(rest)
+
+# a slice of a string is a view of it
+noalloc fn first_word(s: Str) -> Int:
+    var i = 0
+    while i < len(s) and s[i..i + 1] != " ":
+        i = i + 1
+    i
+
+noalloc fn shift(p: Point, by: Int) -> Point:
+    Point(p.x + by, p.y + by)
+
+noalloc fn longest(names: Array[Str]) -> Int:
+    var best = 0
+    for n in names:
+        if len(n) > best:
+            best = len(n)
+    best
+
+# releasing is not allocating
+noalloc fn drop_all(take xs: List) -> Int:
+    match xs:
+        Nil -> 0
+        Cons(x, rest) -> x + drop_all(take rest)
+
+# checked in each form the program uses
+noalloc fn pick[T](a: T, b: T, first: Bool) -> T:
+    if first:
+        a
+    else:
+        b
+
+noalloc fn size(mut xs: Array[Int]) -> Int:
+    len(xs)
+
+fn sum(xs: List) -> Int:
+    match xs:
+        Nil -> 0
+        Cons(x, rest) -> x + sum(rest)
+
+fn main() ! io:
+    let l = keep_even(bump(Cons(1, Cons(2, Cons(3, Nil))), 1))
+    print(f"{sum(l)} {length(l)} {total([1, 2, 3])} {first_word("hello world")}")
+    let p = shift(Point(1, 2), 3).step()
+    print(f"{p.x} {p.y} {longest(["a", "bcd"])}")
+    # an inplace function is still right when what it is given is shared: it copies then
+    let kept = Cons(4, Cons(5, Cons(6, Nil)))
+    let other = bump_evens(kept, 10)
+    print(f"{sum(kept)} {sum(other)} {drop_all(other)}")
+    var a = [1, 2]
+    print(f"{pick(1, 2, true)} {pick(1.5, 2.5, false)} {size(mut a)}")

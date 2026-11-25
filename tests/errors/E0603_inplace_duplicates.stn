@@ -1,0 +1,14 @@
+# expect: E0603 6:26
+type List = Nil | Cons(head: Int, tail: List)
+inplace fn both(take xs: List) -> List:
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) -> Cons(x + sum(rest), both(take rest))
+fn sum(xs: List) -> Int:
+    match xs:
+        Nil -> 0
+        Cons(x, rest) -> x + sum(rest)
+fn main() ! io:
+    match both(Cons(1, Nil)):
+        Cons(x, _) -> print(f"{x}")
+        Nil -> print("none")

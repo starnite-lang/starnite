@@ -56,6 +56,12 @@ text=$("$starnite" check "$deep" 2>&1 | head -1)
 if [ "$got" = E0100 ] && [ "$text" = 'error[E0100]: the program is nested too deeply to be compiled' ]; then pass=$((pass + 1))
 else note "FAIL a program nested too deeply: json code '$got', text '$text'"; fail=$((fail + 1)); fi
 
+# The checks of noalloc and inplace functions (section 9.6, compiler/verify.ml) take any name in
+# generated C that they do not know to allocate. STN_VERIFY_NAMES lists such names: there must be
+# none in the code of the corpus, or a function would be refused for an allocation it does not make.
+unlisted=$(for f in "$here"/run/*.stn; do STN_VERIFY_NAMES=1 "$starnite" emit-c "$f" 2>&1 >/dev/null | grep '^unlisted: '; done | sort -u)
+if [ -z "$unlisted" ]; then pass=$((pass + 1)); else note "FAIL names the checks of section 9.6 do not know:"; note "$unlisted"; fail=$((fail + 1)); fi
+
 # test blocks, including rejection tests (section 20.2)
 for f in "$here"/unit/*.stn; do
     if (cd "$root" && "$starnite" test "${f#"$root/"}") > "$tmp/unit" 2>&1; then pass=$((pass + 1))
