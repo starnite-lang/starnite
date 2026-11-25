@@ -120,7 +120,7 @@ char* stn_str_start(StnStr* s, int64_t len) {
     if (len <= STN_STR_INLINE_MAX) {
         s->w0 = 0;
         s->w1 = (uint64_t)len << 56;
-        return (char*)s;
+        return (char*)s + STN_STR_INLINE_AT;
     }
     StnStrBuf* b = (StnStrBuf*)stn_alloc(sizeof(StnStrBuf) + (size_t)len + 1);
     b->len = len;
@@ -146,7 +146,7 @@ StnStr stn_str_new_heap(const char* data, int64_t len) {
     return s;
 }
 
-#if defined(__SIZEOF_INT128__)
+#if defined(__SIZEOF_INT128__) && defined(STN_STR_WORDS)
 /* A 128-bit integer is an extension; __extension__ keeps a strict ISO build (-pedantic-errors)
    accepting it, as both GCC and Clang allow. */
 __extension__ typedef unsigned __int128 stn_u128;
@@ -156,7 +156,7 @@ static inline stn_u128 stn_str_bits(const StnStr* s) {
 }
 #endif
 
-#if defined(__SIZEOF_INT128__)
+#if defined(__SIZEOF_INT128__) && defined(STN_STR_WORDS)
 /* Both parts are inline: shift and combine their words. Kept out of line, so the registers it
    needs are not saved on every call that builds a buffer. */
 static __attribute__((noinline)) StnStr stn_str_concat_small(const StnStr* a, const StnStr* b, int64_t an, int64_t bn) {
@@ -187,7 +187,7 @@ StnStr stn_str_concat(const StnStr* a, const StnStr* b) {
     const char* ad = stn_str_span(a, &an);
     const char* bd = stn_str_span(b, &bn);
     StnStr s;
-#if defined(__SIZEOF_INT128__)
+#if defined(__SIZEOF_INT128__) && defined(STN_STR_WORDS)
     if (an + bn <= STN_STR_INLINE_MAX) return stn_str_concat_small(a, b, an, bn);
 #endif
     char* d = stn_str_start(&s, an + bn);
@@ -200,7 +200,7 @@ StnStr stn_str_concat_n(int n, StnStr* parts) {
     int64_t total = 0;
     for (int i = 0; i < n; i++) total += stn_str_len(parts[i]);
     StnStr s;
-#if defined(__SIZEOF_INT128__)
+#if defined(__SIZEOF_INT128__) && defined(STN_STR_WORDS)
     if (total <= STN_STR_INLINE_MAX) return stn_str_concat_n_small(n, parts, total);
 #endif
     char* d = stn_str_start(&s, total);

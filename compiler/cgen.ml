@@ -431,7 +431,17 @@ let str_lit st s =
           done;
           !w
         in
-        pr st.helpers "#define %s ((StnStr){ .w0 = UINT64_C(0x%016Lx), .w1 = UINT64_C(0x%016Lx) })\n" n (word 0 8) (word 8 16)
+        (* and for a big-endian target, where the length is the first byte and the bytes follow it *)
+        let big lo hi =
+          let w = ref 0L in
+          for i = lo to hi - 1 do
+            let b = if i = 0 then len else if i - 1 < len then Char.code s.[i - 1] else 0 in
+            w := Int64.logor (Int64.shift_left !w 8) (Int64.of_int b)
+          done;
+          !w
+        in
+        pr st.helpers "#define %s STN_STR_SHORT(UINT64_C(0x%016Lx), UINT64_C(0x%016Lx), UINT64_C(0x%016Lx), UINT64_C(0x%016Lx))\n"
+          n (word 0 8) (word 8 16) (big 0 8) (big 8 16)
       end else begin
         pr st.helpers "static struct { stn_header h; int64_t len; char data[%d]; } %s_obj = { { 1, 0, STN_NOCOUNT, 0 }, %d, %s };\n"
           (len + 1) n len (c_string s);

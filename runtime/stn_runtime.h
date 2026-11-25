@@ -67,15 +67,34 @@ _Noreturn void stn_div_zero(const char* file, int line, int col);
    length in the last byte. A longer one points to a counted buffer and holds its length, with the
    top bit of the second word set. The form follows from the length alone, so two equal strings
    have the same form, and two inline strings are equal exactly when their words are. */
-#if !defined(__BYTE_ORDER__) || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
-#error "the Str layout assumes a little-endian target"
-#endif
 typedef struct StnStrBuf { stn_header h; int64_t len; char data[]; } StnStrBuf;
 /* The first word of a string in a buffer is the address of its bytes: of the data of a buffer it
    counts, or, for a view, of bytes inside another string. Only a string that counts its buffer
    has one to find, with stn_str_buf. */
+/* The length of an inline string, and the bits that mark the other forms, are in the top byte of
+   w1, and the inline bytes are the other fifteen bytes of the value, in order. On a little-endian
+   target that byte is the last of the value, so w0 comes first and the bytes start at the value's
+   address. On a big-endian one it is the first byte of w1, so w1 comes first and the bytes start
+   one byte in. */
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 typedef struct StnStr { union { const char* ptr; uint64_t w0; }; uint64_t w1; } StnStr;
+#  define STN_STR_INLINE_AT 0
+#  define STN_STR_SHORT(le_w0, le_w1, be_w1, be_w0) ((StnStr){ .w0 = (le_w0), .w1 = (le_w1) })
+/* Paths that read or build an inline string as two little-endian words. STN_STR_PORTABLE turns
+   them off, leaving the byte-wise paths every other target uses, so that those can be tested here. */
+#  ifndef STN_STR_PORTABLE
+#    define STN_STR_WORDS 1
+#  endif
+#elif defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+typedef struct StnStr { uint64_t w1; union { const char* ptr; uint64_t w0; }; } StnStr;
+#  define STN_STR_INLINE_AT 1
+#  define STN_STR_SHORT(le_w0, le_w1, be_w1, be_w0) ((StnStr){ .w1 = (be_w1), .w0 = (be_w0) })
+#else
+#  error "the Str layout needs to know the byte order of the target"
+#endif
 #define STN_STR_INLINE_MAX 15
+_Static_assert(sizeof(StnStr) == 16, "a Str is sixteen bytes");
+_Static_assert(offsetof(StnStr, w1) == (STN_STR_INLINE_AT ? 0 : 8), "the byte that holds an inline length is at the far end from the inline bytes");
 #define STN_STR_HEAP_BIT (UINT64_C(1) << 63)
 /* A view: a string in a buffer it does not count, the bytes of a string that outlives it (a slice
    of a binding that cannot change, section 3.6). Its ptr is its first byte, wherever in the other
@@ -95,14 +114,14 @@ static inline __attribute__((always_inline)) int64_t stn_str_len(StnStr s) {
 /* The bytes of a string; for an inline one they live in the value itself, so the pointer is good
    only while *s is. */
 static inline __attribute__((always_inline)) const char* stn_str_ptr(const StnStr* s) {
-    return stn_str_heap(*s) ? s->ptr : (const char*)s;
+    return stn_str_heap(*s) ? s->ptr : (const char*)s + STN_STR_INLINE_AT;
 }
 /* The bytes and the length of a string together, its form checked once. */
 static inline __attribute__((always_inline)) const char* stn_str_span(const StnStr* s, int64_t* n) {
     uint64_t w1 = s->w1;
     if (w1 >> 63) { *n = (int64_t)(w1 & STN_STR_LEN_MASK); return s->ptr; }
     *n = (int64_t)(w1 >> 56);
-    return (const char*)s;
+    return (const char*)s + STN_STR_INLINE_AT;
 }
 void   stn_str_release(void* p);
 StnStr stn_str_new_heap(const char* data, int64_t len);
@@ -134,6 +153,12 @@ char*  stn_str_start(StnStr* s, int64_t len);
    source: writing the bytes to memory and reading the words back would stall the processor. */
 static inline __attribute__((always_inline)) StnStr stn_str_small(const char* d, int64_t len) {
     StnStr s;
+#ifndef STN_STR_WORDS
+    s.w0 = 0;
+    s.w1 = (uint64_t)len << 56;
+    if (len) memcpy((char*)&s + STN_STR_INLINE_AT, d, (size_t)len);
+    return s;
+#else
     uint64_t w0 = 0, w1 = 0;
     if (len >= 8) {
         memcpy(&w0, d, 8);
@@ -151,6 +176,7 @@ static inline __attribute__((always_inline)) StnStr stn_str_small(const char* d,
     s.w0 = w0;
     s.w1 = w1 | ((uint64_t)len << 56);
     return s;
+#endif
 }
 static inline StnStr stn_str_new(const char* data, int64_t len) {
     return len <= STN_STR_INLINE_MAX ? stn_str_small(data, len) : stn_str_new_heap(data, len);
@@ -368,7 +394,7 @@ StnStr  stn_str_join(StnArray* xs, StnStr sep);
 StnStr  stn_str_trim(const StnStr* s);
 uint8_t stn_str_contains_slow(const StnStr* s, const StnStr* sub);
 static inline uint8_t stn_str_contains(const StnStr* s, const StnStr* sub) {
-#if defined(__SSE2__)
+#if defined(__SSE2__) && defined(STN_STR_WORDS)
     /* A four-byte needle can be verified without a memcmp call. Scan a final overlapping vector
        so both loads stay inside the string. The lengths settle the forms: the needle is inline,
        its bytes in its first word, and the string is in a buffer, so each is one comparison. */
@@ -399,6 +425,7 @@ static inline uint8_t stn_str_contains(const StnStr* s, const StnStr* sub) {
 #endif
     return stn_str_contains_slow(s, sub);
 }
+#ifdef STN_STR_WORDS
 /* The first eight bytes of a string as a little-endian word, zero past its end; a string in a
    buffer has at least sixteen. Read from the words of an inline string, not through its address. */
 static inline __attribute__((always_inline)) uint64_t stn_str_head8(const StnStr* s) {
@@ -423,6 +450,25 @@ static inline __attribute__((always_inline)) uint8_t stn_str_ends8(const StnStr*
         return (stn_load_u64(s->ptr + (s->w1 & STN_STR_LEN_MASK) - 8) >> (64 - 8 * n)) == lit;
     return (s->w1 >> 56) >= n && (stn_str_tail8(s) >> (64 - 8 * n)) == lit;
 }
+#else
+/* The same two tests a byte at a time: the literal's bytes are in its word from the low end up. */
+static inline uint8_t stn_str_lit_at(const char* d, unsigned n, uint64_t lit) {
+    for (unsigned i = 0; i < n; i++)
+        if ((unsigned char)d[i] != (unsigned char)(lit >> (8 * i))) return 0;
+    return 1;
+}
+static inline uint8_t stn_str_starts8(const StnStr* s, unsigned n, uint64_t mask, uint64_t lit) {
+    (void)mask;
+    int64_t len;
+    const char* d = stn_str_span(s, &len);
+    return (uint64_t)len >= n && stn_str_lit_at(d, n, lit);
+}
+static inline uint8_t stn_str_ends8(const StnStr* s, unsigned n, uint64_t lit) {
+    int64_t len;
+    const char* d = stn_str_span(s, &len);
+    return (uint64_t)len >= n && stn_str_lit_at(d + len - n, n, lit);
+}
+#endif
 static inline uint8_t stn_str_starts_with(const StnStr* s, const StnStr* p) {
     int64_t n = stn_str_len(*p);
     return n <= stn_str_len(*s) && memcmp(stn_str_ptr(s), stn_str_ptr(p), (size_t)n) == 0;
@@ -529,7 +575,13 @@ uint64_t stn_hash_bytes(const void* p, size_t n);
    zero and its last byte is its length, which are what the last block of SipHash holds */
 uint64_t stn_hash_inline(uint64_t w0, uint64_t w1);
 static inline uint64_t stn_str_hash(StnStr s) {
+#ifdef STN_STR_WORDS
     return stn_str_heap(s) ? stn_hash_bytes(s.ptr, (size_t)(s.w1 & STN_STR_LEN_MASK)) : stn_hash_inline(s.w0, s.w1);
+#else
+    int64_t n;
+    const char* d = stn_str_span(&s, &n);
+    return stn_hash_bytes(d, (size_t)n);
+#endif
 }
 /* equal floats hash alike: -0.0 is 0.0 */
 static inline uint64_t stn_hash_f64(double x) { uint64_t b; if (x == 0) x = 0; memcpy(&b, &x, 8); return stn_hash_u64(b); }
