@@ -21,7 +21,7 @@ type fn_record = {
   mods : string list;
   floc : loc;
   text : string;                         (* the whole definition *)
-  marks : (int * loc * string) list;     (* where the code of each expression starts, ascending *)
+  marks : (int * loc * string * bool) list;   (* where the code of each expression starts, ascending, and whether a loop of the program is around it *)
   excused : (int * int) list;            (* the paths taken when a `take` argument is shared *)
   stray : loc option;                    (* a call of itself that is not a tail or constructor-tail call *)
 }
@@ -285,7 +285,7 @@ let run ~(records : fn_record list) ~(names : (string * string) list) ~(text : s
     | Some (Direct (_, r)) -> reason r
     | _ -> "it can allocate" in
   let mark_at (r : fn_record) off =
-    List.fold_left (fun best (o, l, d) -> if o <= off then (l, d) else best) (r.floc, "this function") r.marks in
+    List.fold_left (fun best (o, l, d, _) -> if o <= off then (l, d) else best) (r.floc, "this function") r.marks in
   let excused (r : fn_record) off = List.exists (fun (lo, hi) -> off >= lo && off < hi) r.excused in
   let errors = ref [] in
   let report code (l : loc) msg = errors := (code, l, msg) :: !errors in
@@ -336,3 +336,54 @@ let run ~(records : fn_record list) ~(names : (string * string) list) ~(text : s
   match List.sort (fun (_, (a : loc), _) (_, (b : loc), _) -> compare (a.file, a.line, a.col) (b.file, b.line, b.col)) !errors with
   | (code, l, msg) :: _ -> raise (Error (code, l, msg))
   | [] -> ()
+
+(* ---------- reporting copies (section 9.8) ---------- *)
+
+(* the generated functions that raise a count for whoever calls them: dup_List and the like *)
+let dup_helpers (helpers : string) : string list =
+  let defs = Hashtbl.create 64 in
+  List.iter (fun (nm, lo, hi) -> Hashtbl.replace defs nm (lo, hi)) (definitions helpers);
+  let found = Hashtbl.create 16 in
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    Hashtbl.iter (fun nm (lo, hi) ->
+        if not (Hashtbl.mem found nm) then begin
+          let hit = ref false in
+          tokens helpers lo hi (fun _ tok -> match tok with
+              | Call n when List.mem n dups || Hashtbl.mem found n -> hit := true
+              | _ -> ());
+          if !hit then (Hashtbl.replace found nm (); changed := true)
+        end) defs
+  done;
+  List.sort compare (Hashtbl.fold (fun nm () acc -> nm :: acc) found [])
+
+(* What --explain-copies lists: each write that copies its array, map or set first when something
+   else holds it (section 4.5), and each count raised inside a loop of the program. One line per place and kind, in the order of the program. *)
+let explain ~(records : fn_record list) ~(text : string) : (loc * string) list =
+  let helpers = dup_helpers text in
+  let out = ref [] in
+  let array_writes = [ "stn_array_make_unique"; "stn_array_copy_for_write"; "STN_POP"; "STN_PUSH"; "stn_array_push"; "stn_array_extend";
+                       "stn_array_insert"; "stn_array_remove"; "stn_array_clear"; "stn_array_sort_i64"; "stn_array_reverse_i64" ] in
+  let map_writes = [ "stn_map_make_unique_for_write"; "stn_map_put"; "stn_map_slot"; "stn_map_slot_ref"; "stn_map_remove"; "stn_map_clear" ] in
+  List.iter (fun (r : fn_record) ->
+      match definitions r.text with
+      | (_, lo, hi) :: _ ->
+          tokens r.text lo hi (fun off tok ->
+              let l, what, in_loop =
+                List.fold_left (fun best (o, l, d, lp) -> if o <= off then (l, d, lp) else best) (r.floc, "this function", false) r.marks in
+              let say msg = out := (l, Printf.sprintf "in '%s', %s %s" r.display what msg) :: !out in
+              match tok with
+              (* an array being built is held by nothing else yet *)
+              | Call n when List.mem n array_writes ->
+                  if what <> "this array literal" && what <> "this comprehension" then
+                    say "writes to an array, which is copied first if anything else holds it"
+              | Call n when List.mem n map_writes -> say "writes to a map or set, which is copied first if anything else holds it"
+              (* outside a loop a string kept is one count, like any other; --profile-copies says
+                 when one was a view and had to be copied *)
+              | Call ("stn_str_dup" | "STN_STR_DUP") ->
+                  if in_loop then say "keeps a string in a loop: its count is raised each time, and it is copied if it is a view of another"
+              | Call n when in_loop && (List.mem n dups || List.mem n helpers) -> say "raises a count in a loop"
+              | _ -> ())
+      | [] -> ()) records;
+  List.sort_uniq (fun ((a : loc), x) ((b : loc), y) -> compare (a.file, a.line, a.col, x) (b.file, b.line, b.col, y)) !out

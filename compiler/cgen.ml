@@ -40,7 +40,9 @@ type st = {
   (* for the checks of noalloc and inplace functions (section 9.6, verify.ml) *)
   marking : bool ref;                    (* the function being generated is one of them *)
   cur : (Syntax.loc * string) ref;       (* the expression whose code is being written *)
-  marks : (Buffer.t * int * Syntax.loc * string) list ref;   (* where the code of each expression starts *)
+  marks : (Buffer.t * int * Syntax.loc * string * bool) list ref;   (* where the code of each expression starts, and whether a loop of the program is around it *)
+  explain : bool;                        (* --explain-copies: every function is recorded *)
+  profile : bool;                        (* --profile-copies: generated code says which statement it is in *)
   excused : (Buffer.t * int * int) list ref;   (* code that runs only when a take argument is shared *)
   records : Verify.fn_record list ref;
   names : (string * string) list ref;    (* every function generated, and its name in the program *)
@@ -521,7 +523,14 @@ type fc = {
 
 type r = { c : string; owned : bool }
 
-let line fc fmt = Printf.ksprintf (fun s -> Buffer.add_string fc.b (String.make (2 * fc.ind) ' '); Buffer.add_string fc.b s; Buffer.add_char fc.b '\n') fmt
+let line fc fmt =
+  Printf.ksprintf (fun s ->
+      (* a profiled build gives each line of C the line of the statement it came from, which is
+         how a count of copies finds its place in the program *)
+      (if fc.st.profile then
+         let (l : Syntax.loc), _ = !(fc.st.cur) in
+         if l.line > 0 then Printf.bprintf fc.b "#line %d %s\n" l.line (c_string l.file));
+      Buffer.add_string fc.b (String.make (2 * fc.ind) ' '); Buffer.add_string fc.b s; Buffer.add_char fc.b '\n') fmt
 
 let ts fc t = subst fc.sub t
 let ct fc t = cty fc.st (ts fc t)
@@ -813,7 +822,7 @@ let note fc (at : Syntax.loc * string) =
   let st = fc.st in
   if !(st.marking) then begin
     st.cur := at;
-    st.marks := (fc.b, Buffer.length fc.b, fst at, snd at) :: !(st.marks)
+    st.marks := (fc.b, Buffer.length fc.b, fst at, snd at, List.exists (fun (f : frame) -> f.fk = FLoop) fc.frames) :: !(st.marks)
   end
 
 (* what an expression is, in an error about the code it became *)
@@ -3750,13 +3759,13 @@ let compile_instance st cname uname tys =
      the C compiler loses what the restrict parameters of the functions it inlines said (the
      spectral-norm benchmark ran 2.1 times as long) *)
   let is_main = match st.prog.main with Some m -> m = uname | None -> false in
-  st.marking := sg.smods <> [];
+  st.marking := sg.smods <> [] || st.explain || st.profile;
   st.marks := []; st.excused := [];
   st.cur := (sg.sloc, "this function");
   (* what verify.ml reads of a noalloc or inplace function, once its code is written *)
   let record () =
-    if sg.smods <> [] then begin
-      let mine l = List.filter_map (fun (b', a, x, y) -> if b' == b then Some (a, x, y) else None) l in
+    if sg.smods <> [] || st.explain then begin
+      let mine l = List.filter_map (fun (b', a, x, y, z) -> if b' == b then Some (a, x, y, z) else None) l in
       (* a function with type parameters is checked in each form the program uses, and named so *)
       let display = if tys = [] then sg.sdisplay else Printf.sprintf "%s[%s]" sg.sdisplay (String.concat ", " (List.map show_ty tys)) in
       st.records := { Verify.cname; display; mods = sg.smods; floc = sg.sloc; text = Buffer.contents b;
@@ -3890,13 +3899,13 @@ let verify_text st =
   Buffer.contents st.helpers ^ Buffer.contents st.funcs
   ^ String.concat "" (Hashtbl.fold (fun name _ acc -> match Hashtbl.find_opt st.entry_defs name with Some (_, def) -> def :: acc | None -> acc) st.entries [])
 
-let rec emit ?(check_only = false) (prog : tprog) ~debug : string =
+let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~debug : string =
   let st = {
     prog; fwd = Buffer.create 1024; typedefs = Buffer.create 4096; boxed_bodies = Buffer.create 1024;
     protos = Buffer.create 4096; helpers = Buffer.create 4096; funcs = Buffer.create 16384;
     defined = Hashtbl.create 64; pending_boxed = Queue.create (); instances = Hashtbl.create 64;
     queue = Queue.create (); strlits = Hashtbl.create 64; dps = ref None; reuse = ref []; movable = ref []; pinned = Hashtbl.create 32; self_sliced = Hashtbl.create 16; view_vars = Hashtbl.create 16; loops = Hashtbl.create 64; in_main = ref false; entries = Hashtbl.create 8; entry_defs = Hashtbl.create 32; errtypes = Hashtbl.create 8;
-    layouts = Hashtbl.create 64; marking = ref false; cur = ref (Syntax.noloc, ""); marks = ref []; excused = ref []; records = ref []; names = ref [];
+    layouts = Hashtbl.create 64; marking = ref false; cur = ref (Syntax.noloc, ""); marks = ref []; excused = ref []; records = ref []; names = ref []; explain = explain <> None; profile;
     debug; counter = 0 }
   in
   let main_u = match prog.main with
@@ -3916,6 +3925,7 @@ let rec emit ?(check_only = false) (prog : tprog) ~debug : string =
       end in
     drain ();
     Verify.run ~records:!(st.records) ~names:!(st.names) ~text:(verify_text st);
+    Option.iter (fun out -> out := Verify.explain ~records:!(st.records) ~text:(verify_text st)) explain;
     raise Exit
   end;
   let main_sg = (Hashtbl.find prog.fns main_u).fsig in
@@ -3940,9 +3950,11 @@ let rec emit ?(check_only = false) (prog : tprog) ~debug : string =
   flush_boxed st;
   ignore show_err;
   Verify.run ~records:!(st.records) ~names:!(st.names) ~text:(verify_text st);
+  Option.iter (fun out -> out := Verify.explain ~records:!(st.records) ~text:(verify_text st)) explain;
   let out = Buffer.create 65536 in
   pr out "/* Generated by the Starnite compiler. */\n";
   if debug then pr out "#define STN_DEBUG 1\n";
+  if profile then pr out "#ifndef STN_PROFILE_COPIES\n#define STN_PROFILE_COPIES 1\n#endif\n";
   pr out "#include <stdint.h>\n#include <stdio.h>\n#include <math.h>\n#include \"stn_runtime.h\"\n\n";
   Buffer.add_buffer out st.fwd;
   Buffer.add_buffer out st.typedefs;
@@ -3956,6 +3968,18 @@ let rec emit ?(check_only = false) (prog : tprog) ~debug : string =
   pr out "\n";
   Buffer.add_buffer out st.helpers;
   pr out "\n";
+  if profile then begin
+    (* From here on, whatever can copy a shared value or raise a count first names the line it is
+       on. The helpers above are left alone: they work for the statement that called them. *)
+    let at name = pr out "#define %s(...) (stn_profile_at(__FILE__, __LINE__), %s(__VA_ARGS__))\n" name name in
+    List.iter at [ "stn_array_make_unique"; "stn_array_copy_for_write"; "stn_array_push_slow"; "stn_array_reserve"; "stn_array_extend";
+                   "stn_array_insert"; "stn_array_remove"; "stn_array_clear"; "stn_array_sort_i64"; "stn_array_reverse_i64";
+                   "stn_map_make_unique_for_write"; "stn_map_put"; "stn_map_slot"; "stn_map_slot_ref"; "stn_map_remove"; "stn_map_clear" ];
+    let count name = pr out "#define %s(...) (stn_profile_at(__FILE__, __LINE__), stn_profile_event(STN_PROFILE_DUP), %s(__VA_ARGS__))\n" name name in
+    List.iter count ([ "stn_dup"; "stn_error_dup" ] @ Verify.dup_helpers (Buffer.contents st.helpers));
+    (* keeping a string raises a count, or copies it when it is a view, which the runtime reports *)
+    pr out "#define stn_str_dup(...) (stn_profile_at(__FILE__, __LINE__), stn_profile_event(STN_PROFILE_DUP), stn_str_dup(__VA_ARGS__))\n"
+  end;
   Buffer.add_buffer out st.funcs;
   Hashtbl.iter (fun name _ ->
       match Hashtbl.find_opt st.entry_defs name with
@@ -3974,6 +3998,6 @@ let rec emit ?(check_only = false) (prog : tprog) ~debug : string =
 
 (* The checks of section 9.6 alone, for the commands that write no C. A program the C backend
    does not cover yet is left unchecked. *)
-and check (prog : tprog) : unit =
-  if Hashtbl.fold (fun _ (f : tfn) acc -> acc || f.fsig.smods <> []) prog.fns false then
-    try ignore (emit ~check_only:true prog ~debug:true) with Exit | Unsupported _ -> ()
+and check ?explain (prog : tprog) : unit =
+  if explain <> None || Hashtbl.fold (fun _ (f : tfn) acc -> acc || f.fsig.smods <> []) prog.fns false then
+    try ignore (emit ~check_only:true ?explain prog ~debug:true) with Exit | Unsupported _ -> ()

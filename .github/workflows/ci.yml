@@ -43,6 +43,9 @@ jobs:
       - name: Constant stack
         # a million-element list through functions that must run as loops (tests/deep.sh)
         run: tests/deep.sh
+      - name: Reporting copies
+        # --explain-copies and --profile-copies on a program that copies (tests/copies.sh)
+        run: tests/copies.sh
 
   portable:
     name: portable (byte-wise and big-endian)

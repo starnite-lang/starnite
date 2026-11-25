@@ -1,0 +1,36 @@
+# Reporting copies (section 9.8). tests/copies.sh checks what --explain-copies lists for this
+# program against copies.explain, and what a build with --profile-copies counts when it runs
+# against copies.profile. The array handed to set_first is still held by main, so each write copies
+# it; the map is held twice when it is written; bump is given a list main goes on holding.
+type List = Nil | Cons(head: Int, tail: List)
+
+fn bump(take xs: List, by: Int) -> List:
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) -> Cons(x + by, bump(take rest, by))
+
+fn set_first(take xs: Array[Int], v: Int) -> Array[Int]:
+    var out = xs
+    out[0] = v
+    out
+
+fn main() ! io:
+    let base = [1, 2, 3]
+    var total = 0
+    var names: Array[Str] = []
+    let line = "alpha beta gamma delta epsilon zeta"
+    for i in 0..5:
+        let changed = set_first(base, i)
+        total = total + changed[0]
+        names.push(line[0..5 + i])
+    var counts: Map[Str, Int] = {}
+    let snapshot = counts
+    counts["a"] = 1
+    let l = Cons(1, Cons(2, Nil))
+    let m = bump(l, 1)
+    match l:
+        Cons(x, _) -> print(f"{x} {total} {len(names)} {len(snapshot)}")
+        Nil -> print("none")
+    match m:
+        Cons(x, _) -> print(f"{x}")
+        Nil -> print("none")

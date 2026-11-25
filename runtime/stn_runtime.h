@@ -57,6 +57,15 @@ static inline void stn_drop(void* p, void (*release)(void*)) {
         release(p);
 }
 
+/* ---- counters of --profile-copies (section 9.8) ---- */
+/* Generated code names the statement it is in before anything that can copy or raise a count;
+   the runtime reports what then happens there. Compiled in only for a profiled build. */
+#ifdef STN_PROFILE_COPIES
+enum { STN_PROFILE_ARRAY, STN_PROFILE_MAP, STN_PROFILE_VIEW, STN_PROFILE_DUP };
+void stn_profile_at(const char* file, int line);
+void stn_profile_event(int kind);
+#endif
+
 static inline int stn_unique(void* p) {
     return ((stn_header*)p)->flags == 0 && ((stn_header*)p)->rc == 1;
 }
@@ -134,8 +143,12 @@ void   stn_str_release(void* p);
 StnStr stn_str_new_heap(const char* data, int64_t len);
 static inline __attribute__((always_inline)) StnStr stn_str_dup(StnStr s) {
     if (stn_str_heap(s)) {
-        if (__builtin_expect((s.w1 & STN_STR_VIEW_BIT) != 0, 0))
+        if (__builtin_expect((s.w1 & STN_STR_VIEW_BIT) != 0, 0)) {
+#ifdef STN_PROFILE_COPIES
+            stn_profile_event(STN_PROFILE_VIEW);
+#endif
             return stn_str_new_heap(s.ptr, (int64_t)(s.w1 & STN_STR_LEN_MASK));
+        }
         stn_dup(stn_str_buf(s));
     }
     return s;
