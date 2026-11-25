@@ -25,6 +25,7 @@ type st = {
   instances : (string, unit) Hashtbl.t;
   queue : (string * string * ty list) Queue.t;
   strlits : (string, string) Hashtbl.t;
+  dps : (string * Buffer.t) option ref;   (* the destination of the function being generated as a loop (section 9.5), and its code *)
   reuse : (string * string * Buffer.t) list ref;   (* cells a match took apart, free for a constructor of the same type: C name, type, and the function's code, which a closure inside it does not share *)
   movable : texpr list ref;              (* the last occurrences of owned variables, which may move them (section 9.2) *)
   pinned : (int, unit) Hashtbl.t;        (* variables something borrows from to the end of their scope: never moved *)
@@ -340,17 +341,30 @@ and emit_helpers st t =
         pr st.helpers "static inline %s dup_%s(%s x) { switch (x.tag) { %s default: break; } return x; }\n" c m c (arms (dup_stmt st));
         pr st.helpers "static inline void drop_%s(%s x) { switch (x.tag) { %s default: break; } }\n" m c (arms (drop_stmt st))
     | TNamed _ ->
-        (* boxed: one release function per type (section 11.2) *)
+        (* boxed: one release function per type (section 11.2). The last field of each variant
+           that holds a value of this same type is not released by a call: the function goes
+           round again on it, so a long list is freed in constant stack (section 9.7). Fields
+           before it are released by calls, so a tree still uses stack for its other branches. *)
         pr st.protos "static void release_%s(void* p);\n" m;
         let arms =
           String.concat " "
             (List.map
                (fun ((v : variant_info), fs) ->
-                 let body = String.concat " " (List.mapi (fun i (_, t) -> if needs_rc st t then drop_stmt st t (Printf.sprintf "x->u.%s.f%d" (c_ident v.vname_) i) else "") fs) in
+                 let last_self =
+                   List.fold_left (fun acc (i, (_, ft)) -> if repr ft = repr t || mangle ft = m then Some i else acc) None
+                     (List.mapi (fun i f -> (i, f)) fs) in
+                 let body =
+                   String.concat " "
+                     (List.mapi (fun i (_, ft) ->
+                          let f = Printf.sprintf "x->u.%s.f%d" (c_ident v.vname_) i in
+                          if Some i = last_self then Printf.sprintf "next = %s;" f
+                          else if needs_rc st ft then drop_stmt st ft f else "") fs) in
                  if body = "" then "" else Printf.sprintf "case %d: %s break;" v.vindex body)
                (variants st t))
         in
-        pr st.helpers "static void release_%s(void* p) { %s x = (%s)p; switch (x->h.tag) { %s default: break; } stn_free(p); }\n" m c c arms;
+        pr st.helpers
+          "static void release_%s(void* p) { for (;;) { %s x = (%s)p; %s next = NULL; switch (x->h.tag) { %s default: break; } stn_free(p); if (next == NULL || ((uintptr_t)next & 1)) return; stn_header* h = (stn_header*)next; if (h->flags != 0) { stn_drop(next, release_%s); return; } STN_CHECK_HEADER(next); if (--h->rc != 0) return; p = next; } }\n"
+          m c c c arms m;
         pr st.helpers "static inline %s dup_%s(%s x) { stn_dup(x); return x; }\n" c m c;
         pr st.helpers "static inline void drop_%s(%s x) { stn_drop(x, release_%s); }\n" m c m
     | _ -> ()
@@ -1777,8 +1791,135 @@ and bind_pattern fc binds =
       Hashtbl.replace fc.vars var.vid (VDirect n))
     binds
 
-and match_ fc t (s : texpr) arms : r =
+(* Destination passing (section 9.5). A call of a function to itself whose result goes straight
+   into a field of a constructor that the function then returns is in constructor-tail position.
+   The function is generated as a loop: the constructor is built with that field empty and stored
+   where the previous turn left a destination, the destination becomes the empty field, and the
+   parameters take the call's arguments. Stack use is then constant. [dps_field] says which field
+   of a constructor holds such a call, when the call can be turned into a turn of the loop: a
+   take parameter takes any argument, and any other parameter must be passed on as it is, unless
+   it holds nothing counted. *)
+and dps_self fc cname (params : (var * mode * ty) list) (x : texpr) : bool =
   let st = fc.st in
+  match x.e with
+  | XCall (CFn (u, tys), args, []) when inst_name u (List.map (ts fc) tys) = cname && List.length args = List.length params ->
+      List.for_all2 (fun ((v : var), m, t) (a : targ) ->
+          match m with
+          | MTake -> a.amode = MTake
+          | MMut -> false
+          | MBorrow -> not (needs_rc st t) || (match a.a.e with XVar w -> w.vid = v.vid | _ -> false))
+        params args
+  | _ -> false
+
+(* the parameters' next values, from the arguments of a call that becomes a turn of the loop *)
+and dps_next fc (params : (var * mode * ty) list) (call : texpr) : (string * string) list =
+  let st = fc.st in
+  match call.e with
+  | XCall (_, args, _) ->
+      List.concat
+        (List.map2 (fun ((v : var), m, pt) (a : targ) ->
+             match m with
+             | MTake -> [ (var_name v, tmp fc pt (own fc (expr fc a.a) a.a.ty)) ]
+             | MBorrow when not (needs_rc st pt) -> [ (var_name v, tmp fc pt (expr fc a.a).c) ]
+             | _ -> [])
+           params args)
+  | _ -> []
+
+and dps_field fc cname (params : (var * mode * ty) list) (e : texpr) : int option =
+  let st = fc.st in
+  match e.e with
+  | XVariant (_, _, _, es) when is_data st (ts fc e.ty) && layout st (ts fc e.ty) = LBoxed ->
+      let self = dps_self fc cname params in
+      let hits = List.filteri (fun _ x -> self x) es in
+      (match hits with
+       | [ call ] ->
+           let k = ref (-1) in
+           List.iteri (fun j x -> if x == call then k := j) es;
+           (* nothing may run between the call and the constructor: what follows it is a name or a literal *)
+           let rest_plain = List.for_all (fun (x : texpr) -> match x.e with XVar _ | XLit _ -> true | _ -> false)
+               (List.filteri (fun j _ -> j > !k) es) in
+           if rest_plain then Some !k else None
+       | _ -> None)
+  | _ -> None
+
+(* whether a body returns a constructor with such a call from a tail position *)
+and dps_body fc cname params (e : texpr) : bool =
+  match e.e with
+  | XBlock (_, v) -> dps_body fc cname params v
+  | XIf (_, a, b) -> dps_body fc cname params a || dps_body fc cname params b
+  | XMatch (_, arms) -> List.exists (fun a -> dps_body fc cname params a.body) arms
+  | _ -> dps_field fc cname params e <> None
+
+(* generates e, in tail position of a function that is a loop: every path stores the value at the
+   destination and returns, or stores a constructor with an empty field and goes round again *)
+and dps_tail fc cname params dst (e : texpr) : unit =
+  let st = fc.st in
+  let again = dps_tail fc cname params dst in
+  match e.e with
+  | XBlock (ss, v) ->
+      line fc "{";
+      fc.ind <- fc.ind + 1;
+      push fc FScope;
+      List.iter (stmt fc) ss;
+      again v;
+      pop fc;
+      fc.ind <- fc.ind - 1;
+      line fc "}"
+  | XIf (c, a, b) ->
+      let cv = cond fc c in
+      line fc "if (%s) {" cv;
+      fc.ind <- fc.ind + 1;
+      again a;
+      fc.ind <- fc.ind - 1;
+      line fc "} else {";
+      fc.ind <- fc.ind + 1;
+      again b;
+      fc.ind <- fc.ind - 1;
+      line fc "}"
+  | XMatch (s, arms) -> ignore (match_ ~tail:again fc e.ty s arms)
+  | XVariant (_, _, i, es) when dps_field fc cname params e <> None ->
+      let k = Option.get (dps_field fc cname params e) in
+      let t = ts fc e.ty in
+      push fc FStmt;
+      let next = ref [] in
+      let vals =
+        List.mapi (fun j (x : texpr) ->
+            if j <> k then tmp fc x.ty (own fc (expr fc x) x.ty)
+            else begin
+              (* the call's arguments, in its place among the fields; the field itself stays empty *)
+              next := dps_next fc params x;
+              Printf.sprintf "(%s)(uintptr_t)1" (cty st t)
+            end) es in
+      let cell = construct fc t i vals in
+      let vinfo, _ = List.nth (variants st t) i in
+      line fc "*%s = %s;" dst cell.c;
+      line fc "%s = &%s;" dst (variant_field st t vinfo k cell.c);
+      drop_until fc (fun _ -> false);
+      List.iter (fun (p, v) -> line fc "%s = %s;" p v) !next;
+      line fc "continue;";
+      pop fc
+  | XCall _ when dps_self fc cname params e ->
+      (* a call of the function to itself in tail position is another turn, to the same destination *)
+      push fc FStmt;
+      let next = dps_next fc params e in
+      drop_until fc (fun _ -> false);
+      List.iter (fun (p, v) -> line fc "%s = %s;" p v) next;
+      line fc "continue;";
+      pop fc
+  | _ ->
+      push fc FStmt;
+      let x = expr fc e in
+      if repr (ts fc e.ty) <> TNever then begin
+        let rv = tmp fc fc.ret (own fc x e.ty) in
+        line fc "*%s = %s;" dst rv
+      end;
+      drop_until fc (fun _ -> false);
+      line fc "return _res;";
+      pop fc
+
+and match_ ?tail fc t (s : texpr) arms : r =
+  let st = fc.st in
+  let t = if tail <> None then TUnit else t in
   (* The arms bind borrowed views into the scrutinee, so it must outlive the match even
      when an arm overwrites the place it was read from: hold a reference of our own. *)
   let sv = tmp fc s.ty (own fc (expr fc s) s.ty) in
@@ -1832,7 +1973,9 @@ and match_ fc t (s : texpr) arms : r =
                  | _ -> ()) fs;
              st.reuse := (tok, mangle sty, fc.b) :: saved
          | None -> ());
-        if has_value then assign_into fc res arm.body t else discard fc arm.body;
+        (match tail with
+         | Some emit -> emit arm.body   (* which leaves the function, or goes round its loop *)
+         | None -> if has_value then assign_into fc res arm.body t else discard fc arm.body);
         pop fc;
         st.reuse := saved;
         line fc "goto %s;" endl
@@ -2959,7 +3102,9 @@ and stmt fc (s : tstmt) =
        let v = if repr (ts fc e.ty) = TNever then "0" else own fc x e.ty in
        let rv = tmp fc fc.ret v in
        drop_until fc (fun _ -> false);
-       if fc.can_fail then (line fc "*_out = %s;" rv; line fc "return 0;") else line fc "return %s;" rv
+       (match !(st.dps) with
+        | Some (dst, b) when b == fc.b -> line fc "*%s = %s;" dst rv; line fc "return _res;"
+        | _ -> if fc.can_fail then (line fc "*_out = %s;" rv; line fc "return 0;") else line fc "return %s;" rv)
    | SBreak ->
        drop_until fc (fun f -> f.fk = FLoop);
        line fc "break;"
@@ -3545,6 +3690,22 @@ let compile_instance st cname uname tys =
     line fc "stn_trap(\"unreachable\", __FILE__, __LINE__, 0, \"a lend function ended without lend\");";
     pr b "}\n\n";
     Buffer.add_buffer st.funcs b
+  end else if (not can_fail) && List.for_all (fun ((v : var), m, _) -> m <> MMut && not v.vcell) params
+            && dps_body fc cname params tf.fbody then begin
+    (* a function that returns a constructor holding a call of itself runs as a loop (section 9.5) *)
+    line fc "%s _res;" (cty st ret);
+    line fc "%s* _dst = &_res;" (cty st ret);
+    st.dps := Some ("_dst", fc.b);
+    line fc "for (;;) {";
+    fc.ind <- fc.ind + 1;
+    dps_tail fc cname params "_dst" tf.fbody;
+    fc.ind <- fc.ind - 1;
+    line fc "}";
+    st.dps := None;
+    fc.frames <- [];
+    pr b "}\n\n";
+    st.in_main := false;
+    Buffer.add_buffer st.funcs b
   end else begin
   push fc FStmt;
   let x = expr fc tf.fbody in
@@ -3597,7 +3758,7 @@ let emit (prog : tprog) ~debug : string =
     prog; fwd = Buffer.create 1024; typedefs = Buffer.create 4096; boxed_bodies = Buffer.create 1024;
     protos = Buffer.create 4096; helpers = Buffer.create 4096; funcs = Buffer.create 16384;
     defined = Hashtbl.create 64; pending_boxed = Queue.create (); instances = Hashtbl.create 64;
-    queue = Queue.create (); strlits = Hashtbl.create 64; reuse = ref []; movable = ref []; pinned = Hashtbl.create 32; self_sliced = Hashtbl.create 16; view_vars = Hashtbl.create 16; loops = Hashtbl.create 64; in_main = ref false; entries = Hashtbl.create 8; entry_defs = Hashtbl.create 32; errtypes = Hashtbl.create 8;
+    queue = Queue.create (); strlits = Hashtbl.create 64; dps = ref None; reuse = ref []; movable = ref []; pinned = Hashtbl.create 32; self_sliced = Hashtbl.create 16; view_vars = Hashtbl.create 16; loops = Hashtbl.create 64; in_main = ref false; entries = Hashtbl.create 8; entry_defs = Hashtbl.create 32; errtypes = Hashtbl.create 8;
     layouts = Hashtbl.create 64; debug; counter = 0 }
   in
   let main_u = match prog.main with Some m -> m | None -> raise (Unsupported ("no main function", Syntax.noloc)) in

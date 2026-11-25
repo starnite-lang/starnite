@@ -39,6 +39,11 @@ static inline void stn_dup(void* p) {
 }
 
 void stn_check_header(void* p);
+#ifdef STN_DEBUG
+#  define STN_CHECK_HEADER(p) stn_check_header(p)
+#else
+#  define STN_CHECK_HEADER(p) ((void)0)
+#endif
 
 static inline void stn_drop(void* p, void (*release)(void*)) {
     if ((uintptr_t)p & 1) return;

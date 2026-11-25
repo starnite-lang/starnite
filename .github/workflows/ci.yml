@@ -40,6 +40,9 @@ jobs:
         # builds, golden error codes, test blocks with rejection tests, and the
         # fuzzer's own checks (tests/fuzz/selftest.sh)
         run: tests/run.sh
+      - name: Constant stack
+        # a million-element list through functions that must run as loops (tests/deep.sh)
+        run: tests/deep.sh
 
   portable:
     name: portable (byte-wise and big-endian)
