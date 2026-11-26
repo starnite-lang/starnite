@@ -1,0 +1,11 @@
+# expect: E0611 2:1
+fn stash_lend(mut grid: unique Array[Array[Int]], mut saved: Array[Array[Int]]) -> lend Int:
+    saved.push(grid[0])
+    lend grid[0][0]
+
+fn main() ! io:
+    var grid = [[1]]
+    var saved: Array[Array[Int]] = []
+    let n = stash_lend(mut grid, mut saved)
+    grid[0][0] = 9
+    print(f"{n} {saved[0][0]}")

@@ -2915,6 +2915,10 @@ let make_sig tb ~modname ~uname (fd : Syntax.fn_def) (extra_tps : (string * (str
     fd.fparams suniq;
   let sruniq = match fd.fret with Some t -> fst (strip t) | None -> false in
   let ret = match fd.fret with Some t -> conv_ty tb names self (snd (strip t)) | None -> TUnit in
+  (* a lend function hands back a place inside its argument: what unique would promise of its
+     parameters is not checked there, so it is not said *)
+  if fd.fret_lend <> None && (sruniq || List.mem true suniq) then
+    err "E0611" fd.floc "'unique' is not allowed on a function that returns 'lend': what it lends is a place inside its argument, and uniqueness is not followed through one yet";
   let declared, eff =
     match fd.feffects with
     | Some es -> (true, conv_effects tb names self es)
