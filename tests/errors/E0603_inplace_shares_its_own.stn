@@ -1,0 +1,23 @@
+# expect: E0603 15:9
+type List = Nil | Cons(head: Int, tail: List)
+
+noalloc fn same(x: List) -> List:
+    x
+
+noalloc fn head(x: List) -> Int:
+    match x:
+        Nil -> 0
+        Cons(h, _) -> h
+
+inplace fn bump(take xs: List) -> List:
+    match same(xs):
+        Nil -> Nil
+        Cons(x, rest) -> Cons(x + 1 + head(xs) - head(xs), rest)
+
+fn main():
+    var l = Cons(0, Nil)
+    for i in 0..100000:
+        l = bump(take l)
+    match l:
+        Nil -> print("nil")
+        Cons(x, _) -> print(f"{x}")

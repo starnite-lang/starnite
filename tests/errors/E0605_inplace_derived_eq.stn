@@ -1,0 +1,15 @@
+# expect: E0605 10:21
+type K = struct(a: Int)
+type W = struct(k: K, n: Int)
+impl Eq for K:
+    fn eq(a: K, b: K) -> Bool:
+        depth(a.a - 1) == depth(b.a - 1)
+inplace fn depth(n: Int) -> Int:
+    if n <= 0:
+        0
+    elif W(K(n), 1) == W(K(n), 1):
+        1
+    else:
+        2
+fn main():
+    print(f"{depth(3)}")

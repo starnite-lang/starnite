@@ -1,0 +1,12 @@
+# expect: E0231 2:1
+fn grow[T](x: T, n: Int) -> Int:
+    if n == 0:
+        0
+    else:
+        1 + grow(fn(y: Int): x, n - 1)
+
+fn main():
+    print(f"{grow(1, 3)}")
+
+noalloc fn one() -> Int:
+    1

@@ -1,0 +1,16 @@
+# expect: E0605 7:31
+type RL = RNil | Snoc(init: RL, last: Int)
+
+inplace fn inc(take xs: RL) -> RL:
+    match xs:
+        RNil -> RNil
+        Snoc(rest, x) -> Snoc(inc(rest), x + 1)
+
+fn main():
+    var l = RNil
+    for i in 0..1000000:
+        l = Snoc(l, i)
+    l = inc(take l)
+    match l:
+        RNil -> print("nil")
+        Snoc(_, x) -> print(f"{x}")
