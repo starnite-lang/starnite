@@ -2718,20 +2718,23 @@ and called st (sub : (string * ty) list) (x : texpr) : (string * ty list) list =
    whatever other impls of the trait there are, and `a[Other]` calling `a[Plain]` is a call of
    another function. However many instances a program has, the walk sees each once. Only a
    program whose instances never stop, each calling one with a larger type, has no end to walk
-   to: an instance whose type arguments nest deeper than any written type would is taken to
-   reach the target. *)
+   to. That is growth along the walk, not depth: an instance is taken to reach the target when
+   its type arguments nest 64 deeper than those the walk started from, which only such a program
+   gets to. A type written deep in the program is where a walk starts, and is no evidence. *)
 and reaches st ((from, from_tys) : string * ty list) (target : string) : bool =
   let seen = Hashtbl.create 16 in
   let rec depth (t : ty) = match repr t with
     | TArray e -> 1 + depth e
     | TTuple ts | TNamed (_, ts) -> 1 + List.fold_left (fun m x -> max m (depth x)) 0 ts
     | _ -> 0 in
+  let deepest tys = List.fold_left (fun m t -> max m (depth t)) 0 tys in
+  let limit = deepest from_tys + 64 in
   let rec go (u, tys) =
     let key = inst_name u tys in
     (not (Hashtbl.mem seen key))
     && begin
       Hashtbl.replace seen key ();
-      List.exists (fun t -> depth t > 64) tys
+      deepest tys > limit
       ||
       match Hashtbl.find_opt st.prog.fns u with
       | None -> false

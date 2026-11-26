@@ -74,6 +74,14 @@ impl Counted for Outer:
 inplace fn stepped[T: Counted](c: T) -> Int:
     1 + c.count()
 
+# A type written seventy deep is only a type: the call below is one call, and comes back to
+# nothing.
+fn scalar[T](n: Int) -> Int:
+    n
+
+inplace fn deep_type(n: Int) -> Int:
+    1 + scalar[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Int]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]](n)
+
 noalloc fn total(xs: Array[Int]) -> Int:
     var t = 0
     for x in xs:
@@ -133,6 +141,6 @@ fn main() ! io:
     let other = bump_evens(kept, 10)
     print(f"{sum(kept)} {sum(other)} {drop_all(other)}")
     print(f"{sum(first_or_next(Cons(5, Nil), true))} {sum(first_or_next(Cons(5, Nil), false))}")
-    print(f"{plain_plus_one(3)} {stepped(Outer(3))}")
+    print(f"{plain_plus_one(3)} {stepped(Outer(3))} {deep_type(3)}")
     var a = [1, 2]
     print(f"{pick(1, 2, true)} {pick(1.5, 2.5, false)} {size(mut a)}")
