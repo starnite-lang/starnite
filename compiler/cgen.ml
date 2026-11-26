@@ -870,12 +870,12 @@ let describe (e : texpr) =
   | XFail _ -> "this fail"
   | _ -> "this expression"
 
-(* The first call that can come back to the function, of itself or of a function that calls it in
-   turn, that is neither in tail position nor the one field of a constructor in tail position
+(* The first call that can come back to the function instance, of itself with the same type
+   arguments or of a function that calls it in turn, that is neither in tail position nor the one field of a constructor in tail position
    (rule 5 of section 9.6). A return is a tail position wherever it stands. [returns g] says
    whether g can call the function, directly or through others. *)
-let stray_self_call uname (targets : texpr -> (string * ty list) list) (returns : string * ty list -> bool) (body : texpr) (walk : (texpr -> unit) -> (tstmt -> unit) -> texpr -> unit) =
-  let is_self (x : texpr) = List.exists (fun (u, tys) -> u = uname || returns (u, tys)) (targets x) in
+let stray_self_call (self : string * ty list -> bool) (targets : texpr -> (string * ty list) list) (returns : string * ty list -> bool) (body : texpr) (walk : (texpr -> unit) -> (tstmt -> unit) -> texpr -> unit) =
+  let is_self (x : texpr) = List.exists (fun g -> self g || returns g) (targets x) in
   let tails = ref [] in
   let rec tail (x : texpr) =
     if is_self x then tails := x :: !tails
@@ -2713,18 +2713,25 @@ and called st (sub : (string * ty) list) (x : texpr) : (string * ty list) list =
       | exception _ -> [])
   | _ -> []
 
-(* Whether a function instance can call the function [target], directly or through the instances
+(* Whether a function instance can call the instance [target], directly or through the instances
    it calls. The walk is over instances, as code generation is: `b[Plain]` calls `Plain.step`,
-   whatever other impls of the trait there are. A program whose instances never stop, each
-   calling a larger one, is taken to reach it. *)
+   whatever other impls of the trait there are, and `a[Other]` calling `a[Plain]` is a call of
+   another function. However many instances a program has, the walk sees each once. Only a
+   program whose instances never stop, each calling one with a larger type, has no end to walk
+   to: an instance whose type arguments nest deeper than any written type would is taken to
+   reach the target. *)
 and reaches st ((from, from_tys) : string * ty list) (target : string) : bool =
   let seen = Hashtbl.create 16 in
+  let rec depth (t : ty) = match repr t with
+    | TArray e -> 1 + depth e
+    | TTuple ts | TNamed (_, ts) -> 1 + List.fold_left (fun m x -> max m (depth x)) 0 ts
+    | _ -> 0 in
   let rec go (u, tys) =
     let key = inst_name u tys in
     (not (Hashtbl.mem seen key))
     && begin
       Hashtbl.replace seen key ();
-      Hashtbl.length seen > 2000
+      List.exists (fun t -> depth t > 64) tys
       ||
       match Hashtbl.find_opt st.prog.fns u with
       | None -> false
@@ -2732,7 +2739,7 @@ and reaches st ((from, from_tys) : string * ty list) (target : string) : bool =
           let sub = try List.combine (List.map fst f.fsig.stparams) tys with Invalid_argument _ -> [] in
           let callees = ref [] in
           walk_texpr (fun (x : texpr) -> callees := called st sub x @ !callees) (fun _ -> ()) f.fbody;
-          List.exists (fun (g, gtys) -> g = target || go (g, gtys)) !callees
+          List.exists (fun (g, gtys) -> inst_name g gtys = target || go (g, gtys)) !callees
     end in
   go (from, from_tys)
 
@@ -3861,7 +3868,7 @@ let compile_instance st cname uname tys =
       st.records := { Verify.cname; display; mods = sg.smods; floc = sg.sloc; text = Buffer.contents b;
                       marks = List.rev (mine !(st.marks));
                       excused = List.filter_map (fun (b', lo, hi) -> if b' == b then Some (lo, hi) else None) !(st.excused);
-                      stray = Option.map (fun (x : texpr) -> x.l) (stray_self_call uname (called st sub) (fun g -> reaches st g uname) tf.fbody walk_texpr) } :: !(st.records)
+                      stray = Option.map (fun (x : texpr) -> x.l) (stray_self_call (fun (g, gtys) -> inst_name g gtys = cname) (called st sub) (fun g -> reaches st g cname) tf.fbody walk_texpr) } :: !(st.records)
     end;
     st.names := (cname, sg.sdisplay) :: !(st.names);
     st.marking := false in
