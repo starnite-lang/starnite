@@ -92,6 +92,13 @@ let rec finite env (within : string list) (t : ty) : bool =
    `type Ring = Link(next: Ring)`, has no values, and is given up on *)
 let nesting = ref 0
 
+(* The data types being given a value at size 0, outermost last. Each chose a variant because its
+   fields could be built without coming back to the types already here; the fields are built under
+   the same condition, so the choices agree all the way down. With `First = More(next: Second) |
+   End(value: Int)` and `Second = Back(next: First) | Stop(value: Int)`, First may choose More
+   because Second has Stop, and Second, built inside First, then has to choose Stop. *)
+let ending : string list ref = ref []
+
 let rec gen env (r : rng) (size : int) (t : ty) : value =
   incr nesting;
   if !nesting > 500 then raise (No_generator t);
@@ -152,14 +159,20 @@ and gen_at env (r : rng) (size : int) (t : ty) : value =
           (* At size 0, a variant that ends: one whose every field has a value that can be built
              without coming back to this type, and of those the one with the fewest fields.
              `Link(next: Chain) | End(value: Int)` ends with End, whichever is written first. *)
-          let ends (v : variant_info) = List.for_all (fun (f : field_info) -> finite env [ n ] (subst s f.fty)) v.vfields in
+          let ends (v : variant_info) = List.for_all (fun (f : field_info) -> finite env (n :: !ending) (subst s f.fty)) v.vfields in
           let shortest = function
             | [] -> None
             | first :: rest -> Some (List.fold_left (fun (best : variant_info) (v : variant_info) -> if List.length v.vfields < List.length best.vfields then v else best) first rest) in
           let fewest = match shortest (List.filter ends vs) with Some v -> v | None -> Option.get (shortest vs) in
           let v = if size <= 0 then fewest else List.nth vs (below r (List.length vs)) in
           let inner = if size <= 0 then 0 else size / 2 in
-          VVariant (v.vindex, Array.of_list (List.map (fun (f : field_info) -> gen env r inner (subst s f.fty)) v.vfields))
+          (* what the fields are given at size 0 must end without this type, as the choice of
+             this variant took for granted *)
+          let saved = !ending in
+          if size <= 0 then ending := n :: saved;
+          let fields = List.map (fun (f : field_info) -> gen env r inner (subst s f.fty)) v.vfields in
+          ending := saved;
+          VVariant (v.vindex, Array.of_list fields)
       | _ -> raise (No_generator t))
   | _ -> raise (No_generator t)
 
@@ -272,6 +285,7 @@ let check env ~(cases : int) ~(seed : int) (params : var list)
         (* by inputs made, not cases run: a where clause that small inputs cannot pass is then given larger ones *)
         let size = min 40 (!made * 40 / max 1 cases) in
         nesting := 0;
+        ending := [];
         let inputs = List.map (fun (v : var) -> gen env r size v.vty) params in
         incr made;
         if valid inputs then begin

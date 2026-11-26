@@ -270,12 +270,14 @@ let front_end ?(docs = false) ?(bench = false) file =
   let imported = Loader.load ~entry:file user in
   (user, imported, Typecheck.check_program pre imported user)
 
-(* where the snapshot of a test is kept: snapshots/<module>/<test>.snap beside the source, and
-   <test>-2.snap for a second assert_snapshot in the same test *)
+(* Where the snapshot of a test is kept: snapshots/<module>/<test>.snap beside the source, and
+   <test>.2.snap for a second assert_snapshot in the same test. A name keeps its letters, digits,
+   hyphens and underscores and nothing else, so it has no dot: the files of one test can never be
+   those of another whose name differs, whichever snapshot of each it is. *)
 let snapshot_path file test nth =
   let safe = String.map (fun ch -> match ch with 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '-' | '_' -> ch | _ -> '_') test in
   let dir = Filename.concat (Filename.concat (Filename.dirname file) "snapshots") (Filename.remove_extension (Filename.basename file)) in
-  (dir, Filename.concat dir (if nth = 1 then safe ^ ".snap" else Printf.sprintf "%s-%d.snap" safe nth))
+  (dir, Filename.concat dir (if nth = 1 then safe ^ ".snap" else Printf.sprintf "%s.%d.snap" safe nth))
 
 let rec mkdirs d = if d <> "" && d <> "." && d <> "/" && not (Sys.file_exists d) then (mkdirs (Filename.dirname d); Unix.mkdir d 0o755)
 

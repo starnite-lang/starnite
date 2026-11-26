@@ -98,6 +98,20 @@ fn depth(f: First) -> Int:
 test "types that hold each other" for f: First:
     assert depth(f) >= 0
 
+# each has a variant that ends, written after the one that goes on: what one type chose because
+# the other can end, the other has to honour
+type Ping = PingOn(next: Pong) | PingEnd(value: Int)
+type Pong = PongOn(next: Ping) | PongEnd(value: Int)
+
+fn rally(p: Ping) -> Int:
+    match p:
+        PingOn(PongOn(next)) -> 2 + rally(next)
+        PingOn(PongEnd(_)) -> 1
+        PingEnd(_) -> 0
+
+test "two types that can both end" for p: Ping:
+    assert rally(p) >= 0
+
 test "a snapshot":
     assert_snapshot [(area(Rect(2, 3)), "rect"), (area(Circle(1)), "circle")]
     assert_snapshot larger(4, 9)

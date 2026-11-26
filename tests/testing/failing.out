@@ -26,6 +26,8 @@ FAIL same (tests/testing/failing.stn:54)
      the snapshot of this test would be kept in tests/testing/snapshots/failing/same.snap, which is where that of the test "same" at line 57 is kept; give one of them another name at tests/testing/failing.stn:55:5
 FAIL same (tests/testing/failing.stn:57)
      the snapshot of this test would be kept in tests/testing/snapshots/failing/same.snap, which is where that of the test "same" at line 54 is kept; give one of them another name at tests/testing/failing.stn:58:5
+ok   sample
+ok   sample-2
 
-0 passed, 10 failed
+2 passed, 10 failed
 exit 1
