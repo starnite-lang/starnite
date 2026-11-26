@@ -68,7 +68,7 @@ let generable env (t : ty) : bool =
   go [] t
 
 (* Whether a type has a value that can be built at size 0 without building one of the declared
-   types in [within] on the way: a number, an empty array, map or set, a struct of such fields,
+   types in [within], each with its type arguments, on the way: a number, an empty array, map or set, a struct of such fields,
    or a data type with a variant of such fields. A data type picks such a variant at size 0, so
    that generation ends, through other declarations too: `type First = More(next: Second) |
    End(value: Int)` with `type Second = Back(next: First)` ends with End. *)
@@ -77,14 +77,19 @@ let rec finite env (within : string list) (t : ty) : bool =
   | TArray _ | TNamed (("Map" | "Set"), _) -> true
   | TTuple ts -> List.for_all (finite env within) ts
   | TNamed (n, args) ->
-      (not (List.mem n within))
+      (* The types on the way are whole types, with their arguments: Layer[Int] inside
+         Layer[Layer[Int]] is another type, and Done(Done(0)) a value. A type whose arguments
+         grow at every step, Nest[Array[T]], is never met twice, so the way is also not followed
+         past a length no written type would need. *)
+      let key = show_ty (repr t) in
+      (not (List.mem key within)) && List.length within < 24
       && (match decl env n with
           | Some { dbody = DStruct fs; dparams; _ } when List.length dparams = List.length args ->
               let s = List.combine dparams args in
-              List.for_all (fun (f : field_info) -> finite env (n :: within) (subst s f.fty)) fs
+              List.for_all (fun (f : field_info) -> finite env (key :: within) (subst s f.fty)) fs
           | Some { dbody = DData vs; dparams; _ } when List.length dparams = List.length args ->
               let s = List.combine dparams args in
-              List.exists (fun (v : variant_info) -> List.for_all (fun (f : field_info) -> finite env (n :: within) (subst s f.fty)) v.vfields) vs
+              List.exists (fun (v : variant_info) -> List.for_all (fun (f : field_info) -> finite env (key :: within) (subst s f.fty)) v.vfields) vs
           | _ -> true)
   | _ -> true
 
@@ -159,7 +164,8 @@ and gen_at env (r : rng) (size : int) (t : ty) : value =
           (* At size 0, a variant that ends: one whose every field has a value that can be built
              without coming back to this type, and of those the one with the fewest fields.
              `Link(next: Chain) | End(value: Int)` ends with End, whichever is written first. *)
-          let ends (v : variant_info) = List.for_all (fun (f : field_info) -> finite env (n :: !ending) (subst s f.fty)) v.vfields in
+          let key = show_ty (repr t) in
+          let ends (v : variant_info) = List.for_all (fun (f : field_info) -> finite env (key :: !ending) (subst s f.fty)) v.vfields in
           let shortest = function
             | [] -> None
             | first :: rest -> Some (List.fold_left (fun (best : variant_info) (v : variant_info) -> if List.length v.vfields < List.length best.vfields then v else best) first rest) in
@@ -169,7 +175,7 @@ and gen_at env (r : rng) (size : int) (t : ty) : value =
           (* what the fields are given at size 0 must end without this type, as the choice of
              this variant took for granted *)
           let saved = !ending in
-          if size <= 0 then ending := n :: saved;
+          if size <= 0 then ending := key :: saved;
           let fields = List.map (fun (f : field_info) -> gen env r inner (subst s f.fty)) v.vfields in
           ending := saved;
           VVariant (v.vindex, Array.of_list fields)

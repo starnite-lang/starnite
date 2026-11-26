@@ -112,6 +112,18 @@ fn rally(p: Ping) -> Int:
 test "two types that can both end" for p: Ping:
     assert rally(p) >= 0
 
+# one declaration inside itself with other arguments: Layer[Int] within Layer[Layer[Int]] is
+# another type, and Done(Done(0)) a value
+type Layer[T] = Again(next: Layer[T]) | Done(value: T)
+
+fn layers[T](l: Layer[T]) -> Int:
+    match l:
+        Again(next) -> 1 + layers(next)
+        Done(_) -> 0
+
+test "a type inside itself" for l: Layer[Layer[Int]]:
+    assert layers(l) >= 0
+
 test "a snapshot":
     assert_snapshot [(area(Rect(2, 3)), "rect"), (area(Circle(1)), "circle")]
     assert_snapshot larger(4, 9)
