@@ -74,6 +74,12 @@ done
 if cmp -s "$tmp/failing" "$here/testing/failing.out"; then pass=$((pass + 1))
 else note "FAIL testing/failing"; diff "$here/testing/failing.out" "$tmp/failing" | head -10; fail=$((fail + 1)); fi
 
+# Two tests whose snapshots would share a file: neither may write it, with --update-snapshots
+# either. The stored copy is another value than both give, and must still be there afterwards.
+cp -r "$here/testing" "$tmp/testing"
+(cd "$tmp" && "$starnite" test --update-snapshots testing/failing.stn) > /dev/null 2>&1
+if [ "$(cat "$tmp/testing/snapshots/failing/same.snap")" = 7 ]; then pass=$((pass + 1)); else note "FAIL a snapshot shared by two tests was overwritten"; fail=$((fail + 1)); fi
+
 # a run of no cases would pass whatever a property says
 if (cd "$root" && "$starnite" test --cases 0 tests/unit/testing_kinds.stn) > "$tmp/cases" 2>&1; then note "FAIL --cases 0 was accepted"; fail=$((fail + 1)); else pass=$((pass + 1)); fi
 

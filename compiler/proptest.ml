@@ -67,6 +67,27 @@ let generable env (t : ty) : bool =
     | _ -> false in
   go [] t
 
+(* Whether a type has a value that can be built at size 0 without building one of the declared
+   types in [within] on the way: a number, an empty array, map or set, a struct of such fields,
+   or a data type with a variant of such fields. A data type picks such a variant at size 0, so
+   that generation ends, through other declarations too: `type First = More(next: Second) |
+   End(value: Int)` with `type Second = Back(next: First)` ends with End. *)
+let rec finite env (within : string list) (t : ty) : bool =
+  match repr t with
+  | TArray _ | TNamed (("Map" | "Set"), _) -> true
+  | TTuple ts -> List.for_all (finite env within) ts
+  | TNamed (n, args) ->
+      (not (List.mem n within))
+      && (match decl env n with
+          | Some { dbody = DStruct fs; dparams; _ } when List.length dparams = List.length args ->
+              let s = List.combine dparams args in
+              List.for_all (fun (f : field_info) -> finite env (n :: within) (subst s f.fty)) fs
+          | Some { dbody = DData vs; dparams; _ } when List.length dparams = List.length args ->
+              let s = List.combine dparams args in
+              List.exists (fun (v : variant_info) -> List.for_all (fun (f : field_info) -> finite env (n :: within) (subst s f.fty)) v.vfields) vs
+          | _ -> true)
+  | _ -> true
+
 (* how deep a value being generated is: a type with no variant that ends, such as
    `type Ring = Link(next: Ring)`, has no values, and is given up on *)
 let nesting = ref 0
@@ -128,15 +149,10 @@ and gen_at env (r : rng) (size : int) (t : ty) : value =
           VStruct (Array.of_list (List.map (fun (f : field_info) -> gen env r size (subst s f.fty)) fs))
       | Some { dbody = DData vs; dparams; _ } ->
           let s = List.combine dparams args in
-          (* At size 0, a variant that ends: one with no field of this type itself, and of those
-             the one with the fewest fields. `Link(next: Chain) | End(value: Int)` ends with End,
-             whichever is written first. An array, a map or a set of this type is no obstacle:
-             at size 0 it is empty. *)
-          let rec holds (u : ty) = match repr u with
-            | TNamed (m, margs) -> m = n || (m <> "Map" && m <> "Set" && List.exists holds margs)
-            | TTuple us -> List.exists holds us
-            | _ -> false in
-          let ends (v : variant_info) = not (List.exists (fun (f : field_info) -> holds (subst s f.fty)) v.vfields) in
+          (* At size 0, a variant that ends: one whose every field has a value that can be built
+             without coming back to this type, and of those the one with the fewest fields.
+             `Link(next: Chain) | End(value: Int)` ends with End, whichever is written first. *)
+          let ends (v : variant_info) = List.for_all (fun (f : field_info) -> finite env [ n ] (subst s f.fty)) v.vfields in
           let shortest = function
             | [] -> None
             | first :: rest -> Some (List.fold_left (fun (best : variant_info) (v : variant_info) -> if List.length v.vfields < List.length best.vfields then v else best) first rest) in

@@ -22,17 +22,25 @@
 
 int64_t stn_live_objects = 0;
 
-/* ---- counters of bench blocks (section 20.3) ---- */
+/* ---- the allocator of C, as the runtime uses it ---- */
+/* Every allocation the runtime makes from here on, of any size and for whatever it is, first
+   takes up releases that a budget put off (section 9.7), and is counted in the counting build
+   of a bench (section 20.3). */
 #ifdef STN_COUNTERS
 uint64_t stn_count_allocs, stn_count_bytes, stn_count_copies, stn_count_ops;
-static void* stn_counted_malloc(size_t n) { stn_count_allocs++; stn_count_bytes += n; return malloc(n); }
-static void* stn_counted_calloc(size_t k, size_t n) { stn_count_allocs++; stn_count_bytes += k * n; return calloc(k, n); }
-static void* stn_counted_realloc(void* p, size_t n) { stn_count_allocs++; stn_count_bytes += n; return realloc(p, n); }
-/* every allocation the runtime makes from here on is counted */
-#define malloc(n) stn_counted_malloc(n)
-#define calloc(k, n) stn_counted_calloc(k, n)
-#define realloc(p, n) stn_counted_realloc(p, n)
+#define STN_COUNT_ALLOC(n) ((void)(stn_count_allocs++, stn_count_bytes += (n)))
+#else
+#define STN_COUNT_ALLOC(n) ((void)0)
 #endif
+static inline void stn_release_resume(void) {
+    if (__builtin_expect(stn_release_pending != 0, 0) && stn_release_depth == 0) stn_release_drain(1);
+}
+static void* stn_sys_malloc(size_t n) { stn_release_resume(); STN_COUNT_ALLOC(n); return malloc(n); }
+static void* stn_sys_calloc(size_t k, size_t n) { stn_release_resume(); STN_COUNT_ALLOC(k * n); return calloc(k, n); }
+static void* stn_sys_realloc(void* p, size_t n) { stn_release_resume(); STN_COUNT_ALLOC(n); return realloc(p, n); }
+#define malloc(n) stn_sys_malloc(n)
+#define calloc(k, n) stn_sys_calloc(k, n)
+#define realloc(p, n) stn_sys_realloc(p, n)
 
 /* ---- allocation (section 11.2) ---- */
 /* Size classes step by 16 bytes up to 1 KiB, with a free list per class. Milestone 1 is
@@ -46,25 +54,25 @@ void* stn_alloc(size_t size) {
     /* compare before rounding up, so a huge size cannot wrap into a small class */
     size_t cls = size <= (size_t)STN_CLASSES * 16 ? (size + 15) / 16 : STN_CLASSES + 1;
     /* a release that STN_FREE_BUDGET stopped goes on here, a budget's worth at a time, whatever
-       the size asked for */
-    if (__builtin_expect(stn_release_pending != 0, 0) && stn_release_depth == 0) stn_release_drain(1);
+       the size asked for; once, so the allocator of C is then called by its own name */
+    stn_release_resume();
     if (cls <= STN_CLASSES) {
         if (cls == 0) cls = 1;
         stn_free_node* n = stn_free_lists[cls];
         if (n) {
             stn_free_lists[cls] = n->next; h = (stn_header*)n;
-#ifdef STN_COUNTERS
             /* a cell taken back from the free list is an allocation all the same */
-            stn_count_allocs++; stn_count_bytes += cls * 16;
-#endif
+            STN_COUNT_ALLOC(cls * 16);
         }
         else {
-            h = (stn_header*)malloc(cls * 16);
+            STN_COUNT_ALLOC(cls * 16);
+            h = (stn_header*)(malloc)(cls * 16);
             if (!h) { fputs("trap: out of memory\n", stderr); exit(2); }
         }
         h->size_class = (uint8_t)cls;
     } else {
-        h = (stn_header*)malloc(size);
+        STN_COUNT_ALLOC(size);
+        h = (stn_header*)(malloc)(size);
         if (!h) { fputs("trap: out of memory\n", stderr); exit(2); }
         h->size_class = 0;
     }
@@ -87,7 +95,8 @@ static size_t stn_pending_cap;
 void stn_release_defer(void* p, void (*release)(void*)) {
     if (stn_release_pending == stn_pending_cap) {
         size_t cap = stn_pending_cap ? stn_pending_cap * 2 : 256;
-        StnPending* grown = (StnPending*)realloc(stn_pending, cap * sizeof *grown);
+        /* by its own name: growing the list must not start taking from it */
+        StnPending* grown = (StnPending*)(realloc)(stn_pending, cap * sizeof *grown);
         /* Without room for the list there is no way on: the release function would only come
            back here. Out of memory is a trap, as it is for any allocation. */
         if (!grown) { fputs("trap: out of memory\n", stderr); exit(2); }

@@ -272,7 +272,19 @@ let run_tests_interp ~cases ~seed ~update file (user : Syntax.file) imported (pr
   let pass = ref 0 and failn = ref 0 in
   (* which test each snapshot file belongs to: two names can differ only in characters that a
      file name does not keep *)
-  let snapshot_owner : (string, string * int) Hashtbl.t = Hashtbl.create 8 in
+  (* Tests that take snapshots and whose first snapshot file is the same: each is failed before
+     it reads or writes anything, so that neither can overwrite the other's stored copy. *)
+  let takes_snapshots (body : Types.texpr) =
+    let found = ref false in
+    Cgen.walk_texpr (fun (x : Types.texpr) -> match x.e with
+        | Types.XCall (Types.CBuiltin ("assert_snapshot_text@Str", _), _, _) -> found := true
+        | _ -> ()) (fun _ -> ()) body;
+    !found in
+  let snapshot_tests = List.filter_map (fun (name, body, (l : loc), _, _) ->
+      if takes_snapshots body then Some (snd (snapshot_path file name 1), name, l.line) else None) prog.tests in
+  let shares_snapshot name line =
+    let path = snd (snapshot_path file name 1) in
+    List.find_opt (fun (p, n, ln) -> p = path && (n, ln) <> (name, line)) snapshot_tests in
   List.iter
     (fun (name, body, (l : loc), inputs, cond) ->
       let env = { Interp.prog; vars = Hashtbl.create 16; sub = [] } in
@@ -286,11 +298,11 @@ let run_tests_interp ~cases ~seed ~update file (user : Syntax.file) imported (pr
       Interp.snapshot := (fun text sl ->
           incr nth;
           let dir, path = snapshot_path file name !nth in
-          (match Hashtbl.find_opt snapshot_owner path with
-           (* a test is the one at its line: two may have the same name *)
-           | Some (other, line) when (other, line) <> (name, l.line) ->
-               raise (Interp.Assert_failed (Printf.sprintf "the snapshot of this test would be kept in %s, which is where that of the test \"%s\" at line %d is kept; give one of them another name" path other line, sl))
-           | _ -> Hashtbl.replace snapshot_owner path (name, l.line));
+          (* a test is the one at its line: two may have the same name *)
+          (match shares_snapshot name l.line with
+           | Some (shared, other, line) ->
+               raise (Interp.Assert_failed (Printf.sprintf "the snapshot of this test would be kept in %s, which is where that of the test \"%s\" at line %d is kept; give one of them another name" shared other line, sl))
+           | None -> ());
           let write () = mkdirs dir; Out_channel.with_open_bin path (fun oc -> output_string oc text; output_char oc '\n') in
           let stored = if Sys.file_exists path then Some (In_channel.with_open_bin path In_channel.input_all) else None in
           match stored with

@@ -46,6 +46,17 @@ int main(void) {
         stn_free(stn_alloc(16));
         if (stn_release_pending != (size_t)i) { printf("after an allocation %zu objects were waiting, not %d\n", stn_release_pending, i); return 1; }
     }
+
+    /* An array that grows in place asks the allocator of C for the room, not stn_alloc: that
+       takes up a release too. */
+    StnArray* growing = stn_array_new(&numbers, 256);
+    void* waiting = stn_alloc(32);
+    released = 0;
+    stn_release_left = 0;
+    stn_release_defer(waiting, release);
+    stn_array_reserve(&growing, 1024);
+    if (released != 1) { printf("after an array grew %d objects were released, not 1\n", released); return 1; }
+    stn_drop(growing, stn_array_release);
     puts("ok");
     return 0;
 }

@@ -207,7 +207,8 @@ let quiet : (string, unit) Hashtbl.t Lazy.t = lazy (
       tokens body 0 (String.length body) (fun _ tok -> match tok with Call n -> acc := n :: !acc | _ -> ());
       Hashtbl.replace calls nm !acc) bodies;
   let alloc = Hashtbl.create 64 in
-  List.iter (fun n -> Hashtbl.replace alloc n ()) [ "malloc"; "calloc"; "realloc"; "aligned_alloc"; "posix_memalign"; "strdup"; "getline"; "fopen" ];
+  List.iter (fun n -> Hashtbl.replace alloc n ()) (* stn_alloc is named outright: it calls the allocator of C by a spelling that is not a call *)
+    [ "malloc"; "calloc"; "realloc"; "aligned_alloc"; "posix_memalign"; "strdup"; "getline"; "fopen"; "stn_alloc" ];
   let changed = ref true in
   while !changed do
     changed := false;

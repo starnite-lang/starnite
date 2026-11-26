@@ -86,6 +86,18 @@ fn steps[T](n: Nest[T]) -> Int:
 test "a type whose arguments grow" for n: Nest[Int]:
     assert steps(n) >= 0
 
+# two types that hold each other: the first ends with Last, which the generator has to find
+type First = More(next: Second) | Last(value: Int)
+type Second = Back(next: First)
+
+fn depth(f: First) -> Int:
+    match f:
+        More(Back(next)) -> 1 + depth(next)
+        Last(_) -> 0
+
+test "types that hold each other" for f: First:
+    assert depth(f) >= 0
+
 test "a snapshot":
     assert_snapshot [(area(Rect(2, 3)), "rect"), (area(Circle(1)), "circle")]
     assert_snapshot larger(4, 9)
