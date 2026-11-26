@@ -128,7 +128,9 @@ let raw_lex (file : string) (src : string) ?(line0 = 1) ?(col0 = 1) () : raw lis
    | Some bad ->
        let line = ref line0 and lstart = ref 0 in
        String.iteri (fun j ch -> if j < bad && ch = '\n' then (incr line; lstart := j + 1)) src;
-       error "E0100" { file; line = !line; col = bad - !lstart + 1 } "the source is not valid UTF-8"
+       (* reported as a line of the file, like every other position (see line_map) *)
+       let line = if line0 = 1 && col0 = 1 && !line < Array.length !line_map then !line_map.(!line) else !line in
+       error "E0100" { file; line; col = bad - !lstart + 1 } "the source is not valid UTF-8"
    | None -> ());
   let n = String.length src in
   let toks = ref [] in

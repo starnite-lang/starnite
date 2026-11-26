@@ -167,9 +167,12 @@ let doc_tests (src : string) : string =
    takes the place of the program's for `starnite bench` and for the budget checks of
    `starnite test`. In any other build the functions are checked like the rest and never run.
 
-   Returns the new text, the line to report for each of its lines, and the body of that main;
-   raises Error on a bench it cannot read. *)
-let bench_blocks file (src : string) : string * int array * string list =
+   The names it makes up start with a prefix that stands nowhere in the file, so none of them
+   can be, or hide, a name of the program.
+
+   Returns the new text, the line to report for each of its lines, the body of that main, and the
+   prefix; raises Error on a bench it cannot read. *)
+let bench_blocks file (src : string) : string * int array * string list * string =
   let lines = Array.of_list (String.split_on_char '\n' src) in
   let n = Array.length lines in
   let calls = ref [] and count = ref 0 in
@@ -180,6 +183,9 @@ let bench_blocks file (src : string) : string * int array * string list =
     let k = String.length sub and len = String.length t in
     let rec go i = if i + k > len then None else if String.sub t i k = sub then Some i else go (i + 1) in
     go from in
+  let prefix =
+    let rec fresh p = if find src p 0 = None then p else fresh (p ^ "_") in
+    fresh "__bench" in
   for i = 0 to n - 1 do
     let line = lines.(i) in
     if starts "bench \"" line then begin
@@ -221,7 +227,7 @@ let bench_blocks file (src : string) : string * int array * string list =
             (* a time differs from machine to machine, and is not held to a budget *)
             (counter ^ op, if counter = "time" then "0" else limit)) budgets) in
       let limits = limits @ List.init (4 - List.length limits) (fun _ -> "0") in
-      let fn = Printf.sprintf "__bench_%d" !count in
+      let fn = Printf.sprintf "%s_%d" prefix !count in
       incr count;
       lines.(i) <- Printf.sprintf "fn %s(%s) ! io:" fn (match var with Some v -> v ^ ": Int" | None -> "");
       (* its measure line, before the next line that starts at the margin *)
@@ -230,9 +236,10 @@ let bench_blocks file (src : string) : string * int array * string list =
         if String.trim lines.(!j) = "measure:" then begin
           let indent = String.sub lines.(!j) 0 (String.index lines.(!j) 'm') in
           lines.(!j) <- String.concat "\n" [
-              Printf.sprintf "%slet (__bench_a, __bench_b, __bench_c, __bench_d) = (%s)" indent (String.concat ", " limits);
-              Printf.sprintf "%sbench_begin(%s, \"%s\", %s, \"%s\", __bench_a, __bench_b, __bench_c, __bench_d)" indent name
-                (match var with Some v -> v | None -> "") (match var with Some v -> v | None -> "0") (String.concat " " spec);
+              Printf.sprintf "%slet (%s_a, %s_b, %s_c, %s_d) = (%s)" indent prefix prefix prefix prefix (String.concat ", " limits);
+              Printf.sprintf "%sbench_begin(%s, \"%s\", %s, \"%s\", %s_a, %s_b, %s_c, %s_d)" indent name
+                (match var with Some v -> v | None -> "") (match var with Some v -> v | None -> "0") (String.concat " " spec)
+                prefix prefix prefix prefix;
               Printf.sprintf "%swhile bench_running():" indent ];
           found := true
         end;
@@ -247,13 +254,13 @@ let bench_blocks file (src : string) : string * int array * string list =
   (* each line of the file is now one line or three: say which line of the file each came from *)
   let map = ref [ 0 ] in
   Array.iteri (fun i l -> List.iter (fun _ -> map := (i + 1) :: !map) (String.split_on_char '\n' l)) lines;
-  (String.concat "\n" (Array.to_list lines), Array.of_list (List.rev !map), List.concat (List.rev !calls))
+  (String.concat "\n" (Array.to_list lines), Array.of_list (List.rev !map), List.concat (List.rev !calls), prefix)
 
 let front_end ?(docs = false) ?(bench = false) file =
   let src = read_file file in
-  let src, line_map, bench_calls = bench_blocks file src in
+  let src, line_map, bench_calls, prefix = bench_blocks file src in
   (* for a run of the benches, a main that calls each of them *)
-  let src = if bench then src ^ "\nfn __bench_main() ! io:\n" ^ String.concat "\n" (if bench_calls = [] then [ "    print(\"no bench blocks\")" ] else bench_calls) ^ "\n" else src in
+  let src = if bench then src ^ "\nfn " ^ prefix ^ "_main() ! io:\n" ^ String.concat "\n" (if bench_calls = [] then [ "    print(\"no bench blocks\")" ] else bench_calls) ^ "\n" else src in
   (* the examples in doc comments are tests of the module (section 20.2) *)
   let src = if docs then src ^ doc_tests src else src in
   let pre = load_prelude () in
@@ -265,7 +272,7 @@ let front_end ?(docs = false) ?(bench = false) file =
     if not bench then user
     else { user with items = List.filter_map (function
         | IFn f when f.fname = "main" -> None
-        | IFn f when f.fname = "__bench_main" -> Some (IFn { f with fname = "main" })
+        | IFn f when f.fname = prefix ^ "_main" -> Some (IFn { f with fname = "main" })
         | it -> Some it) user.items } in
   let imported = Loader.load ~entry:file user in
   (user, imported, Typecheck.check_program pre imported user)
@@ -424,7 +431,7 @@ let () =
     | "test" ->
         let failed = run_tests_interp ~cases:!cases ~seed:!seed ~update:!update file user imported prog in
         (* each measure block once, in the counting build, with its budgets (section 20.3) *)
-        let _, _, calls = bench_blocks file (read_file file) in
+        let _, _, calls, _ = bench_blocks file (read_file file) in
         let bench_failed =
           if calls = [] then false
           else begin

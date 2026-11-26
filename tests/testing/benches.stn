@@ -54,6 +54,12 @@ bench "allocates the first time" budget allocs == 0:
             print(f"{len([1])}")
         first = false
 
+# the names the compiler makes up for a bench are not names a bench can have used
+bench "a name of its own" for __bench_a in [7] budget allocs == 0:
+    let __bench_b = __bench_a + 1
+    measure:
+        print(f"{__bench_a} {__bench_b}")
+
 bench "build a list" for n in [100] budget allocs <= 50 budget time < 5ms:
     var sum = 0
     measure:

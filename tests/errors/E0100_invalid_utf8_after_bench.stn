@@ -1,0 +1,6 @@
+# expect: E0100 6:3
+bench "x" budget allocs == 0:
+    measure:
+        print("y")
+fn main():
+  ÿ
