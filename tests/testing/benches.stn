@@ -40,6 +40,20 @@ bench "a limit that allocates" budget allocs <= len([1, 2]) - 2:
     measure:
         sum = sum + 1
 
+# a limit worked out from setup that the block then changes: it is worked out once, before
+bench "a limit from setup" budget allocs <= (1 / divisor) - 1:
+    var divisor = 1
+    measure:
+        divisor = 0
+
+# the first run of the block is the one that is counted: this one allocates only then
+bench "allocates the first time" budget allocs == 0:
+    var first = true
+    measure:
+        if first:
+            print(f"{len([1])}")
+        first = false
+
 bench "build a list" for n in [100] budget allocs <= 50 budget time < 5ms:
     var sum = 0
     measure:

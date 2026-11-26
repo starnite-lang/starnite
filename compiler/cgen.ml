@@ -3426,13 +3426,15 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
   | "read_all@" -> owned (Printf.sprintf "stn_read_all(%s)" (loc_args e.l))
   | "clock_ns@" -> value "stn_clock_ns()"
   | "bench_running@" -> value "stn_bench_running()"
-  | "bench_start@Str" ->
-      (* called before the measured block starts, and once after it has ended: what its
-         arguments cost to evaluate is never counted *)
+  | "bench_begin@Str" ->
+      (* its arguments are literals and variables: nothing is left to release once it has started
+         the counters *)
       let name = sref fc (b 0) and label = sref fc (b 1) in
       let n = b 2 in
       let spec = sref fc (b 3) in
-      value (Printf.sprintf "stn_bench_start(%s, %s, %s, %s, %s, %s, %s, %s)" name label n spec (b 4) (b 5) (b 6) (b 7))
+      let a4 = b 4 in let a5 = b 5 in let a6 = b 6 in let a7 = b 7 in
+      line fc "stn_bench_begin(%s, %s, %s, %s, %s, %s, %s, %s);" name label n spec a4 a5 a6 a7;
+      unit_ ()
   | "len@Array" -> (
       match (arg 0).a.e with
       | XVar v when Hashtbl.mem fc.cached v.vid -> value (snd (Hashtbl.find fc.cached v.vid))

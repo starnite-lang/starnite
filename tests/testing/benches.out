@@ -6,6 +6,10 @@ bench bump in place  n=10  allocs 0  alloc_bytes 0  copies 0  count_ops 0
 bench bump in place  n=1000  allocs 0  alloc_bytes 0  copies 0  count_ops 0
 bench read a list  allocs 0  alloc_bytes 0  copies 0  count_ops 0
 bench a limit that allocates  allocs 0  alloc_bytes 0  copies 0  count_ops 0
+bench a limit from setup  allocs 0  alloc_bytes 0  copies 0  count_ops 0
+1
+bench allocates the first time  allocs 1  alloc_bytes 48  copies 0  count_ops 1
+FAIL budget allocs == 0: it was 1
 bench build a list  n=100  allocs 100  alloc_bytes 3200  copies 0  count_ops 100
 FAIL budget allocs <= 50: it was 100
 exit 1

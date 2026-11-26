@@ -47,10 +47,10 @@ fn assert_snapshot_text*(s: Str) ! io
 fn read_line*() -> Str? ! io
 fn read_all*() -> Str ! io
 fn clock_ns*() -> Int ! io
-# what the `measure:` line of a bench block becomes: `while bench_running() or bench_start(...)`,
-# the loop that runs it and reports it
+# what the `measure:` line of a bench block becomes: bench_begin, given the limits of its budgets,
+# and then `while bench_running():`, the loop that runs the block and reports it
+fn bench_begin*(name: Str, label: Str, n: Int, spec: Str, a: Int, b: Int, c: Int, d: Int) ! io
 fn bench_running*() -> Bool ! io
-fn bench_start*(name: Str, label: Str, n: Int, spec: Str, a: Int, b: Int, c: Int, d: Int) -> Bool ! io
 
 # ---- arrays ----
 fn len*[T](xs: Array[T]) -> Int

@@ -156,16 +156,20 @@ let doc_tests (src : string) : string =
            measure:
                work
 
-   A bench is turned into a function before the file is parsed, line for line, so that positions
-   in the rest of the file stay as they are: the first line becomes the head of a function, which
-   takes n when there is a `for`, and `measure:` becomes the loop that the runtime ends
-   (bench_running and bench_start in the prelude), which is given the budgets before anything
-   is counted. The calls of those functions make up a main of their own, which
+   A bench is turned into a function before the file is parsed. Its first line becomes the head of
+   a function, which takes n when there is a `for`. Its `measure:` line becomes three: a let of
+   the limits of its budgets, worked out once, there, where the setup before it can be used; a
+   call of bench_begin with them, which starts the counters or the clock; and the loop that the
+   runtime ends, `while bench_running():`, whose condition evaluates nothing. Positions stay
+   those of the file: the lines put in are reported as the `measure:` line (the second value
+   returned says which line each line of the new text is). The calls of those functions make up
+   a main of their own, which
    takes the place of the program's for `starnite bench` and for the budget checks of
    `starnite test`. In any other build the functions are checked like the rest and never run.
 
-   Returns the new text and the body of that main; raises Error on a bench it cannot read. *)
-let bench_blocks file (src : string) : string * string list =
+   Returns the new text, the line to report for each of its lines, and the body of that main;
+   raises Error on a bench it cannot read. *)
+let bench_blocks file (src : string) : string * int array * string list =
   let lines = Array.of_list (String.split_on_char '\n' src) in
   let n = Array.length lines in
   let calls = ref [] and count = ref 0 in
@@ -225,9 +229,11 @@ let bench_blocks file (src : string) : string * string list =
       while not !found && !j < n && (lines.(!j) = "" || lines.(!j).[0] = ' ' || lines.(!j).[0] = '#' || String.trim lines.(!j) = "") do
         if String.trim lines.(!j) = "measure:" then begin
           let indent = String.sub lines.(!j) 0 (String.index lines.(!j) 'm') in
-          lines.(!j) <- Printf.sprintf "%swhile bench_running() or bench_start(%s, \"%s\", %s, \"%s\", %s):" indent name
-              (match var with Some v -> v | None -> "") (match var with Some v -> v | None -> "0")
-              (String.concat " " spec) (String.concat ", " limits);
+          lines.(!j) <- String.concat "\n" [
+              Printf.sprintf "%slet (__bench_a, __bench_b, __bench_c, __bench_d) = (%s)" indent (String.concat ", " limits);
+              Printf.sprintf "%sbench_begin(%s, \"%s\", %s, \"%s\", __bench_a, __bench_b, __bench_c, __bench_d)" indent name
+                (match var with Some v -> v | None -> "") (match var with Some v -> v | None -> "0") (String.concat " " spec);
+              Printf.sprintf "%swhile bench_running():" indent ];
           found := true
         end;
         incr j
@@ -238,17 +244,23 @@ let bench_blocks file (src : string) : string * string list =
           | None -> [ Printf.sprintf "    %s()" fn ]) :: !calls
     end
   done;
-  (String.concat "\n" (Array.to_list lines), List.concat (List.rev !calls))
+  (* each line of the file is now one line or three: say which line of the file each came from *)
+  let map = ref [ 0 ] in
+  Array.iteri (fun i l -> List.iter (fun _ -> map := (i + 1) :: !map) (String.split_on_char '\n' l)) lines;
+  (String.concat "\n" (Array.to_list lines), Array.of_list (List.rev !map), List.concat (List.rev !calls))
 
 let front_end ?(docs = false) ?(bench = false) file =
   let src = read_file file in
-  let src, bench_calls = bench_blocks file src in
+  let src, line_map, bench_calls = bench_blocks file src in
   (* for a run of the benches, a main that calls each of them *)
   let src = if bench then src ^ "\nfn __bench_main() ! io:\n" ^ String.concat "\n" (if bench_calls = [] then [ "    print(\"no bench blocks\")" ] else bench_calls) ^ "\n" else src in
   (* the examples in doc comments are tests of the module (section 20.2) *)
   let src = if docs then src ^ doc_tests src else src in
   let pre = load_prelude () in
-  let user = Parser.parse_file file src in
+  (* positions are those of the file as it was written; the modules it imports are read as they are *)
+  Lexer.line_map := line_map;
+  let user = try Parser.parse_file file src with e -> Lexer.line_map := [||]; raise e in
+  Lexer.line_map := [||];
   let user =
     if not bench then user
     else { user with items = List.filter_map (function
@@ -410,8 +422,7 @@ let () =
     | "test" ->
         let failed = run_tests_interp ~cases:!cases ~seed:!seed ~update:!update file user imported prog in
         (* each measure block once, in the counting build, with its budgets (section 20.3) *)
-        let src, calls = bench_blocks file (read_file file) in
-        ignore src;
+        let _, _, calls = bench_blocks file (read_file file) in
         let bench_failed =
           if calls = [] then false
           else begin
