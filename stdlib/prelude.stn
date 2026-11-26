@@ -51,6 +51,8 @@ fn clock_ns*() -> Int ! io
 # and then `while bench_running():`, the loop that runs the block and reports it
 fn bench_begin*(name: Str, label: Str, n: Int, spec: Str, a: Int, b: Int, c: Int, d: Int) ! io
 fn bench_running*() -> Bool ! io
+# after a bench has run: fails it when its measure block was never reached
+fn bench_end*(name: Str) ! io
 
 # ---- arrays ----
 fn len*[T](xs: Array[T]) -> Int
@@ -283,15 +285,18 @@ fn lines*(s: Str) -> Array[Str]:
     var start = 0
     while start < len(s):
         var stop = find_or_end(s, "\n", start)
-        var next = stop + 1
-        if stop < 0:
+        let ended = stop >= 0
+        if not ended:
             stop = len(s)
-            next = stop
-        if stop > start and byte_at_or_end(s, stop - 1) == 13:
+        # a carriage return is dropped only where a newline follows it
+        if ended and stop > start and byte_at_or_end(s, stop - 1) == 13:
             out.push(s[start..stop - 1])
         else:
             out.push(s[start..stop])
-        start = next
+        if ended:
+            start = stop + 1
+        else:
+            start = stop
     out
 
 # the pieces between runs of white space: a space, a tab, a newline or a carriage return

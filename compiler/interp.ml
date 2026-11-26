@@ -804,6 +804,7 @@ and builtin env name (tys : ty list) (vals : value list) loc : value * value lis
        | input -> pure (VStr (sanitize_utf8 input))
        | exception Sys_error _ -> trap "input error" loc "could not read stdin")
   (* the reference interpreter has no counters: a measure block runs once *)
+  | "bench_end@Str", _ -> pure VUnit
   | "bench_begin@Str", _ -> bench_turn := false; pure VUnit
   | "bench_running@", [] -> bench_turn := not !bench_turn; pure (VBool !bench_turn)
   | "clock_ns@", [] -> pure (VInt (Int64.of_float (Unix.gettimeofday () *. 1e9)))

@@ -64,3 +64,13 @@ test "sample":
 
 test "sample-2":
     assert_snapshot 30
+
+# the snapshot is taken in a function the tests call: they share a file all the same
+fn kept(n: Int) ! io:
+    assert_snapshot n
+
+test "in a helper":
+    kept(1)
+
+test "in_a_helper":
+    kept(2)

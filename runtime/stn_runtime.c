@@ -1057,7 +1057,7 @@ int64_t stn_clock_ns(void) {
 }
 
 /* ---- bench blocks (section 20.3) ---- */
-static int stn_bench_on, stn_bench_failed;
+static int stn_bench_on, stn_bench_failed, stn_bench_reached;
 static int64_t stn_bench_start_ns, stn_bench_iters, stn_bench_target;
 #ifdef STN_COUNTERS
 static uint64_t stn_bench_base[4];
@@ -1079,7 +1079,7 @@ void stn_bench_begin(const StnStr* name, const StnStr* label, int64_t n, const S
                      int64_t a, int64_t b, int64_t c, int64_t d) {
     stn_bench_name = *name; stn_bench_label = *label; stn_bench_spec = *spec; stn_bench_n = n;
     stn_bench_limits[0] = a; stn_bench_limits[1] = b; stn_bench_limits[2] = c; stn_bench_limits[3] = d;
-    stn_bench_on = 1;
+    stn_bench_on = 1; stn_bench_reached = 1;
     /* what is measured starts here: the first thing after this call is the block itself */
 #ifdef STN_COUNTERS
     stn_bench_base[0] = stn_count_allocs; stn_bench_base[1] = stn_count_bytes;
@@ -1090,6 +1090,18 @@ void stn_bench_begin(const StnStr* name, const StnStr* label, int64_t n, const S
     stn_bench_iters = 0;
     stn_bench_start_ns = stn_clock_ns();
 #endif
+}
+
+void stn_bench_end(const StnStr* name) {
+    if (!stn_bench_reached) {
+        int64_t k;
+        const char* nm = stn_str_span(name, &k);
+        stn_flush();
+        printf("bench %.*s\nFAIL its measure block was never reached, so nothing was measured\n", (int)k, nm);
+        fflush(stdout);
+        stn_bench_failed = 1;
+    }
+    stn_bench_reached = 0;
 }
 
 uint8_t stn_bench_running(void) {

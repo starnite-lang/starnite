@@ -26,7 +26,7 @@ fn main() ! io:
     print(f"{show(find_from(s, "a", -1))} {show(find_from(s, "a", len(s) + 1))} {find_or_end(s, s, 0)} {find_or_end("ab", "abc", 0)}")
     print(f"{all_of("aaaa", "aa")} {all_of("naïve café", "é")} {all_of("abc", "")}")
     print(f"{key_value("name=value")} {key_value("=")} {key_value("a=b=c")} {key_value("plain")} {key_value("")}")
-    print(f"{lines("one\ntwo\r\n\nfour")} {lines("")} {lines("\n")} {lines("end\n")} {lines("\r\n")} {lines("a\rb")}")
+    print(f"{lines("one\ntwo\r\n\nfour")} {lines("")} {lines("\n")} {lines("end\n")} {lines("\r\n")} {lines("a\rb")} {len(lines("a\r")[0])} {len(lines("a\r\n")[0])}")
     print(f"{words("  the quick\tbrown\r\nfox  ")} {words("")} {words(" \t ")} {words("one")} {words("naïve café")}")
     # the pieces are taken from a string that is then let go of
     var kept: Array[Str] = []

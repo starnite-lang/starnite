@@ -59,7 +59,8 @@ type value = VI of int | VC of int * int * value list
 exception Too_long
 
 let steps = ref 0
-let tick () = incr steps; if !steps > 200_000 then raise Too_long
+let limit = ref 200_000
+let tick () = incr steps; if !steps > !limit then raise Too_long
 
 let rec ref_simple (fns : fn array) env = function
   | Var x -> List.assoc x env
@@ -312,7 +313,7 @@ let alloc m tag fields =
   P m.next
 
 (* how often the machine built a constructor in a cell it had taken apart, and went round a loop *)
-let reused = ref 0 and turns = ref 0
+let reused = ref 0 and turns = ref 0 and cons_turns = ref 0
 
 type compiled = { cparams : string list; ccode : code; loop : bool }
 
@@ -337,10 +338,11 @@ let rec run_call m (fns : compiled array) (f : int) (args : v list) : v =
               let c = Hashtbl.find m.tokens a in
               Hashtbl.remove m.tokens a;
               Hashtbl.replace env t Null;
-              Array.blit fields 0 c.fields 0 (Array.length fields);
-              Hashtbl.replace m.heap a { tag = (ty, ctor); fields = c.fields; rc = 1 };
+              (* The cell is the same memory, but the model gives it a new address: anything that
+                 still pointed at the cell that was taken apart then points at a released one, and
+                 using it is the error it should be. *)
               incr reused;
-              P a
+              alloc m (ty, ctor) fields
           | _ -> alloc m (ty, ctor) fields)
       | None -> alloc m (ty, ctor) fields in
     let rec exec (e : code) : [ `Done of v | `Again of v list ] =
@@ -390,6 +392,7 @@ let rec run_call m (fns : compiled array) (f : int) (args : v list) : v =
           let fields = Array.of_list (List.mapi (fun i x -> if i = hole then Null else get x) xs) in
           let cell = build ty ctor fields tok in
           store cell;
+          incr cons_turns;
           (match cell with P a -> dst := Field (a, if !fault = "wrong-hole" then (hole + 1) mod Array.length fields else hole) | _ -> assert false);
           `Again next
       | TailCall args -> `Again (List.map get args) in
@@ -444,6 +447,29 @@ let depth (ctx : gen_ctx) = if ctx.self = None then 5 else 2
 
 let rec gen_tail (ctx : gen_ctx) (env : (string * ty) list) (t : ty) (fuel : int) : tail =
   let boxed = List.filter_map (fun (x, u) -> match u with TData d -> Some (x, d) | TInt -> None) env in
+  (* The shape destination passing is for: a constructor of the result type, one of whose fields
+     is a call of the function on a part of its first parameter. Made often where it can be, so
+     that the loops are run and not only made. *)
+  let loop_shaped =
+    match ctx.self, t with
+    | Some (i, params, ret), TData d when ret = t && ctx.smaller <> [] && below 3 > 0 ->
+        let ctors = snd decls.(d) in
+        let holding = List.filter (fun c -> List.mem t (snd ctors.(c))) (List.init (Array.length ctors) Fun.id) in
+        (match holding with
+         | [] -> None
+         | _ ->
+             let c = pick holding in
+             let placed = ref false in
+             let fields = List.map (fun u ->
+                 if u = t && not !placed then begin
+                   placed := true;
+                   Call (i, Var (pick ctx.smaller) :: List.map (fun (_, pu, _) -> gen_simple ctx env pu 1) (List.tl params))
+                 end else gen_simple ctx env u 1) (snd ctors.(c)) in
+             Some (Simple (Con (d, c, fields))))
+    | _ -> None in
+  match loop_shaped with
+  | Some e -> e
+  | None ->
   match below 10 with
   | n when n < 4 && fuel > 0 && boxed <> [] ->
       let x, d = pick boxed in
@@ -536,10 +562,13 @@ let check (stage : stage) (fns : fn array) (expected : value) : string option * 
   let compiled, loops = compile stage fns in
   let m = { heap = Hashtbl.create 64; tokens = Hashtbl.create 8; next = 0 } in
   steps := 0;
+  limit := 800_000;
   let outcome =
     match run_call m compiled (Array.length fns - 1) [] with
     | exception Broken why -> Some ("P1: " ^ why)
-    | exception Too_long -> None
+    (* the reference semantics finished within the limit of steps, and the counted program makes
+       the same calls: not finishing within several times that limit is a different meaning *)
+    | exception Too_long -> Some "P2: the counted program does not finish where the reference semantics does"
     | result -> (
         match reify m result with
         | exception Broken why -> Some ("P1: " ^ why)
@@ -572,13 +601,22 @@ let () =
     counter := 0;
     let fns = gen_program () in
     steps := 0;
+    limit := 200_000;
     match ref_call fns (Array.length fns - 1) [] with
     | exception Too_long -> incr long
     | exception Stack_overflow -> incr long
     | expected ->
+        (* A value can share its parts, and be far larger written out than it was to build: one
+           with more than a few thousand cells is set aside, like a program that ran too long. *)
+        let budget = ref 5000 in
+        let rec size = function
+          | VI _ -> 0
+          | VC (_, _, xs) -> decr budget; if !budget < 0 then raise Too_long; List.fold_left (fun a x -> a + size x) 1 xs in
+        match size expected with
+        | exception Too_long -> incr long
+        | n ->
         incr ran;
-        let rec size = function VI _ -> 0 | VC (_, _, xs) -> List.fold_left (fun a x -> a + size x) 1 xs in
-        cells := !cells + size expected;
+        cells := !cells + n;
         List.iter (fun (stage, name) ->
             match check stage fns expected with
             | Some why, _ ->
@@ -588,5 +626,5 @@ let () =
           [ (Counted, "counting"); (Reused, "counting and reuse"); (Looped, "counting, reuse and destination passing") ]
   done;
   Printf.printf "%d programs: P1 and P2 hold with counting, with reuse, and with destination passing\n" !ran;
-  Printf.printf "  %d cells in their results; %d constructors built in a cell taken apart; %d functions turned into loops, which went round %d times; %d programs set aside for running too long\n"
-    !cells !reused !loops !turns !long
+  Printf.printf "  %d cells in their results; %d constructors built in a cell taken apart; %d functions turned into loops, which went round %d times, %d of them by a constructor with a hole; %d programs set aside for running too long\n"
+    !cells !reused !loops !turns !cons_turns !long

@@ -1,6 +1,8 @@
 ok   ranges add up
+FAIL doc line 95: total(range(3)) (tests/testing/benches.stn:95)
+     assertion failed: left = 3, right = 4 at tests/testing/benches.stn:95:5
 
-1 passed, 0 failed
+1 passed, 1 failed
 
 bench bump in place  n=10  allocs 0  alloc_bytes 0  copies 0  count_ops 0
 bench bump in place  n=1000  allocs 0  alloc_bytes 0  copies 0  count_ops 0
@@ -12,6 +14,8 @@ bench allocates the first time  allocs 1  alloc_bytes 48  copies 0  count_ops 1
 FAIL budget allocs == 0: it was 1
 7 8
 bench a name of its own  __bench_a=7  allocs 0  alloc_bytes 0  copies 0  count_ops 0
+bench never measured
+FAIL its measure block was never reached, so nothing was measured
 bench build a list  n=100  allocs 100  alloc_bytes 3200  copies 0  count_ops 100
 FAIL budget allocs <= 50: it was 100
 exit 1

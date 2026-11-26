@@ -496,6 +496,8 @@ int64_t stn_clock_ns(void);
 void stn_bench_begin(const StnStr* name, const StnStr* label, int64_t n, const StnStr* spec,
                      int64_t a, int64_t b, int64_t c, int64_t d);
 uint8_t stn_bench_running(void);
+/* after a bench has run: one whose measure block was never reached has kept no budget, and fails */
+void stn_bench_end(const StnStr* name);
 StnArray* stn_str_chars(const StnStr* s, const StnElemOps* char_ops);
 StnArray* stn_str_split(const StnStr* s, const StnStr* sep, const StnElemOps* str_ops, const char* file, int line, int col);
 StnStr  stn_str_join_parts(const StnStr* parts, int64_t n, StnStr sep);

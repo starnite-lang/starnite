@@ -28,6 +28,10 @@ FAIL same (tests/testing/failing.stn:57)
      the snapshot of this test would be kept in tests/testing/snapshots/failing/same.snap, which is where that of the test "same" at line 54 is kept; give one of them another name at tests/testing/failing.stn:58:5
 ok   sample
 ok   sample-2
+FAIL in a helper (tests/testing/failing.stn:72)
+     the snapshot of this test would be kept in tests/testing/snapshots/failing/in_a_helper.snap, which is where that of the test "in_a_helper" at line 75 is kept; give one of them another name at tests/testing/failing.stn:70:5
+FAIL in_a_helper (tests/testing/failing.stn:75)
+     the snapshot of this test would be kept in tests/testing/snapshots/failing/in_a_helper.snap, which is where that of the test "in a helper" at line 72 is kept; give one of them another name at tests/testing/failing.stn:70:5
 
-2 passed, 10 failed
+2 passed, 12 failed
 exit 1

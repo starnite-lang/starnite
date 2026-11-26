@@ -218,7 +218,10 @@ let rec shrinks env (t : ty) (v : value) : value list =
         (* zero, then the same size without its sign, then nearer zero *)
         let plain = if Int64.compare n 0L < 0 && n <> Int64.min_int then [ Int64.neg n ] else [] in
         let rec uniq = function [] -> [] | x :: rest -> x :: uniq (List.filter (fun y -> y <> x) rest) in
-        uniq ([ 0L ] @ plain @ [ half; toward ]) |> List.filter (fun x -> x <> n) |> List.map (fun x -> VInt x)
+        (* then smaller and smaller steps toward zero, down to one: a number that fails only
+           above some bound is brought to that bound in a few dozen steps, not one at a time *)
+        let steps = List.init 62 (fun k -> Int64.sub n (Int64.div n (Int64.shift_left 1L (k + 2)))) in
+        uniq ([ 0L ] @ plain @ [ half ] @ steps @ [ toward ]) |> List.filter (fun x -> x <> n) |> List.map (fun x -> VInt x)
   | (TFloat | TF32), VFloat x -> if x = 0.0 then [] else List.filter (fun y -> y <> VFloat x) [ VFloat 0.0; VFloat (Float.trunc x); VFloat (x /. 2.0) ]
   | TBool, VBool true -> [ VBool false ]
   | TChar, VChar c -> if c = 97 then [] else [ VChar 97 ]

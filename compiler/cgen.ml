@@ -3555,6 +3555,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
   | "read_all@" -> owned (Printf.sprintf "stn_read_all(%s)" (loc_args e.l))
   | "clock_ns@" -> value "stn_clock_ns()"
   | "bench_running@" -> value "stn_bench_running()"
+  | "bench_end@Str" -> line fc "stn_bench_end(%s);" (sref fc (b 0)); unit_ ()
   | "bench_begin@Str" ->
       (* its arguments are literals and variables: nothing is left to release once it has started
          the counters *)

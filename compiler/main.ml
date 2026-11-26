@@ -111,7 +111,7 @@ let run_interp (prog : Types.tprog) =
    the lines after it, up to a blank one or the end of the comment, are what Show must give for
    its value. Each becomes a test at the end of the module, where it sees the module's private
    items: `assert f"{expr}" == "expected"`. *)
-let doc_tests (src : string) : string =
+let doc_tests (src : string) : string * int list =
   let lines = Array.of_list (String.split_on_char '\n' src) in
   let doc l = let t = String.trim l in if String.length t >= 2 && String.sub t 0 2 = "##" then Some (String.sub t 2 (String.length t - 2)) else None in
   let quote text =
@@ -120,7 +120,7 @@ let doc_tests (src : string) : string =
         | '"' -> Buffer.add_string b "\\\"" | '\\' -> Buffer.add_string b "\\\\" | '\n' -> Buffer.add_string b "\\n"
         | ch -> Buffer.add_char b ch) text;
     Buffer.contents b in
-  let out = Buffer.create 256 in
+  let out = Buffer.create 256 and origins = ref [] in
   let n = Array.length lines in
   let i = ref 0 in
   while !i < n do
@@ -144,10 +144,12 @@ let doc_tests (src : string) : string =
          done;
          Printf.bprintf out "\ntest \"doc line %d: %s\":\n    assert f\"{%s}\" == \"%s\"\n" at (quote expr) expr
            (quote (String.concat "\n" (List.rev !expected)));
+         (* the three lines this adds to the text are reported as the line of the example *)
+         origins := at :: at :: at :: !origins;
          i := !j
      | _ -> incr i)
   done;
-  Buffer.contents out
+  (Buffer.contents out, List.rev !origins)
 
 (* Bench blocks (section 20.3).
 
@@ -247,8 +249,9 @@ let bench_blocks file (src : string) : string * int array * string list * string
       done;
       if not !found then bad i "a bench has a `measure:` block, the part that is measured";
       calls := (match var with
-          | Some v -> [ Printf.sprintf "    for %s in %s:" v source; Printf.sprintf "        %s(%s)" fn v ]
-          | None -> [ Printf.sprintf "    %s()" fn ]) :: !calls
+          (* after each run of a bench, a check that its measure block was reached *)
+          | Some v -> [ Printf.sprintf "    for %s in %s:" v source; Printf.sprintf "        %s(%s)" fn v; Printf.sprintf "        %s_end(%s)" prefix name ]
+          | None -> [ Printf.sprintf "    %s()" fn; Printf.sprintf "    %s_end(%s)" prefix name ]) :: !calls
     end
   done;
   (* each line of the file is now one line or three: say which line of the file each came from *)
@@ -257,17 +260,22 @@ let bench_blocks file (src : string) : string * int array * string list * string
   (String.concat "\n" (Array.to_list lines), Array.of_list (List.rev !map), List.concat (List.rev !calls), prefix)
 
 let front_end ?(docs = false) ?(bench = false) file =
-  let src = read_file file in
-  let src, line_map, bench_calls, prefix = bench_blocks file src in
+  let original = read_file file in
+  let src, line_map, bench_calls, prefix = bench_blocks file original in
   (* for a run of the benches, a main that calls each of them *)
   let src = if bench then src ^ "\nfn " ^ prefix ^ "_main() ! io:\n" ^ String.concat "\n" (if bench_calls = [] then [ "    print(\"no bench blocks\")" ] else bench_calls) ^ "\n" else src in
   (* the examples in doc comments are tests of the module (section 20.2) *)
-  let src = if docs then src ^ doc_tests src else src in
+  (* read from the file as it was written, so that each is named and reported by its own line *)
+  let src, line_map =
+    if docs then begin
+      let text, origins = doc_tests original in
+      (src ^ text, Array.append line_map (Array.of_list origins))
+    end else (src, line_map) in
   let pre = load_prelude () in
   (* positions are those of the file as it was written; the modules it imports are read as they are *)
   (* the two calls made up for a measure block mean the prelude's functions, whatever the program
      has by those names *)
-  Typecheck.internal_names := [ (prefix ^ "_begin", "bench_begin"); (prefix ^ "_running", "bench_running") ];
+  Typecheck.internal_names := [ (prefix ^ "_begin", "bench_begin"); (prefix ^ "_running", "bench_running"); (prefix ^ "_end", "bench_end") ];
   Lexer.line_map := line_map;
   let user = try Parser.parse_file file src with e -> Lexer.line_map := [||]; raise e in
   Lexer.line_map := [||];
@@ -299,10 +307,18 @@ let run_tests_interp ~cases ~seed ~update file (user : Syntax.file) imported (pr
   (* Tests that take snapshots and whose first snapshot file is the same: each is failed before
      it reads or writes anything, so that neither can overwrite the other's stored copy. *)
   let takes_snapshots (body : Types.texpr) =
-    let found = ref false in
-    Cgen.walk_texpr (fun (x : Types.texpr) -> match x.e with
-        | Types.XCall (Types.CBuiltin ("assert_snapshot_text@Str", _), _, _) -> found := true
-        | _ -> ()) (fun _ -> ()) body;
+    (* in the test itself or in a function it calls; a call through a trait or a function value
+       could reach any function, and is taken to *)
+    let found = ref false and seen = Hashtbl.create 16 in
+    let rec look (b : Types.texpr) =
+      Cgen.walk_texpr (fun (x : Types.texpr) -> match x.e with
+          | Types.XCall (Types.CBuiltin ("assert_snapshot_text@Str", _), _, _) -> found := true
+          | Types.XCall ((Types.CTrait _ | Types.CClosure _), _, _) -> found := true
+          | Types.XCall (Types.CFn (u, _), _, _) when not (Hashtbl.mem seen u) ->
+              Hashtbl.replace seen u ();
+              (match Hashtbl.find_opt prog.fns u with Some f -> look f.fbody | None -> ())
+          | _ -> ()) (fun _ -> ()) b in
+    look body;
     !found in
   let snapshot_tests = List.filter_map (fun (name, body, (l : loc), _, _) ->
       if takes_snapshots body then Some (snd (snapshot_path file name 1), name, l.line) else None) prog.tests in

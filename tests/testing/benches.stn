@@ -71,6 +71,13 @@ fn bench_running() -> Bool:
 fn assert_snapshot_text(s: Str) ! io:
     print("nor this one")
 
+# a measure block that is never reached has kept no budget: the bench fails
+bench "never measured" budget allocs == 0:
+    let wanted = 0
+    if wanted > 0:
+        measure:
+            print("measured")
+
 bench "build a list" for n in [100] budget allocs <= 50 budget time < 5ms:
     var sum = 0
     measure:
@@ -81,3 +88,9 @@ test "ranges add up":
 
 fn main() ! io:
     print(f"{total(bump(range(3), 1))}")
+
+## An example in a doc comment after bench blocks, which put lines into the text the compiler
+## reads: it is named and reported by its own line in this file.
+##
+##     >>> total(range(3))
+##     4
