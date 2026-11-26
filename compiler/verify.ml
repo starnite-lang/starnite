@@ -100,7 +100,7 @@ let tokens (text : string) lo hi (f : int -> token -> unit) =
       let member = (s >= 2 && text.[s - 2] = '-' && text.[s - 1] = '>') || (s >= 1 && text.[s - 1] = '.') in
       let j = skip_space !i in
       (* a type before a parenthesized star is the type of a function pointer, not a call *)
-      let called = j < hi && text.[j] = '(' && not (j + 1 < hi && text.[j + 1] = '*') in
+      let called = j < hi && text.[j] = '(' && not (j + 2 < hi && text.[j + 1] = '*' && text.[j + 2] = ')') in
       (* a member that is called, with or without a cast closed around it *)
       let cast_called = j < hi && text.[j] = ')' && (let k = skip_space (j + 1) in k < hi && text.[k] = '(') in
       if member then (if called || cast_called then f s Pointer)
@@ -370,8 +370,10 @@ let dup_helpers (helpers : string) : string list =
 
 (* What --explain-copies lists: each write that copies its array, map or set first when something
    else holds it (section 4.5), and each count raised inside a loop of the program. One line per place and kind, in the order of the program. *)
-let explain ~(records : fn_record list) ~(text : string) : (loc * string) list =
-  let helpers = dup_helpers text in
+let explain ~(records : fn_record list) ~(helpers : string) : (loc * string) list =
+  (* the helpers alone: a function of the program that raises a count somewhere inside is not a
+     count raised where it is called *)
+  let helpers = dup_helpers helpers in
   let out = ref [] in
   let array_writes = [ "stn_array_make_unique"; "stn_array_copy_for_write"; "STN_POP"; "STN_PUSH"; "stn_array_push"; "stn_array_extend";
                        "stn_array_insert"; "stn_array_remove"; "stn_array_clear"; "stn_array_sort_i64"; "stn_array_reverse_i64" ] in
@@ -388,7 +390,9 @@ let explain ~(records : fn_record list) ~(text : string) : (loc * string) list =
               | Call n when List.mem n array_writes ->
                   if what <> "this array literal" && what <> "this comprehension" then
                     say "writes to an array, which is copied first if anything else holds it"
-              | Call n when List.mem n map_writes -> say "writes to a map or set, which is copied first if anything else holds it"
+              (* a map or set being built by a literal is held by nothing else yet *)
+              | Call n when List.mem n map_writes ->
+                  if what <> "this call of lit" then say "writes to a map or set, which is copied first if anything else holds it"
               (* outside a loop a string kept is one count, like any other; --profile-copies says
                  when one was a view and had to be copied *)
               | Call ("stn_str_dup" | "STN_STR_DUP") ->

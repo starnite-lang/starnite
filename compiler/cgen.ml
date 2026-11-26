@@ -48,6 +48,10 @@ type st = {
   explain : bool;                        (* --explain-copies: every function is recorded *)
   profile : bool;                        (* --profile-copies: generated code says which statement it is in *)
   excused : (Buffer.t * int * int) list ref;   (* code that runs only when a take argument is shared *)
+  (* variables that hold what a take parameter brought, or a field moved out of it: what rule 1 of
+     section 9.6 lets an inplace function treat as held by nothing else *)
+  from_take : (int, unit) Hashtbl.t;
+  trusted : string list ref;             (* cells for reuse taken from such a value *)
   records : Verify.fn_record list ref;
   demoted : (string * int, unit) Hashtbl.t;   (* take parameters passed as read-only ones (section 9.4): function, position *)
   names : (string * string) list ref;    (* every function generated, and its name in the program *)
@@ -718,6 +722,7 @@ let rec type_size (t : ty) : int =
   match repr t with
   | TArray e -> 1 + type_size e
   | TTuple ts | TNamed (_, ts) -> List.fold_left (fun n x -> n + type_size x) 1 ts
+  | TFn f -> List.fold_left (fun n (_, x) -> n + type_size x) (1 + type_size f.fret) f.fps
   | _ -> 1
 
 let inst_name uname targs =
@@ -895,7 +900,7 @@ let describe (e : texpr) =
    arguments or of a function that calls it in turn, that is neither in tail position nor the one field of a constructor in tail position
    (rule 5 of section 9.6). A return is a tail position wherever it stands. [returns g] says
    whether g can call the function, directly or through others. *)
-let stray_self_call (self : string * ty list -> bool) (targets : texpr -> (string * ty list) list) (returns : string * ty list -> bool) (body : texpr) (walk : (texpr -> unit) -> (tstmt -> unit) -> texpr -> unit) =
+let stray_self_call (self : string * ty list -> bool) (targets : texpr -> (string * ty list) list) (returns : string * ty list -> bool) (turned : texpr -> bool) (body : texpr) (walk : (texpr -> unit) -> (tstmt -> unit) -> texpr -> unit) =
   let is_self (x : texpr) = List.exists (fun g -> self g || returns g) (targets x) in
   let tails = ref [] in
   let rec tail (x : texpr) =
@@ -904,8 +909,10 @@ let stray_self_call (self : string * ty list -> bool) (targets : texpr -> (strin
       | XIf (_, a, b) -> tail a; tail b
       | XMatch (_, arms) -> List.iter (fun a -> tail a.body) arms
       | XBlock (_, v) -> tail v
+      (* the field of a constructor counts only where the constructor is really turned into a
+         turn of a loop (section 9.5): anywhere else the call returns here, and the stack grows *)
       | XVariant (_, _, _, fs) ->
-          (match List.filter is_self fs with [ one ] -> tails := one :: !tails | _ -> ())
+          (match List.filter is_self fs with [ one ] when turned x -> tails := one :: !tails | _ -> ())
       | _ -> () in
   tail body;
   let all = ref [] in
@@ -916,6 +923,7 @@ let stray_self_call (self : string * ty list -> bool) (targets : texpr -> (strin
 let rec expr fc (e : texpr) : r =
   let saved = !(fc.st.cur) in
   note fc (e.l, describe e);
+  if !(fc.st.marking) then touch_keys fc e;
   let r = expr_at fc e in
   note fc saved;
   r
@@ -1235,10 +1243,12 @@ and construct fc t i (vals : string list) : r =
           go fc.frames in
         (match List.find_opt (fun (tok, m, b) -> m = mangle t && b == fc.b && outside_loop tok) !(st.reuse) with
          | Some (tok, _, _) ->
-             (* allocated only when the cell taken apart was shared, and so not a token *)
+             (* allocated only when the cell taken apart was shared, and so not a token; the check
+                of an inplace function lets that pass for a cell a take parameter brought, which
+                its caller is to hand over unshared, and for no other *)
              let from = Buffer.length fc.b in
              line fc "%s %s = %s ? %s : (%s)stn_alloc(sizeof(struct box_%s));" (ct fc t) n tok tok (ct fc t) (mangle t);
-             st.excused := (fc.b, from, Buffer.length fc.b) :: !(st.excused);
+             if List.mem tok !(st.trusted) then st.excused := (fc.b, from, Buffer.length fc.b) :: !(st.excused);
              (* the cell is spent: a later constructor on this path allocates, and says so *)
              st.reuse := List.filter (fun (t', _, _) -> t' <> tok) !(st.reuse);
              line fc "%s = NULL;" tok
@@ -1713,6 +1723,7 @@ and map_ops fc (t : ty) : string =
           let has_eq = Typecheck.find_impl (Typecheck.rtab_of_prog st.prog) "Eq" [] v <> None in
           let veq =
             if has_eq then begin
+              Hashtbl.replace st.defined ("mveq_" ^ m) ();
               pr st.protos "static int mveq_%s(const void* a, const void* b);\n" m;
               pr st.helpers "static int mveq_%s(const void* a, const void* b) { return %s; }\n" m
                 (eq_call fc v (Printf.sprintf "(*(const %s*)a)" vc) (Printf.sprintf "(*(const %s*)b)" vc));
@@ -1727,6 +1738,33 @@ and map_ops fc (t : ty) : string =
     pr st.helpers "static const StnMapOps %s = { sizeof(%s), %s, mhash_%s, meq_%s, %s, %s, %s, %s, %s, %s };\n" name kc vsize m m kd kr vd vr veq kind
   end;
   "&" ^ name
+
+(* An operation on a Map or Set runs the hash and the equality of its keys, and a comparison of
+   two maps the equality of their values, from inside the runtime, through the table the map
+   carries. The code of the operation therefore does not name them. For the checks of section
+   9.6, which read that code, they are named here: a hash written in the program that allocates
+   is an allocation of every lookup. Keys the runtime hashes itself, integers and strings, have
+   nothing to name. *)
+and touch_keys fc (e : texpr) =
+  let st = fc.st in
+  let operands = match e.e with
+    | XCall (_, args, _) -> List.map (fun a -> a.a.ty) args
+    | XIndex (a, _) -> [ a.ty ]
+    | XBin (_, a, b) -> [ a.ty; b.ty ]
+    | _ -> [] in
+  let compares = match e.e with
+    | XCall (CTrait (("Eq" | "Ord"), _, _, _, _), _, _) -> true
+    | _ -> false in
+  List.iter (fun (t : ty) ->
+      let t = ts fc t in
+      match repr t with
+      | TNamed ("Map", [ k; _ ]) | TNamed ("Set", [ k ]) ->
+          let runtime_key = match repr k with TInt (IInt | I64 | U64) | TDur | TBytes | TStr -> true | _ -> false in
+          let m = mangle t in
+          ignore (map_ops fc t);
+          if not runtime_key then line fc "(void)mhash_%s; (void)meq_%s;" m m;
+          if compares && Hashtbl.mem st.defined ("mveq_" ^ m) then line fc "(void)mveq_%s;" m
+      | _ -> ()) operands
 
 (* a lookup of the key k in the table m, inline when the key is a 64-bit integer *)
 and map_find_call (kt : ty) m k =
@@ -2129,6 +2167,8 @@ and match_ ?tail fc t (s : texpr) arms : r =
       let test = if tests = [] then "1" else String.concat " && " tests in
       line fc "if (%s) {" test;
       fc.ind <- fc.ind + 1;
+      (* what an arm does before its body, taking the value apart, is put down to the arm *)
+      note fc (arm.body.l, "this arm");
       bind_pattern fc binds;
       (* An arm that takes a boxed value apart into variables consumes it (section 9.3). If
          nothing else holds the value, its fields move into the variables and its cell is kept
@@ -2165,7 +2205,18 @@ and match_ ?tail fc t (s : texpr) arms : r =
                  | _ -> ()) fs;
              line fc "  %s" (drop_stmt st sty sv);
              line fc "}";
-             st.excused := (fc.b, from, Buffer.length fc.b) :: !(st.excused);
+             (* Rule 1 of section 9.6: a take parameter is taken to be held by nothing else, and so
+                is what is moved out of it. The path for a shared value is let pass only there. A
+                value the function got some other way, the result of a call for one, may be shared
+                by the function's own doing, and then its copies are the function's. *)
+             let brought = match s.e with
+               | XVar v -> v.vkind = VParam MTake || Hashtbl.mem st.from_take v.vid
+               | _ -> false in
+             if brought then begin
+               st.excused := (fc.b, from, Buffer.length fc.b) :: !(st.excused);
+               st.trusted := tok :: !(st.trusted);
+               List.iter (fun (p, _, _) -> match p with TPVar v -> Hashtbl.replace st.from_take v.vid () | _ -> ()) fs
+             end;
              line fc "%s = (%s)(void*)1;" sv (cty st sty);
              own_in fc tok (TNamed ("__token", []));
              List.iter (fun (p, ft, _) -> match p with
@@ -2758,10 +2809,35 @@ and called st (sub : (string * ty) list) (x : texpr) : (string * ty list) list =
   | XCall (CFn (u, tys), _, _) -> [ (u, List.map (subst sub) tys) ]
   | XCall (CTrait (tr, ta, m, self, own), _, _) -> (
       let self = subst sub self and ta = List.map (subst sub) ta in
-      match Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) tr ta m self with
+      let resolve t = try Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) tr ta m t with _ -> None in
+      match resolve self with
       | Some (f, ftys) -> [ (f, ftys @ List.map (subst sub) own) ]
-      | None -> []
-      | exception _ -> [])
+      | None ->
+          (* A trait the compiler derives for a tuple, an array, an option or the like (==, hash,
+             show, ordering) runs the impls of what the type is made of. *)
+          let seen = Hashtbl.create 8 and found = ref [] in
+          let rec parts (t : ty) =
+            let key = mangle t in
+            if not (Hashtbl.mem seen key) then begin
+              Hashtbl.replace seen key ();
+              (match resolve t with Some (f, ftys) -> found := (f, ftys) :: !found | None -> ());
+              match repr t with
+              | TArray e -> parts e
+              | TTuple ts -> List.iter parts ts
+              | TNamed (n, args) ->
+                  List.iter parts args;
+                  (match Hashtbl.find_opt st.prog.decls n with
+                   | Some { dbody = DStruct fs; dparams; _ } when List.length dparams = List.length args ->
+                       let s = List.combine dparams args in
+                       List.iter (fun (f : field_info) -> parts (subst s f.fty)) fs
+                   | Some { dbody = DData vs; dparams; _ } when List.length dparams = List.length args ->
+                       let s = List.combine dparams args in
+                       List.iter (fun (v : variant_info) -> List.iter (fun (f : field_info) -> parts (subst s f.fty)) v.vfields) vs
+                   | _ -> ())
+              | _ -> ()
+            end in
+          parts self;
+          !found)
   | _ -> []
 
 (* Whether a function instance can call the instance [target], directly or through the instances
@@ -3247,6 +3323,12 @@ and array_reduction fc p src body =
   | _ -> None
 
 and stmt fc (s : tstmt) =
+  let saved = !(fc.st.cur) in
+  stmt_at fc s;
+  (* what follows the statement is not the statement's: releases at the end of a block, say *)
+  note fc saved
+
+and stmt_at fc (s : tstmt) =
   let st = fc.st in
   note fc (s.sl, "this statement");
   push fc FStmt;
@@ -3927,20 +4009,23 @@ let compile_instance st cname uname tys =
      spectral-norm benchmark ran 2.1 times as long) *)
   let is_main = match st.prog.main with Some m -> m = uname | None -> false in
   st.marking := sg.smods <> [] || st.explain || st.profile;
-  st.marks := []; st.excused := [];
+  st.marks := []; st.excused := []; Hashtbl.reset st.from_take; st.trusted := [];
   st.cur := (sg.sloc, "this function");
   (* what verify.ml reads of a noalloc or inplace function, once its code is written *)
+  let looped = ref false in   (* the function was generated as a destination-passing loop *)
   let record () =
     if sg.smods <> [] || st.explain then begin
       let mine l = List.filter_map (fun (b', a, x, y, z) -> if b' == b then Some (a, x, y, z) else None) l in
       (* a function with type parameters is checked in each form the program uses, and named so *)
-      let display = if tys = [] then sg.sdisplay else Printf.sprintf "%s[%s]" sg.sdisplay (String.concat ", " (List.map show_ty tys)) in
+      let plain = if sg.sdisplay = "" then sg.sname else sg.sdisplay in
+      let display = if tys = [] then plain else Printf.sprintf "%s[%s]" plain (String.concat ", " (List.map show_ty tys)) in
       st.records := { Verify.cname; display; mods = sg.smods; floc = sg.sloc; text = Buffer.contents b;
                       marks = List.rev (mine !(st.marks));
                       excused = List.filter_map (fun (b', lo, hi) -> if b' == b then Some (lo, hi) else None) !(st.excused);
-                      stray = Option.map (fun (x : texpr) -> x.l) (stray_self_call (fun (g, gtys) -> inst_name g gtys = cname) (called st sub) (fun g -> reaches st g cname) tf.fbody walk_texpr) } :: !(st.records)
+                      stray = Option.map (fun (x : texpr) -> x.l) (stray_self_call (fun (g, gtys) -> inst_name g gtys = cname) (called st sub) (fun g -> reaches st g cname)
+                                                                       (fun x -> !looped && dps_field fc cname params x <> None) tf.fbody walk_texpr) } :: !(st.records)
     end;
-    st.names := (cname, sg.sdisplay) :: !(st.names);
+    st.names := (cname, (if sg.sdisplay = "" then sg.sname else sg.sdisplay)) :: !(st.names);
     st.marking := false in
   note_self_sliced st tf.fbody;
   st.movable := [];
@@ -3995,6 +4080,7 @@ let compile_instance st cname uname tys =
     Buffer.add_buffer st.funcs b
   end else if (not can_fail) && List.for_all (fun ((v : var), m, _) -> m <> MMut && not v.vcell) params
             && dps_body fc cname params tf.fbody then begin
+    looped := true;
     (* a function that returns a constructor holding a call of itself runs as a loop (section 9.5) *)
     line fc "%s _res;" (cty st ret);
     line fc "%s* _dst = &_res;" (cty st ret);
@@ -4204,7 +4290,7 @@ let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~d
     protos = Buffer.create 4096; helpers = Buffer.create 4096; funcs = Buffer.create 16384;
     defined = Hashtbl.create 64; pending_boxed = Queue.create (); instances = Hashtbl.create 64; asked_by = Hashtbl.create 64; compiling = ref "";
     queue = Queue.create (); strlits = Hashtbl.create 64; dps = ref None; reuse = ref []; movable = ref []; pinned = Hashtbl.create 32; self_sliced = Hashtbl.create 16; view_vars = Hashtbl.create 16; loops = Hashtbl.create 64; in_main = ref false; entries = Hashtbl.create 8; entry_defs = Hashtbl.create 32; errtypes = Hashtbl.create 8;
-    layouts = Hashtbl.create 64; marking = ref false; cur = ref (Syntax.noloc, ""); marks = ref []; excused = ref []; records = ref []; names = ref []; demoted = Hashtbl.create 16; explain = explain <> None; profile;
+    layouts = Hashtbl.create 64; marking = ref false; cur = ref (Syntax.noloc, ""); marks = ref []; excused = ref []; records = ref []; names = ref []; demoted = Hashtbl.create 16; from_take = Hashtbl.create 16; trusted = ref []; explain = explain <> None; profile;
     debug; counter = 0 }
   in
   note_demotions st;
@@ -4225,7 +4311,7 @@ let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~d
       end in
     drain ();
     Verify.run ~records:!(st.records) ~names:!(st.names) ~text:(verify_text st);
-    Option.iter (fun out -> out := Verify.explain ~records:!(st.records) ~text:(verify_text st)) explain;
+    Option.iter (fun out -> out := Verify.explain ~records:!(st.records) ~helpers:(Buffer.contents st.helpers)) explain;
     raise Exit
   end;
   let main_sg = (Hashtbl.find prog.fns main_u).fsig in
@@ -4250,7 +4336,7 @@ let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~d
   flush_boxed st;
   ignore show_err;
   Verify.run ~records:!(st.records) ~names:!(st.names) ~text:(verify_text st);
-  Option.iter (fun out -> out := Verify.explain ~records:!(st.records) ~text:(verify_text st)) explain;
+  Option.iter (fun out -> out := Verify.explain ~records:!(st.records) ~helpers:(Buffer.contents st.helpers)) explain;
   let out = Buffer.create 65536 in
   pr out "/* Generated by the Starnite compiler. */\n";
   if debug then pr out "#define STN_DEBUG 1\n";
