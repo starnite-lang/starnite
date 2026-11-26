@@ -1,0 +1,188 @@
+# Property, snapshot and doc tests (section 20.2), all passing: the inputs of a property test are
+# generated from their types, assert_snapshot compares with tests/unit/snapshots/testing_kinds/,
+# and the >>> examples in the doc comments are run.
+type Shape = Dot | Circle(r: Int) | Rect(w: Int, h: Int)
+type Tree = Leaf | Node(left: Tree, value: Int, right: Tree)
+type Pair = struct(a: Int, b: Str)
+
+## The larger of two numbers.
+##
+##     >>> larger(2, 3)
+##     3
+##     >>> larger(-1, -5)
+##     -1
+fn larger(a: Int, b: Int) -> Int:
+    if a > b:
+        a
+    else:
+        b
+
+## The words of a text, and how many there are.
+##     >>> words("a b  c")
+##     [a, b, c]
+fn size(t: Tree) -> Int:
+    match t:
+        Leaf -> 0
+        Node(l, _, r) -> size(l) + 1 + size(r)
+
+fn area(s: Shape) -> Int:
+    match s:
+        Dot -> 0
+        Circle(r) -> 3 * r * r
+        Rect(w, h) -> w * h
+
+test "sorting keeps the length" for xs: Array[Int]:
+    var ys = xs
+    sort(mut ys)
+    assert len(ys) == len(xs)
+
+test "larger is one of the two" for a: Int, b: Int:
+    let m = larger(a, b)
+    assert m == a or m == b
+    assert m >= a and m >= b
+
+test "an index within the array" for xs: Array[Int], i: Int where 0 <= i and i < len(xs):
+    assert xs[i] == xs[i]
+
+test "trees and pairs and maps" for t: Tree, p: Pair, m: Map[Str, Int], s: Set[Char], o: Int?, f: Float:
+    assert size(t) >= 0
+    assert len(p.b) >= 0
+    assert len(m) >= 0 and len(s) >= 0
+
+# a type that holds itself through an array
+type Rose = Tip | Branch(children: Array[Rose])
+
+fn tips(r: Rose) -> Int:
+    match r:
+        Tip -> 1
+        Branch(cs) ->
+            var n = 0
+            for c in cs:
+                n = n + tips(c)
+            n
+
+test "a tree of arrays of trees" for r: Rose:
+    assert tips(r) >= 0
+
+# the variant that ends is not the first, and has as many fields as the one that goes on
+type Chain = Link(next: Chain) | End(value: Int)
+
+fn links(c: Chain) -> Int:
+    match c:
+        Link(next) -> 1 + links(next)
+        End(_) -> 0
+
+test "a chain ends" for c: Chain:
+    assert links(c) >= 0
+
+# every step down is another type: Nest[Int], Nest[Array[Int]], and so on
+type Nest[T] = Stop | Down(next: Nest[Array[T]])
+
+fn steps[T](n: Nest[T]) -> Int:
+    match n:
+        Stop -> 0
+        Down(next) -> 1 + steps(next)
+
+test "a type whose arguments grow" for n: Nest[Int]:
+    assert steps(n) >= 0
+
+# two types that hold each other: the first ends with Last, which the generator has to find
+type First = More(next: Second) | Last(value: Int)
+type Second = Back(next: First)
+
+fn depth(f: First) -> Int:
+    match f:
+        More(Back(next)) -> 1 + depth(next)
+        Last(_) -> 0
+
+test "types that hold each other" for f: First:
+    assert depth(f) >= 0
+
+# each has a variant that ends, written after the one that goes on: what one type chose because
+# the other can end, the other has to honour
+type Ping = PingOn(next: Pong) | PingEnd(value: Int)
+type Pong = PongOn(next: Ping) | PongEnd(value: Int)
+
+fn rally(p: Ping) -> Int:
+    match p:
+        PingOn(PongOn(next)) -> 2 + rally(next)
+        PingOn(PongEnd(_)) -> 1
+        PingEnd(_) -> 0
+
+test "two types that can both end" for p: Ping:
+    assert rally(p) >= 0
+
+# one declaration inside itself with other arguments: Layer[Int] within Layer[Layer[Int]] is
+# another type, and Done(Done(0)) a value
+type Layer[T] = Again(next: Layer[T]) | Done(value: T)
+
+fn layers[T](l: Layer[T]) -> Int:
+    match l:
+        Again(next) -> 1 + layers(next)
+        Done(_) -> 0
+
+test "a type inside itself" for l: Layer[Layer[Int]]:
+    assert layers(l) >= 0
+
+# a long way to a value is still a way: thirty layers of one type, and thirty structs in a row
+test "a type thirty deep in itself" for l: Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Int]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]:
+    assert layers(l) >= 0
+
+type Box0 = struct(inner: Box1)
+type Box1 = struct(inner: Box2)
+type Box2 = struct(inner: Box3)
+type Box3 = struct(inner: Box4)
+type Box4 = struct(inner: Box5)
+type Box5 = struct(inner: Box6)
+type Box6 = struct(inner: Box7)
+type Box7 = struct(inner: Box8)
+type Box8 = struct(inner: Box9)
+type Box9 = struct(inner: Box10)
+type Box10 = struct(inner: Box11)
+type Box11 = struct(inner: Box12)
+type Box12 = struct(inner: Box13)
+type Box13 = struct(inner: Box14)
+type Box14 = struct(inner: Box15)
+type Box15 = struct(inner: Box16)
+type Box16 = struct(inner: Box17)
+type Box17 = struct(inner: Box18)
+type Box18 = struct(inner: Box19)
+type Box19 = struct(inner: Box20)
+type Box20 = struct(inner: Box21)
+type Box21 = struct(inner: Box22)
+type Box22 = struct(inner: Box23)
+type Box23 = struct(inner: Box24)
+type Box24 = struct(inner: Box25)
+type Box25 = struct(inner: Box26)
+type Box26 = struct(inner: Box27)
+type Box27 = struct(inner: Box28)
+type Box28 = struct(inner: Box29)
+type Box29 = struct(inner: Box30)
+type Box30 = struct(inner: Int)
+
+type Root = Retry(next: Root) | Finish(value: Box0)
+
+fn retries(r: Root) -> Int:
+    match r:
+        Retry(next) -> 1 + retries(next)
+        Finish(_) -> 0
+
+test "a long chain of structs" for r: Root:
+    assert retries(r) >= 0
+
+# a small type that holds a large one, written out: large is not growing
+type Held[T] = struct(value: Int)
+type Bridge = struct(value: Held[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Int]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]])
+type Trunk = Regrow(next: Trunk) | Leafy(value: Bridge)
+
+fn regrowths(t: Trunk) -> Int:
+    match t:
+        Regrow(next) -> 1 + regrowths(next)
+        Leafy(_) -> 0
+
+test "a small type that holds a large one" for t: Trunk:
+    assert regrowths(t) >= 0
+
+test "a snapshot":
+    assert_snapshot [(area(Rect(2, 3)), "rect"), (area(Circle(1)), "circle")]
+    assert_snapshot larger(4, 9)

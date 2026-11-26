@@ -68,6 +68,27 @@ for f in "$here"/unit/*.stn; do
     else note "FAIL unit/$(basename "$f")"; cat "$tmp/unit"; fail=$((fail + 1)); fi
 done
 
+# property and snapshot tests that fail (section 20.2): what the runner reports, with each input
+# shrunk and its seed, against tests/testing/failing.out
+(cd "$root" && "$starnite" test tests/testing/failing.stn) > "$tmp/failing" 2>&1; echo "exit $?" >> "$tmp/failing"
+if cmp -s "$tmp/failing" "$here/testing/failing.out"; then pass=$((pass + 1))
+else note "FAIL testing/failing"; diff "$here/testing/failing.out" "$tmp/failing" | head -10; fail=$((fail + 1)); fi
+
+# Two tests whose snapshots would share a file: neither may write it, with --update-snapshots
+# either. The stored copy is another value than both give, and must still be there afterwards.
+cp -r "$here/testing" "$tmp/testing"
+(cd "$tmp" && "$starnite" test --update-snapshots testing/failing.stn) > /dev/null 2>&1
+if [ "$(cat "$tmp/testing/snapshots/failing/same.snap")" = 7 ]; then pass=$((pass + 1)); else note "FAIL a snapshot shared by two tests was overwritten"; fail=$((fail + 1)); fi
+
+# a run of no cases would pass whatever a property says
+if (cd "$root" && "$starnite" test --cases 0 tests/unit/testing_kinds.stn) > "$tmp/cases" 2>&1; then note "FAIL --cases 0 was accepted"; fail=$((fail + 1)); else pass=$((pass + 1)); fi
+
+# bench blocks (section 20.3): the counters of each measure block and its budgets, one of them
+# broken, against tests/testing/benches.out
+(cd "$root" && "$starnite" test tests/testing/benches.stn) > "$tmp/benches" 2>&1; echo "exit $?" >> "$tmp/benches"
+if cmp -s "$tmp/benches" "$here/testing/benches.out"; then pass=$((pass + 1))
+else note "FAIL testing/benches"; diff "$here/testing/benches.out" "$tmp/benches" | head -10; fail=$((fail + 1)); fi
+
 # the fuzzer's own checks (tests/fuzz/selftest.sh): negative fuzzing against this compiler, and the
 # fuzzer against compilers with a fault put in, to see that it finds it and shrinks the program
 fuzz=${FUZZ:-"$root/_build/default/tests/fuzz/fuzz.exe"}

@@ -41,6 +41,13 @@ type env = {
 
 let out = Buffer.create 65536
 
+let bench_turn = ref false
+
+(* what `assert_snapshot` does with the text of its value: the test runner puts in a comparison
+   with the stored copy (section 20.2) *)
+let snapshot : (string -> Syntax.loc -> unit) ref =
+  ref (fun _ l -> raise (Assert_failed ("assert_snapshot is for test blocks", l)))
+
 (* Shared cells currently lent out by a long access (section 13.3), by identity. Each
    statement restores the list when it ends, as the C backend clears busy flags when
    the statement's frame ends. *)
@@ -782,6 +789,7 @@ and set_add env k ks key = match set_find env k ks key with Some _ -> ks | None 
 and builtin env name (tys : ty list) (vals : value list) loc : value * value list =
   let pure v = (v, vals) in
   match (name, vals) with
+  | "assert_snapshot_text@Str", [ VStr s ] -> !snapshot s loc; pure VUnit
   | "print@Str", [ VStr s ] -> Buffer.add_string out s; Buffer.add_char out '\n';
       if Buffer.length out > 60000 then flush_out ();
       pure VUnit
@@ -795,6 +803,10 @@ and builtin env name (tys : ty list) (vals : value list) loc : value * value lis
       (match In_channel.input_all stdin with
        | input -> pure (VStr (sanitize_utf8 input))
        | exception Sys_error _ -> trap "input error" loc "could not read stdin")
+  (* the reference interpreter has no counters: a measure block runs once *)
+  | "bench_end@Str", _ -> pure VUnit
+  | "bench_begin@Str", _ -> bench_turn := false; pure VUnit
+  | "bench_running@", [] -> bench_turn := not !bench_turn; pure (VBool !bench_turn)
   | "clock_ns@", [] -> pure (VInt (Int64.of_float (Unix.gettimeofday () *. 1e9)))
   | "len@Array", [ VArr a ] -> pure (VInt (Int64.of_int (Array.length a)))
   | "push@Array", [ VArr a; x ] -> (VUnit, [ VArr (Array.append a [| x |]); x ])
@@ -893,6 +905,13 @@ and builtin env name (tys : ty list) (vals : value list) loc : value * value lis
       pure (VArr (Array.of_list (List.rev_map (fun p -> VStr p) !parts)))
   | "join@Array", [ VArr xs; VStr sep ] -> pure (VStr (String.concat sep (List.map as_str (Array.to_list xs))))
   | "trim@Str", [ VStr s ] -> pure (VStr (String.trim s))
+  | "find_or_end@Str", [ VStr s; VStr sub; VInt from ] ->
+      let n = String.length s and m = String.length sub in
+      if from < 0L || from > Int64.of_int n then pure (VInt (-1L))
+      else begin
+        let rec go i = if i > n - m then -1 else if String.sub s i m = sub then i else go (i + 1) in
+        pure (VInt (Int64.of_int (go (Int64.to_int from))))
+      end
   | "contains@Str", [ VStr s; VStr sub ] ->
       let n = String.length s and m = String.length sub in
       let rec go i = i <= n - m && (String.sub s i m = sub || go (i + 1)) in

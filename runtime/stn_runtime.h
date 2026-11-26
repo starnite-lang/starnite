@@ -11,10 +11,14 @@
 #include <emmintrin.h>
 #endif
 
-/* ---- object header (section 11.1) ---- */
+/* ---- heap block header (section 11.1) ---- */
+/* A heap block, in full a heap allocation block, is one piece of counted memory that backs a
+   value: the buffer of an array or of a long string, the table of a map or set, one cell of a
+   boxed data type, a closure. The language has only values; these are how the runtime stores
+   them, and no program sees one. */
 typedef struct stn_header {
     uint32_t rc;          /* reference count */
-    uint16_t tag;         /* variant index; 0 for other objects */
+    uint16_t tag;         /* variant index; 0 for other heap blocks */
     uint8_t  flags;       /* STN_NOCOUNT | STN_ATOMIC */
     uint8_t  size_class;  /* allocator class, for reuse and free */
 } stn_header;
@@ -27,6 +31,19 @@ typedef uint8_t StnUnit;
 void* stn_alloc(size_t size);
 void  stn_free(void* p);
 
+/* ---- counters of bench blocks (section 20.3) ---- */
+/* What a `measure` block did, in numbers that are the same on every machine: allocations and
+   their bytes, copies of shared values (section 9.8), and counts raised or lowered. Compiled in
+   only for the counting build of a bench (STN_COUNTERS); otherwise these are nothing. */
+#ifdef STN_COUNTERS
+extern uint64_t stn_count_allocs, stn_count_bytes, stn_count_copies, stn_count_ops;
+#define STN_COUNT_OP() ((void)(stn_count_ops++))
+#define STN_COUNT_COPY() ((void)(stn_count_copies++))
+#else
+#define STN_COUNT_OP() ((void)0)
+#define STN_COUNT_COPY() ((void)0)
+#endif
+
 /* ---- counters of --profile-copies (section 9.8) ---- */
 /* Generated code names the statement it is in before anything that can copy or raise a count;
    the runtime reports what then happens there. Compiled in only for a profiled build. */
@@ -38,6 +55,7 @@ void stn_profile_event(int kind);
 
 static inline void stn_dup(void* p) {
     if ((uintptr_t)p & 1) return;                 /* field-less variant */
+    STN_COUNT_OP();
     stn_header* h = (stn_header*)p;
 #ifdef STN_PROFILE_COPIES
     /* only where a count does change: not for a field-less variant, nor a value never counted */
@@ -58,8 +76,43 @@ void stn_check_header(void* p);
 #  define STN_CHECK_HEADER(p) ((void)0)
 #endif
 
+/* ---- releasing large structures (section 9.7) ---- */
+/* A release function that drops what its heap block holds can start other releases. Each such
+   function goes in through stn_release_enter, which lets them nest only STN_RELEASE_DEPTH deep:
+   past that, and once STN_FREE_BUDGET heap blocks have been released in one go, the heap block is put on
+   a list instead, and released when the nesting has unwound, or at a later allocation when it was
+   the budget that stopped it. The stack a release needs is therefore bounded whatever the shape
+   of the structure. A release that drops nothing, a string's or an array of numbers', does not
+   take part and costs what it did. */
+#define STN_RELEASE_DEPTH 256
+extern int32_t stn_release_depth;      /* releases now running, one inside another */
+extern int64_t stn_release_left;       /* heap blocks that may still be released before a pause */
+extern int64_t stn_release_budget;     /* STN_FREE_BUDGET, or INT64_MAX without one */
+extern size_t  stn_release_pending;    /* heap blocks on the list */
+void stn_release_defer(void* p, void (*release)(void*));
+void stn_release_drain(int fresh);
+
+/* at the start of release, for p: 1 when p was put on the list instead, and release must return */
+static inline int stn_release_enter(void* p, void (*release)(void*)) {
+    if (__builtin_expect(stn_release_depth >= STN_RELEASE_DEPTH || --stn_release_left < 0, 0)) {
+        stn_release_defer(p, release);
+        return 1;
+    }
+    stn_release_depth++;
+    return 0;
+}
+/* at the end of a release that went in */
+static inline void stn_release_leave(void) {
+    if (--stn_release_depth == 0) {
+        /* what nesting put off is released now; what the budget put off waits for an allocation */
+        if (__builtin_expect(stn_release_pending != 0, 0)) stn_release_drain(0);
+        else stn_release_left = stn_release_budget;
+    }
+}
+
 static inline void stn_drop(void* p, void (*release)(void*)) {
     if ((uintptr_t)p & 1) return;
+    STN_COUNT_OP();
     stn_header* h = (stn_header*)p;
 #ifdef STN_DEBUG
     stn_check_header(p);
@@ -151,6 +204,7 @@ static inline __attribute__((always_inline)) StnStr stn_str_dup(StnStr s) {
 #ifdef STN_PROFILE_COPIES
             stn_profile_event(STN_PROFILE_VIEW);
 #endif
+            STN_COUNT_COPY();
             return stn_str_new_heap(s.ptr, (int64_t)(s.w1 & STN_STR_LEN_MASK));
         }
         stn_dup(stn_str_buf(s));
@@ -167,7 +221,7 @@ static inline __attribute__((always_inline)) void stn_str_drop(StnStr s) {
 #ifndef STN_DEBUG
     /* the common case, an unshared buffer counted by one thread, without a call */
     stn_header* h = (stn_header*)stn_str_buf(s);
-    if (__builtin_expect(h->flags == 0, 1)) { if (--h->rc == 0) stn_str_release(h); return; }
+    if (__builtin_expect(h->flags == 0, 1)) { STN_COUNT_OP(); if (--h->rc == 0) stn_str_release(h); return; }
 #endif
     stn_drop(stn_str_buf(s), stn_str_release);
 }
@@ -408,7 +462,7 @@ static inline int64_t stn_index(int64_t i, int64_t len, const char* file, int li
 typedef struct StnClosure {
     stn_header h;
     void* code;                           /* first parameter is the closure itself */
-    void (*release)(void* self);          /* releases the captures and the object */
+    void (*release)(void* self);          /* releases the captures and the heap block */
 } StnClosure;
 
 static inline void stn_closure_drop(StnClosure* c) { stn_drop(c, c->release); }
@@ -434,12 +488,24 @@ void    stn_print(const StnStr* s);
 int     stn_read_line(StnStr* out);
 StnStr  stn_read_all(const char* file, int line, int col);
 int64_t stn_clock_ns(void);
+/* A `measure` block (section 20.3) is `stn_bench_begin(...)` and then `while (stn_bench_running())`.
+   stn_bench_begin is given the bench and its budgets ("allocs<= copies==", their limits in a to
+   d), and starts the counters or the clock. stn_bench_running says whether the block should run:
+   in the counting build it runs once, and the counters are then printed and held to the budgets;
+   otherwise it runs for STN_BENCH_MS milliseconds and the time is printed. */
+void stn_bench_begin(const StnStr* name, const StnStr* label, int64_t n, const StnStr* spec,
+                     int64_t a, int64_t b, int64_t c, int64_t d);
+uint8_t stn_bench_running(void);
+/* after a bench has run: one whose measure block was never reached has kept no budget, and fails */
+void stn_bench_end(const StnStr* name);
 StnArray* stn_str_chars(const StnStr* s, const StnElemOps* char_ops);
 StnArray* stn_str_split(const StnStr* s, const StnStr* sep, const StnElemOps* str_ops, const char* file, int line, int col);
 StnStr  stn_str_join_parts(const StnStr* parts, int64_t n, StnStr sep);
 StnStr  stn_str_join(StnArray* xs, StnStr sep);
 StnStr  stn_str_trim(const StnStr* s);
 uint8_t stn_str_contains_slow(const StnStr* s, const StnStr* sub);
+/* the offset of the first sub in s at or after from; -1 for none, or for a from outside s */
+int64_t stn_str_find(const StnStr* s, const StnStr* sub, int64_t from);
 static inline uint8_t stn_str_contains(const StnStr* s, const StnStr* sub) {
 #if defined(__SSE2__) && defined(STN_STR_WORDS)
     /* A four-byte needle can be verified without a memcmp call. Scan a final overlapping vector

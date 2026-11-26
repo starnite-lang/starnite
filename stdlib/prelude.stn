@@ -42,9 +42,17 @@ trait IndexMut*[K, V]:
 
 # ---- console ----
 fn print*(s: Str) ! io
+# what `assert_snapshot e` becomes: the text of e, compared by the test runner with its stored copy
+fn assert_snapshot_text*(s: Str) ! io
 fn read_line*() -> Str? ! io
 fn read_all*() -> Str ! io
 fn clock_ns*() -> Int ! io
+# what the `measure:` line of a bench block becomes: bench_begin, given the limits of its budgets,
+# and then `while bench_running():`, the loop that runs the block and reports it
+fn bench_begin*(name: Str, label: Str, n: Int, spec: Str, a: Int, b: Int, c: Int, d: Int) ! io
+fn bench_running*() -> Bool ! io
+# after a bench has run: fails it when its measure block was never reached
+fn bench_end*(name: Str) ! io
 
 # ---- arrays ----
 fn len*[T](xs: Array[T]) -> Int
@@ -70,6 +78,9 @@ fn contains*(s: Str, sub: Str) -> Bool
 fn starts_with*(s: Str, prefix: Str) -> Bool
 fn ends_with*(s: Str, suffix: Str) -> Bool
 fn repeat*(s: Str, n: Int) -> Str
+# The byte offset of the first place at or after `from` where `sub` stands in `s`; -1 when there
+# is none, or when `from` is not an offset into `s`. An empty `sub` stands everywhere.
+fn find_or_end*(s: Str, sub: Str, from: Int) -> Int
 fn parse_int*(s: Str) -> Int ! ParseError
 fn parse_float*(s: Str) -> Float ! ParseError
 
@@ -243,17 +254,66 @@ fn sort*[T: Ord](mut xs: Array[T]):
         k += 1
 
 # ---- strings, written in Starnite ----
+# Searching instead of slicing: a parser that asks where the next separator is, and takes the piece
+# before it, never copies what it has not reached. The pieces are slices, which are views of `s`
+# while they are only read.
+
+# the byte offset of the first `sub` in `s`
+fn find*(s: Str, sub: Str) -> Int?:
+    find_from(s, sub, 0)
+
+# the byte offset of the first `sub` in `s` at or after the offset `from`
+fn find_from*(s: Str, sub: Str, from: Int) -> Int?:
+    let at = find_or_end(s, sub, from)
+    if at < 0:
+        None
+    else:
+        Some(at)
+
+# what stands before the first `sep` in `s`, and what stands after it
+fn split_once*(s: Str, sep: Str) -> (Str, Str)?:
+    let at = find_or_end(s, sep, 0)
+    if at < 0:
+        None
+    else:
+        Some((s[0..at], s[at + len(sep)..len(s)]))
+
+# The lines of `s`. A line ends at a newline, which is not part of it, nor is a carriage return
+# just before it; text after the last newline is a line too, unless it is empty.
+fn lines*(s: Str) -> Array[Str]:
+    var out: Array[Str] = []
+    var start = 0
+    while start < len(s):
+        var stop = find_or_end(s, "\n", start)
+        let ended = stop >= 0
+        if not ended:
+            stop = len(s)
+        # a carriage return is dropped only where a newline follows it
+        if ended and stop > start and byte_at_or_end(s, stop - 1) == 13:
+            out.push(s[start..stop - 1])
+        else:
+            out.push(s[start..stop])
+        if ended:
+            start = stop + 1
+        else:
+            start = stop
+    out
+
 # the pieces between runs of white space: a space, a tab, a newline or a carriage return
 fn words*(s: Str) -> Array[Str]:
     var out: Array[Str] = []
-    var cur = ""
-    for c in chars(s):
-        if c == ' ' or c == '\t' or c == '\n' or c == '\r':
-            if len(cur) > 0:
-                out.push(cur)
-                cur = ""
+    let n = len(s)
+    var i = 0
+    while i < n:
+        var c = byte_at_or_end(s, i)
+        if c == 32 or c == 9 or c == 10 or c == 13:
+            i += 1
         else:
-            cur = cur + f"{c}"
-    if len(cur) > 0:
-        out.push(cur)
+            var j = i + 1
+            c = byte_at_or_end(s, j)
+            while j < n and not (c == 32 or c == 9 or c == 10 or c == 13):
+                j += 1
+                c = byte_at_or_end(s, j)
+            out.push(s[i..j])
+            i = j
     out

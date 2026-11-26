@@ -97,11 +97,23 @@ let find_variant tb n =
 
 let found_opt = function Found (k, v) -> Some (k, v) | Private _ | Absent -> None
 
+(* Names that mean a function of the prelude and nothing else, whatever the program defines. The
+   compiler itself calls a few prelude functions for the program: for `assert_snapshot`, and for
+   the `measure:` block of a bench (section 20.3). Those calls are written `core!name`, which is
+   not a name a program can write, or, in text the driver makes up before parsing, by a name the
+   driver has checked stands nowhere in the file and lists here. *)
+let internal_names : (string * string) list ref = ref []
+
 (* The functions the name [n] can mean in the current module: its own and the prelude's, or,
    written `alias.name`, the exported ones of an imported module. *)
 let visible_fns tb n =
   let all x = try Hashtbl.find tb.by_name x with Not_found -> [] in
   let sg u = Hashtbl.find tb.fns u in
+  (* only in the module the driver made the names up for: in another module they are ordinary names *)
+  let n = match (if tb.cur = tb.entry then List.assoc_opt n !internal_names else None) with Some inner -> "core!" ^ inner | None -> n in
+  if String.length n > 5 && String.sub n 0 5 = "core!" then
+    List.filter (fun u -> (sg u).smodule = "core") (all (String.sub n 5 (String.length n - 5)))
+  else
   match split_qual n with
   | Some (alias, x) -> (
       match import_of tb alias with
@@ -1254,7 +1266,7 @@ and infer_name c l n exp : texpr =
                   let sg = Hashtbl.find c.tb.fns u in
                   if sg.slend <> None then
                     err "E0320" l "'%s' lends a place, so it cannot be used as a function value" n;
-                  (* a built-in has no body to make a closure object of, on the interpreter and in C alike *)
+                  (* a built-in has no body to make a closure block of, on the interpreter and in C alike *)
                   if is_builtin u then err "E0201" l "'%s' is built in, so it is called directly; wrap it to use it as a value, as in fn(...): %s(...)" n n;
                   let s, ps, ret, eff = instantiate sg in
                   let ty = TFn { fps = List.map (fun (m, _, t, _) -> (m, t)) ps; fret = ret; feff = eff } in
@@ -2630,7 +2642,11 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
       c.in_try <- c.in_try - 1;
       c.errs <- saved;
       mks (SAssertFails (et, te))
-  | AssertSnapshot _ -> err "E0100" l "snapshot tests arrive in milestone 2"
+  (* the value as Show formats it goes to the test runner, which holds the stored copy *)
+  | AssertSnapshot e ->
+      let shown = { d = FStr [ FExpr e ]; loc = l } in
+      let call = { d = Call ({ d = Name "core!assert_snapshot_text"; loc = l }, [ { aname = None; amode = None; aexpr = shown; aloc = l } ]); loc = l } in
+      mks (SExpr (infer c call))
   | Expr e -> mks (SExpr (infer c e))
   | If _ | Match _ -> mks (SExpr (check_stmt_expr c s None))
   | For (true, _, _, _, _) -> err "E0700" l "par for arrives in milestone 6"
@@ -2658,6 +2674,21 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
       loop_moves c before;
       mks (SFor (tp, src, tb))
   | While (cnd, body) ->
+      (* The loop a `measure:` block becomes (section 20.3) is ended by the runtime, which then
+         reports the counters and checks the budgets. Leaving it any other way would skip that. *)
+      (match cnd.d with
+       | Call ({ d = Name running; _ }, _) when c.tb.cur = c.tb.entry && List.assoc_opt running !internal_names = Some "bench_running" ->
+           let rec scan in_loop (b : block) =
+             List.iter (fun (st : stmt) ->
+                 match st.s with
+                 | Break when not in_loop -> err "E0100" st.sloc "a measure block cannot be left with break: its counters would never be reported"
+                 | Return _ -> err "E0100" st.sloc "a measure block cannot be left with return: its counters would never be reported"
+                 | If (branches, last) -> List.iter (fun (_, bl) -> scan in_loop bl) branches; Option.iter (scan in_loop) last
+                 | Match (_, arms) -> List.iter (fun (a : arm) -> scan in_loop a.abody) arms
+                 | For (_, _, _, _, bl) | While (_, bl) -> scan true bl
+                 | _ -> ()) b in
+           scan false body
+       | _ -> ());
       let tc = check c cnd TBool in
       c.loops <- c.loops + 1;
       let before = c.moved in
@@ -3361,9 +3392,16 @@ let check_program (prelude : Syntax.file) (imported : (string * Syntax.file) lis
                        sdeclared = false; sexport = false; smods = []; sloc = t.tsloc; smodule = entry; slend = None } in
             in_module tb entry @@ fun () ->
             let c = new_ctx tb sg None in
+            (* the inputs of a property test are variables of its body and of its where clause *)
+            let inputs = List.map (fun (p : param) ->
+                let pt = match p.pty with Some pt -> conv_ty c.tb c.tnames c.self_ty pt | None -> err "E0104" p.ploc "input '%s' needs a type" p.pname in
+                let v = new_var p.pname pt false VLocal in
+                bind c v p.ploc;
+                v) t.tsparams in
+            let cond = Option.map (fun e -> zonk_e (check c e TBool)) t.tswhere in
             let body = check_block c t.tsbody (Some TUnit) t.tsloc in
             finish_ctx c t.tsloc;
-            [ (t.tsname, zonk_e body, t.tsloc) ]
+            [ (t.tsname, zonk_e body, t.tsloc, inputs, cond) ]
         | _ -> [])
       user.items
   in

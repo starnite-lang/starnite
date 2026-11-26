@@ -171,6 +171,8 @@ type impl_def = {
 type test_def = {
   tsname : string;
   tsrejects : string option;
+  tsparams : param list;          (* a property test: `for x: T, y: U` (section 20.2) *)
+  tswhere : expr option;          (* its `where` clause *)
   tsbody : block;
   tsloc : loc;
 }

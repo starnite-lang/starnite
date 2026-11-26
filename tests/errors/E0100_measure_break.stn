@@ -1,0 +1,7 @@
+# expect: E0100 7:13
+fn main():
+    print("x")
+bench "left early" budget allocs == 0:
+    measure:
+        if len([1]) > 0:
+            break

@@ -1,0 +1,16 @@
+# A module with private functions named as the compiler names the calls it makes up for a bench
+# in the file it is given (tests/run/modules_bench_names.stn). Here they are ordinary names.
+fn __bench_begin() -> Int:
+    7
+
+fn __bench_running() -> Bool:
+    true
+
+fn seven*() -> Int:
+    __bench_begin()
+
+fn running*() -> Int ! io:
+    if __bench_running():
+        7
+    else:
+        0

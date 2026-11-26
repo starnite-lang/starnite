@@ -724,8 +724,19 @@ let parse_item st : item =
         end else None
       in
       let name = match peek st with STR s -> advance st; s | _ -> unexpected st "a test name" in
+      (* a property test: for x: T, y: U [where cond] *)
+      let params, cond =
+        if accept_kw st "for" then begin
+          let rec more acc =
+            let p = parse_param st in
+            if p.pmode <> MBorrow then raise (Error ("E0100", p.ploc, "an input of a property test is written `name: Type`"));
+            if accept_op st "," then more (p :: acc) else List.rev (p :: acc) in
+          let ps = more [] in
+          let cond = if is_ident st "where" || is_kw st "where" then (advance st; Some (parse_expr st)) else None in
+          (ps, cond)
+        end else ([], None) in
       expect_op st ":";
-      ITest { tsname = name; tsrejects = rej; tsbody = parse_block st; tsloc = l }
+      ITest { tsname = name; tsrejects = rej; tsparams = params; tswhere = cond; tsbody = parse_block st; tsloc = l }
   | KW "trait" ->
       advance st;
       let n = ident st in

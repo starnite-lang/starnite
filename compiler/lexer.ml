@@ -117,20 +117,31 @@ let first_invalid_utf8 (s : string) : int option =
   in
   go 0
 
+(* The line to report for each line of the text being read, when that text is not the file as it
+   was written: the driver puts lines in for a bench block (section 20.3), and positions must
+   still be those of the file. Empty when the text is the file. *)
+let line_map : int array ref = ref [||]
+
 let raw_lex (file : string) (src : string) ?(line0 = 1) ?(col0 = 1) () : raw list =
   (* source files are UTF-8 (section 1), so every literal holds valid text *)
   (match first_invalid_utf8 src with
    | Some bad ->
        let line = ref line0 and lstart = ref 0 in
        String.iteri (fun j ch -> if j < bad && ch = '\n' then (incr line; lstart := j + 1)) src;
-       error "E0100" { file; line = !line; col = bad - !lstart + 1 } "the source is not valid UTF-8"
+       (* reported as a line of the file, like every other position (see line_map) *)
+       let line = if line0 = 1 && col0 = 1 && !line < Array.length !line_map then !line_map.(!line) else !line in
+       error "E0100" { file; line; col = bad - !lstart + 1 } "the source is not valid UTF-8"
    | None -> ());
   let n = String.length src in
   let toks = ref [] in
   let i = ref 0 and line = ref line0 and lstart = ref 0 in
   let col0_first = ref (col0 - 1) in
   let at_bol = ref true in
-  let loc_at p = { file; line = !line; col = p - !lstart + 1 + (if !line = line0 then !col0_first else 0) } in
+  (* a whole file starts at line 1, column 1; a piece of one, such as the inside of an f-string,
+     starts where it stands, and its lines are already the ones to report *)
+  let whole = line0 = 1 && col0 = 1 in
+  let reported n = if whole && n < Array.length !line_map then !line_map.(n) else n in
+  let loc_at p = { file; line = reported !line; col = p - !lstart + 1 + (if !line = line0 then !col0_first else 0) } in
   let push t l =
     toks := { r = t; rloc = l; bol = !at_bol } :: !toks;
     at_bol := false

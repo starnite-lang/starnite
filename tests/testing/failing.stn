@@ -1,0 +1,76 @@
+# Property and snapshot tests that fail (section 20.2). tests/run.sh compares what the runner
+# prints with failing.out: each failing input shrunk to the smallest that still fails, the seed
+# that gives it again, a where clause that nothing passes, and a snapshot that differs.
+type Shape = Dot | Circle(r: Int) | Rect(w: Int, h: Int)
+type Tree = Leaf | Node(left: Tree, value: Int, right: Tree)
+type Pair = struct(a: Int, b: Str)
+
+fn larger(a: Int, b: Int) -> Int:
+    if a > b:
+        a
+    else:
+        b
+
+fn size(t: Tree) -> Int:
+    match t:
+        Leaf -> 0
+        Node(l, _, r) -> size(l) + 1 + size(r)
+
+fn area(s: Shape) -> Int:
+    match s:
+        Dot -> 0
+        Circle(r) -> 3 * r * r
+        Rect(w, h) -> w * h
+
+test "wrong: no array is longer than three" for xs: Array[Int]:
+    assert len(xs) <= 3
+
+test "wrong: areas are small" for s: Shape:
+    assert area(s) < 50
+
+test "wrong: where nothing passes" for a: Int where a > 1000000 and a < 1000002:
+    assert a == 1000001
+
+test "wrong: traps on a sum" for a: Int, b: Int:
+    assert a + b == b + a
+
+test "wrong: a snapshot that differs":
+    assert_snapshot larger(4, 9)
+
+# a type with no value: every Ring holds another
+type Ring = Link(next: Ring)
+
+test "wrong: nothing to generate" for r: Ring:
+    assert true
+
+# two names that differ only in what a file name does not keep
+test "names collide!":
+    assert_snapshot 1
+
+test "names collide?":
+    assert_snapshot 1
+
+# two tests of one name
+test "same":
+    assert_snapshot 1
+
+test "same":
+    assert_snapshot 2
+
+# the second snapshot of one test and the first of another whose name ends in -2 are two files
+test "sample":
+    assert_snapshot 10
+    assert_snapshot 20
+
+test "sample-2":
+    assert_snapshot 30
+
+# the snapshot is taken in a function the tests call: they share a file all the same
+fn kept(n: Int) ! io:
+    assert_snapshot n
+
+test "in a helper":
+    kept(1)
+
+test "in_a_helper":
+    kept(2)

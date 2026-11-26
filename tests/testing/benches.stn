@@ -1,0 +1,96 @@
+# Bench blocks with counters and budgets (section 20.3). `starnite test` runs each measure block
+# once in the counting build and holds it to its budgets; tests/run.sh compares what that prints
+# with benches.out. The counters are the same on every machine: the list is changed in place with
+# no allocation, it is read without a count being touched, and the last bench breaks its budget on
+# purpose. `starnite bench` adds the times, from a build without the counters.
+type List = Nil | Cons(head: Int, tail: List)
+
+fn range(n: Int) -> List:
+    var out = Nil
+    var i = n
+    while i > 0:
+        i = i - 1
+        out = Cons(i, out)
+    out
+
+fn bump(take xs: List, by: Int) -> List:
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) -> Cons(x + by, bump(take rest, by))
+
+fn total(xs: List) -> Int:
+    match xs:
+        Nil -> 0
+        Cons(x, rest) -> x + total(rest)
+
+bench "bump in place" for n in [10, 1000] budget allocs == 0 budget copies == 0:
+    var xs = range(n)
+    measure:
+        xs = bump(take xs, 1)
+
+bench "read a list" budget count_ops == 0 budget allocs == 0:
+    let xs = range(100)
+    var sum = 0
+    measure:
+        sum = sum + total(xs)
+
+# a limit that itself allocates: it is worked out before the counters start
+bench "a limit that allocates" budget allocs <= len([1, 2]) - 2:
+    var sum = 0
+    measure:
+        sum = sum + 1
+
+# a limit worked out from setup that the block then changes: it is worked out once, before
+bench "a limit from setup" budget allocs <= (1 / divisor) - 1:
+    var divisor = 1
+    measure:
+        divisor = 0
+
+# the first run of the block is the one that is counted: this one allocates only then
+bench "allocates the first time" budget allocs == 0:
+    var first = true
+    measure:
+        if first:
+            print(f"{len([1])}")
+        first = false
+
+# the names the compiler makes up for a bench are not names a bench can have used
+bench "a name of its own" for __bench_a in [7] budget allocs == 0:
+    let __bench_b = __bench_a + 1
+    measure:
+        print(f"{__bench_a} {__bench_b}")
+
+# functions of the program with the names of the two the prelude has for benches: a bench goes
+# on meaning the prelude's
+fn bench_begin(name: Str, label: Str, n: Int, spec: Str, a: Int, b: Int, c: Int, d: Int):
+    print("not this one")
+
+fn bench_running() -> Bool:
+    false
+
+fn assert_snapshot_text(s: Str) ! io:
+    print("nor this one")
+
+# a measure block that is never reached has kept no budget: the bench fails
+bench "never measured" budget allocs == 0:
+    let wanted = 0
+    if wanted > 0:
+        measure:
+            print("measured")
+
+bench "build a list" for n in [100] budget allocs <= 50 budget time < 5ms:
+    var sum = 0
+    measure:
+        sum = sum + total(range(n))
+
+test "ranges add up":
+    assert total(range(4)) == 6
+
+fn main() ! io:
+    print(f"{total(bump(range(3), 1))}")
+
+## An example in a doc comment after bench blocks, which put lines into the text the compiler
+## reads: it is named and reported by its own line in this file.
+##
+##     >>> total(range(3))
+##     4

@@ -1,0 +1,32 @@
+# Releasing large structures (section 9.7). A tree a million deep on its left, and a million
+# values each held in the array of the next, are released without a stack as deep as they are:
+# releases nest only so far before the rest is put on a list. tests/deep.sh runs this with the
+# debug and release C builds, and again with STN_FREE_BUDGET, which releases a bounded number of
+# heap blocks at a time. The debug runtime checks at exit that everything was released.
+type Tree = Leaf | Node(left: Tree, value: Int, right: Tree)
+type Rose = Rose(value: Int, kids: Array[Rose])
+
+fn left_spine(n: Int) -> Tree:
+    var t = Leaf
+    var i = 0
+    while i < n:
+        t = Node(t, i, Leaf)
+        i = i + 1
+    t
+
+fn chain(n: Int) -> Rose:
+    var r = Rose(0, [])
+    var i = 1
+    while i < n:
+        r = Rose(i, [r])
+        i = i + 1
+    r
+
+fn main() ! io:
+    let t = left_spine(1000000)
+    match t:
+        Node(_, v, _) -> print(f"{v}")
+        Leaf -> print("leaf")
+    let r = chain(1000000)
+    match r:
+        Rose(v, _) -> print(f"{v}")

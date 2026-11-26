@@ -17,5 +17,14 @@ for mode in "" --release; do
     if cmp -s "$tmp/out" "$here/deep/destination_passing.out"; then pass=$((pass + 1))
     else echo "FAIL deep/destination_passing ${mode:-debug}"; diff "$here/deep/destination_passing.out" "$tmp/out" | head -10; fail=$((fail + 1)); fi
 done
+# releasing structures that are deep where a release cannot loop (section 9.7), all at once and
+# a thousand heap blocks at a time
+for mode in "" --release; do
+    for budget in "" 1000; do
+        STN_FREE_BUDGET=$budget "$starnite" run $mode "$here/deep/release.stn" < /dev/null > "$tmp/out" 2>&1; echo "exit $?" >> "$tmp/out"
+        if cmp -s "$tmp/out" "$here/deep/release.out"; then pass=$((pass + 1))
+        else echo "FAIL deep/release ${mode:-debug} ${budget:+budget $budget}"; diff "$here/deep/release.out" "$tmp/out" | head -10; fail=$((fail + 1)); fi
+    done
+done
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]

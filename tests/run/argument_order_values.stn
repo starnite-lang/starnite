@@ -1,0 +1,59 @@
+# Arguments are evaluated left to right (section 4.4): a read-only argument, and a take argument
+# of a function that only reads it, has the value its variable had when it was reached, whatever
+# the arguments after it then do to the variable.
+type List = Nil | Cons(head: Int, tail: List)
+
+fn grow(mut l: Array[Int]) -> Int:
+    l.push(4)
+    l[0] = 100
+    5
+
+fn total(take xs: Array[Int], n: Int) -> Int:
+    var t = n
+    for x in xs:
+        t = t + x
+    t
+
+fn total_read(xs: Array[Int], n: Int) -> Int:
+    var t = n
+    for x in xs:
+        t = t + x
+    t
+
+fn empty(mut l: List) -> Int:
+    l = Nil
+    5
+
+fn walk(take l: List, n: Int) -> Int:
+    match l:
+        Nil -> n
+        Cons(x, rest) -> x + walk(take rest, n)
+
+fn shrink(mut a: Array[List]) -> Int:
+    a.clear()
+    10
+
+fn lengthen(mut s: Str) -> Int:
+    s = "hello, " + s
+    0
+
+fn bump(mut n: Int) -> Int:
+    n = n + 10
+    1
+
+fn add(a: Int, b: Int) -> Int:
+    a + b
+
+fn main() ! io:
+    var a = [1, 2, 3]
+    print(f"{total(a, grow(mut a))} {len(a)}")
+    var b = [1, 2, 3]
+    print(f"{total_read(b, grow(mut b))} {len(b)}")
+    var l = Cons(1, Cons(2, Nil))
+    print(f"{walk(l, empty(mut l))} {walk(l, 0)}")
+    var lists = [Cons(7, Cons(8, Nil))]
+    print(f"{walk(lists[0], shrink(mut lists))} {len(lists)}")
+    var s = "world of strings long enough to live in a buffer"
+    print(f"{find_or_end(s, "world", lengthen(mut s))} {len(s)}")
+    var n = 1
+    print(f"{add(n, bump(mut n))} {n}")

@@ -160,6 +160,11 @@ let definitions (text : string) : (string * int * int) list =
 
 let starts_with p s = String.length s >= String.length p && String.sub s 0 (String.length p) = p
 
+(* the list of releases put off (section 9.7) grows by the allocator of C, and only when a
+   structure is released that is deeper than releases may nest; it is the runtime's own
+   bookkeeping, not memory of the program, and a release is not held to be an allocation *)
+let bookkeeping = [ "stn_release_defer"; "stn_release_drain" ]
+
 (* What the runtime does without allocating: its functions, and its macros that take arguments,
    from which no path reaches the allocator of C. Read from the runtime's own source, which the
    compiler carries, so the list cannot fall behind it. *)
@@ -202,12 +207,14 @@ let quiet : (string, unit) Hashtbl.t Lazy.t = lazy (
       tokens body 0 (String.length body) (fun _ tok -> match tok with Call n -> acc := n :: !acc | _ -> ());
       Hashtbl.replace calls nm !acc) bodies;
   let alloc = Hashtbl.create 64 in
-  List.iter (fun n -> Hashtbl.replace alloc n ()) [ "malloc"; "calloc"; "realloc"; "aligned_alloc"; "posix_memalign"; "strdup"; "getline"; "fopen" ];
+  List.iter (fun n -> Hashtbl.replace alloc n ()) (* stn_alloc is named outright: it calls the allocator of C by a spelling that is not a call *)
+    [ "malloc"; "calloc"; "realloc"; "aligned_alloc"; "posix_memalign"; "strdup"; "getline"; "fopen"; "stn_alloc" ];
   let changed = ref true in
   while !changed do
     changed := false;
     Hashtbl.iter (fun nm cs ->
-        if not (Hashtbl.mem alloc nm) && List.exists (Hashtbl.mem alloc) cs then (Hashtbl.replace alloc nm (); changed := true)) calls
+        if not (Hashtbl.mem alloc nm) && not (List.mem nm bookkeeping) && List.exists (Hashtbl.mem alloc) cs then
+          (Hashtbl.replace alloc nm (); changed := true)) calls
   done;
   let q = Hashtbl.create 256 in
   Hashtbl.iter (fun nm _ -> if not (Hashtbl.mem alloc nm) then Hashtbl.replace q nm ()) bodies;
@@ -217,7 +224,7 @@ type cause = Direct of int * string | Via of int * string   (* offset in the bod
 
 let run ~(records : fn_record list) ~(names : (string * string) list) ~(text : string) : unit =
   let quiet_set = Hashtbl.create 128 in
-  List.iter (fun n -> Hashtbl.replace quiet_set n ()) (c_names @ arithmetic @ final);
+  List.iter (fun n -> Hashtbl.replace quiet_set n ()) (c_names @ arithmetic @ final @ bookkeeping);
   let is_quiet n = Hashtbl.mem quiet_set n || Hashtbl.mem (Lazy.force quiet) n || List.exists (fun p -> starts_with p n) quiet_prefixes in
   let dup_set = Hashtbl.create 8 in
   List.iter (fun n -> Hashtbl.replace dup_set n ()) dups;

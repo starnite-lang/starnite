@@ -22,6 +22,26 @@
 
 int64_t stn_live_objects = 0;
 
+/* ---- the allocator of C, as the runtime uses it ---- */
+/* Every allocation the runtime makes from here on, of any size and for whatever it is, first
+   takes up releases that a budget put off (section 9.7), and is counted in the counting build
+   of a bench (section 20.3). */
+#ifdef STN_COUNTERS
+uint64_t stn_count_allocs, stn_count_bytes, stn_count_copies, stn_count_ops;
+#define STN_COUNT_ALLOC(n) ((void)(stn_count_allocs++, stn_count_bytes += (n)))
+#else
+#define STN_COUNT_ALLOC(n) ((void)0)
+#endif
+static inline void stn_release_resume(void) {
+    if (__builtin_expect(stn_release_pending != 0, 0) && stn_release_depth == 0) stn_release_drain(1);
+}
+static void* stn_sys_malloc(size_t n) { stn_release_resume(); STN_COUNT_ALLOC(n); return malloc(n); }
+static void* stn_sys_calloc(size_t k, size_t n) { stn_release_resume(); STN_COUNT_ALLOC(k * n); return calloc(k, n); }
+static void* stn_sys_realloc(void* p, size_t n) { stn_release_resume(); STN_COUNT_ALLOC(n); return realloc(p, n); }
+#define malloc(n) stn_sys_malloc(n)
+#define calloc(k, n) stn_sys_calloc(k, n)
+#define realloc(p, n) stn_sys_realloc(p, n)
+
 /* ---- allocation (section 11.2) ---- */
 /* Size classes step by 16 bytes up to 1 KiB, with a free list per class. Milestone 1 is
    single-threaded, so the lists are plain globals; milestone 6 makes them per thread. */
@@ -33,17 +53,26 @@ void* stn_alloc(size_t size) {
     stn_header* h;
     /* compare before rounding up, so a huge size cannot wrap into a small class */
     size_t cls = size <= (size_t)STN_CLASSES * 16 ? (size + 15) / 16 : STN_CLASSES + 1;
+    /* a release that STN_FREE_BUDGET stopped goes on here, a budget's worth at a time, whatever
+       the size asked for; once, so the allocator of C is then called by its own name */
+    stn_release_resume();
     if (cls <= STN_CLASSES) {
         if (cls == 0) cls = 1;
         stn_free_node* n = stn_free_lists[cls];
-        if (n) { stn_free_lists[cls] = n->next; h = (stn_header*)n; }
+        if (n) {
+            stn_free_lists[cls] = n->next; h = (stn_header*)n;
+            /* a cell taken back from the free list is an allocation all the same */
+            STN_COUNT_ALLOC(cls * 16);
+        }
         else {
-            h = (stn_header*)malloc(cls * 16);
+            STN_COUNT_ALLOC(cls * 16);
+            h = (stn_header*)(malloc)(cls * 16);
             if (!h) { fputs("trap: out of memory\n", stderr); exit(2); }
         }
         h->size_class = (uint8_t)cls;
     } else {
-        h = (stn_header*)malloc(size);
+        STN_COUNT_ALLOC(size);
+        h = (stn_header*)(malloc)(size);
         if (!h) { fputs("trap: out of memory\n", stderr); exit(2); }
         h->size_class = 0;
     }
@@ -54,13 +83,64 @@ void* stn_alloc(size_t size) {
     return h;
 }
 
+/* ---- releasing large structures (section 9.7) ---- */
+int32_t stn_release_depth = 0;
+int64_t stn_release_left = INT64_MAX;
+int64_t stn_release_budget = INT64_MAX;
+size_t  stn_release_pending = 0;
+typedef struct { void* p; void (*release)(void*); } StnPending;
+static StnPending* stn_pending;
+static size_t stn_pending_cap;
+
+void stn_release_defer(void* p, void (*release)(void*)) {
+    if (stn_release_pending == stn_pending_cap) {
+        size_t cap = stn_pending_cap ? stn_pending_cap * 2 : 256;
+        /* by its own name: growing the list must not start taking from it */
+        StnPending* grown = (StnPending*)(realloc)(stn_pending, cap * sizeof *grown);
+        /* Without room for the list there is no way on: the release function would only come
+           back here. Out of memory is a trap, as it is for any allocation. */
+        if (!grown) { fputs("trap: out of memory\n", stderr); exit(2); }
+        stn_pending = grown; stn_pending_cap = cap;
+    }
+    stn_pending[stn_release_pending].p = p;
+    stn_pending[stn_release_pending].release = release;
+    stn_release_pending++;
+}
+
+/* Releases what is on the list, last in first out, so the list stays as short as the structure
+   is wide. Stops when the budget of this go is spent; what is left waits for an allocation, which
+   starts a fresh go. Until the list is empty the budget stays spent, so that whatever else reaches
+   zero meanwhile joins the list. */
+void stn_release_drain(int fresh) {
+    if (fresh) stn_release_left = stn_release_budget;
+    while (stn_release_pending != 0 && --stn_release_left >= 0) {
+        /* the release goes in through stn_release_enter again, now at no depth; the budget it
+           takes there is the one this turn of the loop counted */
+        StnPending e = stn_pending[--stn_release_pending];
+        stn_release_left++;
+        stn_release_depth = 1;
+        e.release(e.p);
+        stn_release_depth = 0;
+    }
+    if (stn_release_pending == 0) stn_release_left = stn_release_budget;
+}
+
+static void stn_release_setup(void) {
+    const char* s = getenv("STN_FREE_BUDGET");
+    if (s && *s) {
+        char* end;
+        long long n = strtoll(s, &end, 10);
+        if (*end == 0 && n > 0) { stn_release_budget = n; stn_release_left = n; }
+    }
+}
+
 void stn_free(void* p) {
     stn_header* h = (stn_header*)p;
     size_t cls = h->size_class;
 #ifdef STN_DEBUG
     stn_live_objects--;
     /* Freed memory is poisoned and held in a quarantine, so a later drop of the same
-       object reads the poison rather than memory malloc has reused. */
+       heap block reads the poison rather than memory malloc has reused. */
     if (cls) memset(h, 0xDB, cls * 16); else memset(h, 0xDB, sizeof(stn_header));
     static void* quarantine[1 << 16];
     static size_t next = 0;
@@ -79,7 +159,7 @@ void stn_free(void* p) {
 void stn_check_header(void* p) {
     stn_header* h = (stn_header*)p;
     if (h->rc == 0xDBDBDBDBu || (h->flags == 0 && h->rc == 0)) {
-        fputs("debug runtime: drop of a released object\n", stderr);
+        fputs("debug runtime: drop of a released heap block\n", stderr);
         abort();
     }
 }
@@ -398,9 +478,15 @@ StnStr stn_show_char(uint32_t c) { char b[4]; int n = stn_utf8_encode(b, c); ret
 void stn_array_release(void* p) {
     StnArray* a = (StnArray*)p;
     if (a->ops->drop) {
+        if (stn_release_enter(p, stn_array_release)) return;
         size_t sz = a->ops->size;
         for (int64_t i = 0; i < a->len; i++) a->ops->drop(a->data + (size_t)i * sz);
+        stn_free(a);
+        stn_release_leave();
+        return;
     }
+    /* an array that holds nothing counted starts no release, but is a heap block of the budget */
+    if (__builtin_expect(--stn_release_left < 0, 0)) { stn_release_defer(p, stn_array_release); return; }
     stn_free(a);
 }
 
@@ -426,6 +512,7 @@ static StnArray* stn_array_copy(StnArray* a, int64_t cap) {
 #ifdef STN_PROFILE_COPIES
     stn_profile_event(STN_PROFILE_ARRAY);
 #endif
+    STN_COUNT_COPY();
     StnArray* b = stn_array_new(a->ops, cap);
     size_t sz = a->ops->size;
     memcpy(b->data, a->data, (size_t)a->len * sz);
@@ -969,6 +1056,107 @@ int64_t stn_clock_ns(void) {
     return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
+/* ---- bench blocks (section 20.3) ---- */
+static int stn_bench_on, stn_bench_failed, stn_bench_reached;
+static int64_t stn_bench_start_ns, stn_bench_iters, stn_bench_target;
+#ifdef STN_COUNTERS
+static uint64_t stn_bench_base[4];
+#endif
+
+static void stn_bench_title(const StnStr* name, const StnStr* label, int64_t n) {
+    int64_t k, l;
+    const char* nm = stn_str_span(name, &k);
+    const char* lb = stn_str_span(label, &l);
+    printf("bench %.*s", (int)k, nm);
+    if (l > 0) printf("  %.*s=%lld", (int)l, lb, (long long)n);
+}
+
+/* what stn_bench_start was given, kept for the report: the strings are literals of the program */
+static StnStr stn_bench_name, stn_bench_label, stn_bench_spec;
+static int64_t stn_bench_n, stn_bench_limits[4];
+
+void stn_bench_begin(const StnStr* name, const StnStr* label, int64_t n, const StnStr* spec,
+                     int64_t a, int64_t b, int64_t c, int64_t d) {
+    stn_bench_name = *name; stn_bench_label = *label; stn_bench_spec = *spec; stn_bench_n = n;
+    stn_bench_limits[0] = a; stn_bench_limits[1] = b; stn_bench_limits[2] = c; stn_bench_limits[3] = d;
+    stn_bench_on = 1; stn_bench_reached = 1;
+    /* what is measured starts here: the first thing after this call is the block itself */
+#ifdef STN_COUNTERS
+    stn_bench_base[0] = stn_count_allocs; stn_bench_base[1] = stn_count_bytes;
+    stn_bench_base[2] = stn_count_copies; stn_bench_base[3] = stn_count_ops;
+#else
+    const char* ms = getenv("STN_BENCH_MS");
+    stn_bench_target = (ms && atoll(ms) > 0 ? atoll(ms) : 300) * 1000000LL;
+    stn_bench_iters = 0;
+    stn_bench_start_ns = stn_clock_ns();
+#endif
+}
+
+void stn_bench_end(const StnStr* name) {
+    if (!stn_bench_reached) {
+        int64_t k;
+        const char* nm = stn_str_span(name, &k);
+        stn_flush();
+        printf("bench %.*s\nFAIL its measure block was never reached, so nothing was measured\n", (int)k, nm);
+        fflush(stdout);
+        stn_bench_failed = 1;
+    }
+    stn_bench_reached = 0;
+}
+
+uint8_t stn_bench_running(void) {
+    if (!stn_bench_on) return 0;
+    /* the call that opens the loop: the block has not run yet */
+    if (stn_bench_on == 1) { stn_bench_on = 2; return 1; }
+#ifdef STN_COUNTERS
+    static const char* const names[4] = { "allocs", "alloc_bytes", "copies", "count_ops" };
+    uint64_t got[4] = { stn_count_allocs - stn_bench_base[0], stn_count_bytes - stn_bench_base[1],
+                        stn_count_copies - stn_bench_base[2], stn_count_ops - stn_bench_base[3] };
+    stn_bench_on = 0;
+    stn_flush();
+    stn_bench_title(&stn_bench_name, &stn_bench_label, stn_bench_n);
+    for (int i = 0; i < 4; i++) printf("  %s %llu", names[i], (unsigned long long)got[i]);
+    printf("\n");
+    /* the budgets: each a counter and a comparison, with its limit in order */
+    int64_t len;
+    const char* text = stn_str_span(&stn_bench_spec, &len);
+    int which = 0;
+    for (int64_t i = 0; i < len && which < 4; which++) {
+        while (i < len && text[i] == ' ') i++;
+        int64_t from = i;
+        while (i < len && text[i] != '<' && text[i] != '=') i++;
+        int64_t op = i;
+        while (i < len && text[i] != ' ') i++;
+        if (op == from) break;
+        int counter = -1;
+        for (int j = 0; j < 4; j++)
+            if ((int64_t)strlen(names[j]) == op - from && memcmp(names[j], text + from, (size_t)(op - from)) == 0) counter = j;
+        if (counter < 0) continue;   /* time: not a counter, and not checked here */
+        int strict = i - op == 1, equal = text[op] == '=';
+        int64_t wanted = stn_bench_limits[which];
+        uint64_t limit = (uint64_t)wanted;
+        int ok = wanted >= 0 && (equal ? got[counter] == limit : strict ? got[counter] < limit : got[counter] <= limit);
+        if (!ok) {
+            printf("FAIL budget %s %.*s %lld: it was %llu\n", names[counter], (int)(i - op), text + op,
+                   (long long)wanted, (unsigned long long)got[counter]);
+            stn_bench_failed = 1;
+        }
+    }
+    fflush(stdout);
+    return 0;
+#else
+    stn_bench_iters++;
+    int64_t spent = stn_clock_ns() - stn_bench_start_ns;
+    if (spent < stn_bench_target) return 1;
+    stn_bench_on = 0;
+    stn_flush();
+    stn_bench_title(&stn_bench_name, &stn_bench_label, stn_bench_n);
+    printf("  %.1f ns per iteration over %lld\n", (double)spent / (double)stn_bench_iters, (long long)stn_bench_iters);
+    fflush(stdout);
+    return 0;
+#endif
+}
+
 /* ---- maps and sets (section 3.6) ---- */
 uint64_t stn_hash_k0 = UINT64_C(0x0706050403020100), stn_hash_k1 = UINT64_C(0x0f0e0d0c0b0a0908);
 
@@ -1186,7 +1374,10 @@ StnMap* stn_map_with_capacity(const StnMapOps* ops, int64_t n) {
 void stn_map_release(void* p) {
     StnMap* m = (StnMap*)p;
     const StnMapOps* ops = m->ops;
-    if (ops->kdrop || ops->vdrop)
+    int nests = ops->kdrop || ops->vdrop;
+    if (nests && stn_release_enter(p, stn_map_release)) return;
+    if (!nests && __builtin_expect(--stn_release_left < 0, 0)) { stn_release_defer(p, stn_map_release); return; }
+    if (nests)
         for (int64_t i = 0; i < m->used; i++) {
             char* e = m->entries + (size_t)i * m->stride;
             if (stn_map_dead(m, i, e)) continue;
@@ -1195,6 +1386,7 @@ void stn_map_release(void* p) {
         }
     free(m->index); free(m->entries); free(m->dead);
     stn_free(m);
+    if (nests) stn_release_leave();
 }
 
 /* A write needs the box unshared (section 4.5): the copy keeps the order and shares nothing. */
@@ -1202,6 +1394,7 @@ static void stn_map_copy_for_write(StnMap** pm) {
 #ifdef STN_PROFILE_COPIES
     stn_profile_event(STN_PROFILE_MAP);
 #endif
+    STN_COUNT_COPY();
     StnMap* m = *pm;
     const StnMapOps* ops = m->ops;
     StnMap* c = stn_map_new(ops);
@@ -1571,6 +1764,15 @@ uint8_t stn_str_contains_slow(const StnStr* s, const StnStr* sub) {
     const char* data = stn_str_span(s, &n);
     return m == 0 || stn_find_bytes(data, (size_t)n, sub_data, (size_t)m) != NULL;
 }
+int64_t stn_str_find(const StnStr* s, const StnStr* sub, int64_t from) {
+    int64_t m, n;
+    const char* sub_data = stn_str_span(sub, &m);
+    const char* data = stn_str_span(s, &n);
+    if (from < 0 || from > n) return -1;
+    if (m == 0) return from;
+    const char* at = stn_find_bytes(data + from, (size_t)(n - from), sub_data, (size_t)m);
+    return at ? (int64_t)(at - data) : -1;
+}
 StnStr stn_str_repeat(const StnStr* s, int64_t n, const char* file, int line, int col) {
     if (n < 0) stn_trap("invalid argument", file, line, col, "negative repeat count");
     int64_t k;
@@ -1726,6 +1928,7 @@ static void stn_on_fault(int sig, siginfo_t* si, void* ctx) {
 }
 void stn_runtime_init(void) {
     stn_hash_init();
+    stn_release_setup();
     struct rlimit rl;
     char here;
     stn_stack_high = (uintptr_t)&here;
@@ -1744,7 +1947,7 @@ void stn_runtime_init(void) {
     sigaction(SIGBUS, &sa, NULL);
 }
 #else
-void stn_runtime_init(void) { stn_hash_init(); }
+void stn_runtime_init(void) { stn_hash_init(); stn_release_setup(); }
 #endif
 
 /* ---- counters of --profile-copies (section 9.8) ---- */
@@ -1800,14 +2003,19 @@ static void stn_profile_report(void) {
 
 void stn_runtime_exit(int status) {
     stn_flush();
+    /* what a budget left for later is released now: nothing will allocate again */
+    stn_release_budget = INT64_MAX;
+    if (stn_release_depth == 0) stn_release_drain(1);
+    /* a budget of a bench that was not kept fails the run */
+    if (stn_bench_failed && status == 0) status = 1;
 #ifdef STN_PROFILE_COPIES
     stn_profile_report();
 #endif
 #ifdef STN_DEBUG
     /* an error that reaches main returns normally through every frame, so counts must
-       balance then too; only a trap (exit 2) leaves objects behind */
+       balance then too; only a trap (exit 2) leaves heap blocks behind */
     if ((status == 0 || status == 1) && stn_live_objects != 0 && getenv("STN_ALLOW_LEAKS") == NULL) {
-        fprintf(stderr, "debug runtime: %lld object(s) still live at exit; counts do not balance\n",
+        fprintf(stderr, "debug runtime: %lld heap block(s) still live at exit; counts do not balance\n",
                 (long long)stn_live_objects);
         exit(3);
     }

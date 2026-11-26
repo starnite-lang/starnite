@@ -1,0 +1,40 @@
+# Searching a string instead of slicing it (section 3.6): find, find_from, split_once and lines,
+# and words, which now reads bytes and takes slices where it built each word a character at a time.
+fn show(o: Int?) -> Str:
+    match o:
+        Some(i) -> f"{i}"
+        None -> "none"
+
+fn key_value(s: Str) -> Str:
+    match split_once(s, "="):
+        Some((k, v)) -> f"[{k}|{v}]"
+        None -> "[no =]"
+
+# every place a string stands in another, the ones that overlap too
+fn all_of(s: Str, sub: Str) -> Array[Int]:
+    var out: Array[Int] = []
+    var at = find_or_end(s, sub, 0)
+    while at >= 0:
+        out.push(at)
+        at = find_or_end(s, sub, at + 1)
+    out
+
+fn main() ! io:
+    let s = "alpha, beta, gamma, a string long enough to live in a buffer, beta"
+    print(f"{show(find(s, "beta"))} {show(find(s, "delta"))} {show(find(s, ""))} {show(find("", "x"))} {show(find("", ""))}")
+    print(f"{show(find_from(s, "beta", 8))} {show(find_from(s, "beta", 7))} {show(find_from(s, "beta", len(s)))} {show(find_from(s, "", len(s)))}")
+    print(f"{show(find_from(s, "a", -1))} {show(find_from(s, "a", len(s) + 1))} {find_or_end(s, s, 0)} {find_or_end("ab", "abc", 0)}")
+    print(f"{all_of("aaaa", "aa")} {all_of("naïve café", "é")} {all_of("abc", "")}")
+    print(f"{key_value("name=value")} {key_value("=")} {key_value("a=b=c")} {key_value("plain")} {key_value("")}")
+    print(f"{lines("one\ntwo\r\n\nfour")} {lines("")} {lines("\n")} {lines("end\n")} {lines("\r\n")} {lines("a\rb")} {len(lines("a\r")[0])} {len(lines("a\r\n")[0])}")
+    print(f"{words("  the quick\tbrown\r\nfox  ")} {words("")} {words(" \t ")} {words("one")} {words("naïve café")}")
+    # the pieces are taken from a string that is then let go of
+    var kept: Array[Str] = []
+    for i in 0..3:
+        let text = f"line {i} of a text long enough to live in a buffer\nand its second line {i}"
+        for l in lines(text):
+            kept.push(l)
+        for w in words(text):
+            if len(w) == 1:
+                kept.push(w)
+    print(f"{len(kept)} {kept[1]} {kept[4]} {kept[len(kept) - 1]}")

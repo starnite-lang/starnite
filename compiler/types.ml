@@ -413,7 +413,7 @@ type tprog = {
   fn_order : string list;
   traits : (string, trait_info) Hashtbl.t;
   impls : impl_info list;
-  tests : (string * texpr * loc) list;
+  tests : (string * texpr * loc * var list * texpr option) list;   (* name, body, where; then the inputs of a property test and its where clause *)
   main : string option;
   lambdas : lambda list;
 }
