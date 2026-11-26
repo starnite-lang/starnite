@@ -874,8 +874,8 @@ let describe (e : texpr) =
    turn, that is neither in tail position nor the one field of a constructor in tail position
    (rule 5 of section 9.6). A return is a tail position wherever it stands. [returns g] says
    whether g can call the function, directly or through others. *)
-let stray_self_call uname (targets : texpr -> string list) (returns : string -> bool) (body : texpr) (walk : (texpr -> unit) -> (tstmt -> unit) -> texpr -> unit) =
-  let is_self (x : texpr) = List.exists (fun u -> u = uname || returns u) (targets x) in
+let stray_self_call uname (targets : texpr -> (string * ty list) list) (returns : string * ty list -> bool) (body : texpr) (walk : (texpr -> unit) -> (tstmt -> unit) -> texpr -> unit) =
+  let is_self (x : texpr) = List.exists (fun (u, tys) -> u = uname || returns (u, tys)) (targets x) in
   let tails = ref [] in
   let rec tail (x : texpr) =
     if is_self x then tails := x :: !tails
@@ -2698,36 +2698,43 @@ and walk_texpr (fe : texpr -> unit) (fs : tstmt -> unit) (e : texpr) =
   | XLambda lam -> we lam.lbody
   | XComp (b, cs) -> we b; List.iter (fun cp -> wit cp.csrc; Option.iter we cp.ccond) cs
 
-(* The functions a call can run, as far as its code says: the function it names, or the method of
-   the impl a trait call is resolved to, as when the call is generated. Where the type is not
-   known yet, in a function with type parameters, every impl of the trait that has the method. *)
-and called st (x : texpr) : string list =
+(* The function instances a call runs, in a function compiled with the type arguments [sub]: the
+   function it names, or the method of the impl that a trait call is resolved to, as when the call
+   is generated, each with its own type arguments. A trait call on a primitive type, which runs no
+   function of the program, gives none. *)
+and called st (sub : (string * ty) list) (x : texpr) : (string * ty list) list =
   match x.e with
-  | XCall (CFn (u, _), _, _) -> [ u ]
-  | XCall (CTrait (tr, ta, m, self, _), _, _) -> (
-      let all () = List.filter_map (fun (im : impl_info) -> if im.itrait_ = tr then List.assoc_opt m im.imethods_ else None) st.prog.impls in
+  | XCall (CFn (u, tys), _, _) -> [ (u, List.map (subst sub) tys) ]
+  | XCall (CTrait (tr, ta, m, self, own), _, _) -> (
+      let self = subst sub self and ta = List.map (subst sub) ta in
       match Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) tr ta m self with
-      | Some (f, _) -> [ f ]
-      | None -> all ()
-      | exception _ -> all ())
+      | Some (f, ftys) -> [ (f, ftys @ List.map (subst sub) own) ]
+      | None -> []
+      | exception _ -> [])
   | _ -> []
 
-(* Whether a function can call another, directly or through the functions it calls by name or by
-   a trait method that is resolved when the program is compiled. *)
-and reaches st (from : string) (target : string) : bool =
+(* Whether a function instance can call the function [target], directly or through the instances
+   it calls. The walk is over instances, as code generation is: `b[Plain]` calls `Plain.step`,
+   whatever other impls of the trait there are. A program whose instances never stop, each
+   calling a larger one, is taken to reach it. *)
+and reaches st ((from, from_tys) : string * ty list) (target : string) : bool =
   let seen = Hashtbl.create 16 in
-  let rec go u =
-    (not (Hashtbl.mem seen u))
+  let rec go (u, tys) =
+    let key = inst_name u tys in
+    (not (Hashtbl.mem seen key))
     && begin
-      Hashtbl.replace seen u ();
+      Hashtbl.replace seen key ();
+      Hashtbl.length seen > 2000
+      ||
       match Hashtbl.find_opt st.prog.fns u with
       | None -> false
       | Some f ->
+          let sub = try List.combine (List.map fst f.fsig.stparams) tys with Invalid_argument _ -> [] in
           let callees = ref [] in
-          walk_texpr (fun (x : texpr) -> callees := called st x @ !callees) (fun _ -> ()) f.fbody;
-          List.exists (fun g -> g = target || go g) !callees
+          walk_texpr (fun (x : texpr) -> callees := called st sub x @ !callees) (fun _ -> ()) f.fbody;
+          List.exists (fun (g, gtys) -> g = target || go (g, gtys)) !callees
     end in
-  go from
+  go (from, from_tys)
 
 (* Whether a function loops, itself or through a function it calls by name. *)
 and loops st uname =
@@ -3854,7 +3861,7 @@ let compile_instance st cname uname tys =
       st.records := { Verify.cname; display; mods = sg.smods; floc = sg.sloc; text = Buffer.contents b;
                       marks = List.rev (mine !(st.marks));
                       excused = List.filter_map (fun (b', lo, hi) -> if b' == b then Some (lo, hi) else None) !(st.excused);
-                      stray = Option.map (fun (x : texpr) -> x.l) (stray_self_call uname (called st) (fun g -> reaches st g uname) tf.fbody walk_texpr) } :: !(st.records)
+                      stray = Option.map (fun (x : texpr) -> x.l) (stray_self_call uname (called st sub) (fun g -> reaches st g uname) tf.fbody walk_texpr) } :: !(st.records)
     end;
     st.names := (cname, sg.sdisplay) :: !(st.names);
     st.marking := false in
