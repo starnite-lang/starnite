@@ -99,7 +99,6 @@ Not done yet:
 
 - the last oracle of the fuzzer of section 21.2, comparing each optional pass on and off, which waits for the optional passes
 - `split_at_mut`, `Slice[T]` and `StrView` of the `array` and `str` modules: they are views into a borrowed buffer, which the `local` mode of milestone 3 is for (section 10.5), and `swap` covers the common case of two parts of one array; and a search function over arrays, which the draft names without a signature
-- property, snapshot and doc tests, which belong to milestone 2
 
 ## Milestone 2 so far
 
