@@ -78,28 +78,33 @@ let rec type_size (t : ty) : int =
   | TTuple ts | TNamed (_, ts) -> List.fold_left (fun n x -> n + type_size x) 1 ts
   | _ -> 1
 
-let rec finite env ?limit (within : string list) (t : ty) : bool =
-  (* how large a type the search may come to: well past the one it started from *)
-  let limit = match limit with Some l -> l | None -> type_size t + 64 in
+(* a type on the way: the whole type as text, its declaration, and its size *)
+type step = string * string * int
+
+let rec finite env (within : step list) (t : ty) : bool =
   match repr t with
   | TArray _ | TNamed (("Map" | "Set"), _) -> true
-  | TTuple ts -> List.for_all (finite env ~limit within) ts
+  | TTuple ts -> List.for_all (finite env within) ts
   | TNamed (n, args) ->
       (* The types on the way are whole types, with their arguments: Layer[Int] inside
          Layer[Layer[Int]] is another type, and Done(Done(0)) a value. A way that comes back to a
          type it has passed goes nowhere. A type whose arguments grow at every step,
-         Nest[Array[T]], is never met twice: that way is given up when its types have grown well
-         past the one the search started from, which no way through a finite chain of
-         declarations, however long, does by itself. *)
-      let key = show_ty (repr t) in
-      (not (List.mem key within)) && type_size t <= limit
+         Nest[Array[T]], is never met twice: that way is given up when one declaration stands on
+         it sixteen times, each time at a larger type than before. Growth of that kind is the
+         only bound. A long chain of declarations, a type nested deep in itself, whose steps get
+         smaller, and a large type that a small one holds are all followed to their end. *)
+      let key = show_ty (repr t) and size = type_size t in
+      let rec grown count at_most = function
+        | [] -> count
+        | (_, d, sz) :: rest -> if d = n && sz < at_most then grown (count + 1) sz rest else grown count at_most rest in
+      (not (List.exists (fun (k, _, _) -> k = key) within)) && grown 0 size within < 16
       && (match decl env n with
           | Some { dbody = DStruct fs; dparams; _ } when List.length dparams = List.length args ->
               let s = List.combine dparams args in
-              List.for_all (fun (f : field_info) -> finite env ~limit (key :: within) (subst s f.fty)) fs
+              List.for_all (fun (f : field_info) -> finite env ((key, n, size) :: within) (subst s f.fty)) fs
           | Some { dbody = DData vs; dparams; _ } when List.length dparams = List.length args ->
               let s = List.combine dparams args in
-              List.exists (fun (v : variant_info) -> List.for_all (fun (f : field_info) -> finite env ~limit (key :: within) (subst s f.fty)) v.vfields) vs
+              List.exists (fun (v : variant_info) -> List.for_all (fun (f : field_info) -> finite env ((key, n, size) :: within) (subst s f.fty)) v.vfields) vs
           | _ -> true)
   | _ -> true
 
@@ -112,7 +117,7 @@ let nesting = ref 0
    the same condition, so the choices agree all the way down. With `First = More(next: Second) |
    End(value: Int)` and `Second = Back(next: First) | Stop(value: Int)`, First may choose More
    because Second has Stop, and Second, built inside First, then has to choose Stop. *)
-let ending : string list ref = ref []
+let ending : step list ref = ref []
 
 let rec gen env (r : rng) (size : int) (t : ty) : value =
   incr nesting;
@@ -174,8 +179,8 @@ and gen_at env (r : rng) (size : int) (t : ty) : value =
           (* At size 0, a variant that ends: one whose every field has a value that can be built
              without coming back to this type, and of those the one with the fewest fields.
              `Link(next: Chain) | End(value: Int)` ends with End, whichever is written first. *)
-          let key = show_ty (repr t) in
-          let ends (v : variant_info) = List.for_all (fun (f : field_info) -> finite env (key :: !ending) (subst s f.fty)) v.vfields in
+          let here : step = (show_ty (repr t), n, type_size t) in
+          let ends (v : variant_info) = List.for_all (fun (f : field_info) -> finite env (here :: !ending) (subst s f.fty)) v.vfields in
           let shortest = function
             | [] -> None
             | first :: rest -> Some (List.fold_left (fun (best : variant_info) (v : variant_info) -> if List.length v.vfields < List.length best.vfields then v else best) first rest) in
@@ -185,7 +190,7 @@ and gen_at env (r : rng) (size : int) (t : ty) : value =
           (* what the fields are given at size 0 must end without this type, as the choice of
              this variant took for granted *)
           let saved = !ending in
-          if size <= 0 then ending := key :: saved;
+          if size <= 0 then ending := here :: saved;
           let fields = List.map (fun (f : field_info) -> gen env r inner (subst s f.fty)) v.vfields in
           ending := saved;
           VVariant (v.vindex, Array.of_list fields)

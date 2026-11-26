@@ -170,6 +170,19 @@ fn retries(r: Root) -> Int:
 test "a long chain of structs" for r: Root:
     assert retries(r) >= 0
 
+# a small type that holds a large one, written out: large is not growing
+type Held[T] = struct(value: Int)
+type Bridge = struct(value: Held[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Array[Int]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]])
+type Trunk = Regrow(next: Trunk) | Leafy(value: Bridge)
+
+fn regrowths(t: Trunk) -> Int:
+    match t:
+        Regrow(next) -> 1 + regrowths(next)
+        Leafy(_) -> 0
+
+test "a small type that holds a large one" for t: Trunk:
+    assert regrowths(t) >= 0
+
 test "a snapshot":
     assert_snapshot [(area(Rect(2, 3)), "rect"), (area(Circle(1)), "circle")]
     assert_snapshot larger(4, 9)
