@@ -3497,6 +3497,13 @@ and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr o
   let deep = ref deep in
   let boxy_t t = boxy st (ts fc t) in
   let writes : (var * Syntax.loc) list ref = ref [] and held : var list ref = ref [] in
+  (* Blocks with statements that are left to be read when their code is written, each with what
+     was held when it was met. Read on its own later, such a block cannot see what the expression
+     around it still holds, or will write once the block has run. *)
+  let skipped : (texpr * var list * Syntax.loc) list ref = ref [] in
+  (* what is held and still alive where the scan is: not what the condition of an if held, once
+     the scan is in its branches *)
+  let alive : var list ref = ref [] in
   let view_of (r : var) (p : tpat) =
     List.iter (fun (pv : var) -> if boxy_t pv.vty then begin Hashtbl.remove u_vars pv.vid; Hashtbl.replace u_views pv.vid r end) (u_pat_vars p) in
   let in_loop f = let saved = !deep in deep := true; f (); deep := saved in
@@ -3505,7 +3512,7 @@ and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr o
     | XVar v ->
         if boxy_t v.vty then begin
           if own then (if not (moves fc e v || u_will_move fc e v) then u_lose e.l v)
-          else held := v :: !held
+          else (held := v :: !held; alive := v :: !alive)
         end
     | XField (b, _, _) | XTupleGet (b, _) -> if boxy_t e.ty then go own b else plain b
     | XIndex (b, i) -> go false i; if boxy_t e.ty then go own b else plain b
@@ -3520,10 +3527,20 @@ and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr o
     | XNeg a | XNot a | XConv a -> go false a
     | XTry a -> go own a
     | XFail a | XPack a -> go true a
-    | XIf (c, a, b) -> go false c; go own a; go own b
+    | XIf (c, a, b) ->
+        let before = !alive in
+        go false c;
+        (* the condition is a Bool by the time a branch runs *)
+        let with_cond = !alive in
+        alive := before;
+        go own a; go own b;
+        alive := with_cond @ List.filter (fun v -> not (List.memq v before)) !alive
     (* outside a loop, a block with statements is read when its code is written: its value is
        read then, once the variables the statements declare are known *)
-    | XBlock (ss, v) -> if !deep then (List.iter gs ss; go own v) else if ss = [] then go own v
+    | XBlock (ss, v) ->
+        if !deep then (List.iter gs ss; go own v)
+        else if ss = [] then go own v
+        else skipped := (e, !alive, e.l) :: !skipped
     | XMatch (s, arms) ->
         let handed = match s.e with XVar v -> moves fc s v || u_will_move fc s v | _ -> false in
         if not handed then begin
@@ -3671,7 +3688,7 @@ and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr o
   let rec settle () =
     forget ();
     let before = Hashtbl.length u_vars in
-    writes := []; held := [];
+    writes := []; held := []; skipped := []; alive := [];
     Option.iter gs stmt;
     Option.iter (go own) top;
     (* a write, or a mut argument, in the same statement as something that holds the whole value:
@@ -3679,6 +3696,9 @@ and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr o
     List.iter (fun ((w : var), l) ->
         let r = u_root_var w in
         if List.exists (fun (h : var) -> (u_root_var h).vid = r.vid) !held then u_lose l w) !writes;
+    List.iter (fun ((b : texpr), (before : var list), l) ->
+        List.iter (fun (h : var) -> if u_mentions (u_root_var h) b || u_mentions h b then u_lose l h) before;
+        List.iter (fun ((w : var), wl) -> if u_mentions (u_root_var w) b || u_mentions w b then u_lose wl w) !writes) !skipped;
     forget ();
     if Hashtbl.length u_vars < before then settle () in
   settle ()
@@ -3712,7 +3732,7 @@ and note_moves st (owned_params : var list) (body : texpr) =
   (* statements that assign a whole variable, `x = e`, with no break or continue inside e *)
   let kills : (int * int, int) Hashtbl.t = Hashtbl.create 16 in
   (* return statements: nothing that follows one in the text runs after it *)
-  let returns : (int, unit) Hashtbl.t = Hashtbl.create 8 in
+  let returns : (int, int) Hashtbl.t = Hashtbl.create 8 in
   let jumps = ref 0 in
   let use (v : var) node stmt ctx =
     Hashtbl.replace occs v.vid ((node, stmt, ctx, !path) :: (try Hashtbl.find occs v.vid with Not_found -> [])) in
@@ -3767,7 +3787,7 @@ and note_moves st (owned_params : var list) (body : texpr) =
         if Hashtbl.mem st.self_sliced v.vid then pin e;
         w e;
         Hashtbl.replace decl v.vid ctx
-    | SReturn e -> Hashtbl.replace returns stmt (); w e
+    | SReturn e -> Hashtbl.replace returns stmt ctx; w e
     | SExpr e | SAssert (e, _) | SAssertFails (_, e) | SCheck e -> w e
     | SLend e -> pin e; w e
     | SAssign (p, e) ->
@@ -3800,8 +3820,9 @@ and note_moves st (owned_params : var list) (body : texpr) =
                               && List.for_all (fun (_, s, _, q) -> s <> stmt || apart p q) earlier ->
                  st.movable := node :: !(st.movable)
              (* in what a return statement returns: the function ends there, in a loop too, so only
-                the statement's own other occurrences count against it *)
-             | Some node when Hashtbl.mem returns stmt
+                the statement's own other occurrences count against it. The occurrence must run
+                once when the statement does: not in a comprehension or a closure inside it. *)
+             | Some node when Hashtbl.find_opt returns stmt = Some c
                               && List.for_all (fun (_, s, _, q) -> s <> stmt || apart p q) later
                               && List.for_all (fun (_, s, _, q) -> s <> stmt || apart p q) earlier ->
                  st.movable := node :: !(st.movable)

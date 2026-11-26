@@ -1,0 +1,45 @@
+# What a return statement returns moves at that return (section 9.2), but only an occurrence that
+# runs once when the statement does: one inside a comprehension or a closure runs again, or
+# later, and must leave the variable as it was.
+fn rows() -> Array[Array[Int]]:
+    let xs = [7]
+    return [xs for i in 0..3]
+
+fn pairs(n: Int) -> Array[(Array[Int], Int)]:
+    var base = [1, 2]
+    base.push(n)
+    return [(base, i) for i in 0..n]
+
+fn later() -> fn() -> Int:
+    let xs = [4, 5]
+    return fn(): xs[0] + xs[1]
+
+fn in_loop(n: Int) -> Array[Int]:
+    var acc = [0]
+    for i in 0..n:
+        acc.push(i)
+        if i == 2:
+            return acc
+    acc
+
+fn either(flag: Bool) -> Array[Int]:
+    let xs = [1, 2, 3]
+    if flag:
+        return xs
+    [len(xs)]
+
+fn nested(flag: Bool) -> Array[Array[Int]]:
+    let xs = [9]
+    if flag:
+        return [[y + xs[0] for y in xs] for i in 0..2]
+    [xs]
+
+fn main() ! io:
+    let r = rows()
+    print(f"{r[0][0]} {r[1][0]} {r[2][0]} {r}")
+    print(f"{pairs(3)}")
+    let f = later()
+    print(f"{f()} {f()}")
+    print(f"{in_loop(5)} {in_loop(2)}")
+    print(f"{either(true)} {either(false)}")
+    print(f"{nested(true)} {nested(false)}")
