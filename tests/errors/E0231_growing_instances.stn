@@ -1,0 +1,8 @@
+# expect: E0231 2:9
+inplace fn grow[T](n: Int) -> Int:
+    if n == 0:
+        0
+    else:
+        1 + grow[Array[T]](n - 1)
+fn main() ! io:
+    print(f"{grow[Int](3)}")

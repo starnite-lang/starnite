@@ -24,6 +24,10 @@ type st = {
   pending_boxed : (ty * string) Queue.t;
   instances : (string, unit) Hashtbl.t;
   queue : (string * string * ty list) Queue.t;
+  (* each instance, with the instance whose code first asked for it: its function, the size of its
+     type arguments, and the C name of the one that asked ("" for a root) *)
+  asked_by : (string, string * int * string) Hashtbl.t;
+  compiling : string ref;                (* the C name of the instance whose code is being generated *)
   strlits : (string, string) Hashtbl.t;
   dps : (string * Buffer.t * (texpr -> unit)) option ref;   (* the destination of the function being generated as a loop (section 9.5), and its code *)
   reuse : (string * string * Buffer.t) list ref;   (* cells a match took apart, free for a constructor of the same type: C name, type, and the function's code, which a closure inside it does not share *)
@@ -708,6 +712,13 @@ let fn_can_fail_ty (f : fnty) = f.feff.errs <> [] || f.feff.poly
 (* The entry main calls a looping function through: every function's own name starts fn_, so a
    name that starts stn_entry_ cannot be one. *)
 let entry_name cname = "stn_entry_" ^ cname
+
+(* how large a type is: itself and everything it is made of *)
+let rec type_size (t : ty) : int =
+  match repr t with
+  | TArray e -> 1 + type_size e
+  | TTuple ts | TNamed (_, ts) -> List.fold_left (fun n x -> n + type_size x) 1 ts
+  | _ -> 1
 
 let inst_name uname targs =
   "fn_" ^ c_ident uname ^ (if targs = [] then "" else "__" ^ String.concat "__" (List.map mangle_eff targs))
@@ -2735,35 +2746,33 @@ and called st (sub : (string * ty) list) (x : texpr) : (string * ty list) list =
 (* Whether a function instance can call the instance [target], directly or through the instances
    it calls. The walk is over instances, as code generation is: `b[Plain]` calls `Plain.step`,
    whatever other impls of the trait there are, and `a[Other]` calling `a[Plain]` is a call of
-   another function. However many instances a program has, the walk sees each once. Only a
-   program whose instances never stop, each calling one with a larger type, has no end to walk
-   to. That is growth along the walk, not depth: an instance is taken to reach the target when
-   its type arguments nest 64 deeper than those the walk started from, which only such a program
-   gets to. A type written deep in the program is where a walk starts, and is no evidence. *)
+   another function. However many instances a program has, and however large the types written
+   in it, the walk sees each instance once. Only a program whose instances never stop has no end
+   to walk to, and that is told by growth along a path of calls, as when instances are asked for
+   (request_instance): a function met sixteen times on one path, each time at larger type
+   arguments, is taken to reach the target. Such a program is refused for that growth anyway. *)
 and reaches st ((from, from_tys) : string * ty list) (target : string) : bool =
   let seen = Hashtbl.create 16 in
-  let rec depth (t : ty) = match repr t with
-    | TArray e -> 1 + depth e
-    | TTuple ts | TNamed (_, ts) -> 1 + List.fold_left (fun m x -> max m (depth x)) 0 ts
-    | _ -> 0 in
-  let deepest tys = List.fold_left (fun m t -> max m (depth t)) 0 tys in
-  let limit = deepest from_tys + 64 in
-  let rec go (u, tys) =
+  let rec go (path : (string * int) list) (u, tys) =
     let key = inst_name u tys in
-    (not (Hashtbl.mem seen key))
-    && begin
-      Hashtbl.replace seen key ();
-      deepest tys > limit
-      ||
-      match Hashtbl.find_opt st.prog.fns u with
-      | None -> false
-      | Some f ->
-          let sub = try List.combine (List.map fst f.fsig.stparams) tys with Invalid_argument _ -> [] in
-          let callees = ref [] in
-          walk_texpr (fun (x : texpr) -> callees := called st sub x @ !callees) (fun _ -> ()) f.fbody;
-          List.exists (fun (g, gtys) -> inst_name g gtys = target || go (g, gtys)) !callees
-    end in
-  go (from, from_tys)
+    let size = List.fold_left (fun n t -> n + type_size t) 0 tys in
+    (* how often u is on the path at smaller and smaller type arguments, going back *)
+    let rec grown count at_most = function
+      | [] -> count
+      | (v, sz) :: rest -> if v = u && sz < at_most then grown (count + 1) sz rest else grown count at_most rest in
+    grown 0 size path >= 16
+    || ((not (Hashtbl.mem seen key))
+        && begin
+          Hashtbl.replace seen key ();
+          match Hashtbl.find_opt st.prog.fns u with
+          | None -> false
+          | Some f ->
+              let sub = try List.combine (List.map fst f.fsig.stparams) tys with Invalid_argument _ -> [] in
+              let callees = ref [] in
+              walk_texpr (fun (x : texpr) -> callees := called st sub x @ !callees) (fun _ -> ()) f.fbody;
+              List.exists (fun (g, gtys) -> inst_name g gtys = target || go ((u, size) :: path) (g, gtys)) !callees
+        end) in
+  go [] (from, from_tys)
 
 (* Whether a function loops, itself or through a function it calls by name. *)
 and loops st uname =
@@ -3863,6 +3872,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
 (* ---------- function instances ---------- *)
 
 let compile_instance st cname uname tys =
+  st.compiling := cname;
   let tf = Hashtbl.find st.prog.fns uname in
   let sg = tf.fsig in
   let sub = List.combine (List.map fst sg.stparams) tys in
@@ -4005,6 +4015,24 @@ let () =
       let cname = inst_name uname tys in
       if not (Hashtbl.mem st.instances cname) then begin
         Hashtbl.replace st.instances cname ();
+        (* A function that calls itself at a larger type, which calls itself at a larger one
+           still, has no last instance: `grow[T]` calling `grow[Array[T]]`. It is refused when the
+           instances that led to this one include the same function sixteen times over, each at
+           smaller type arguments than the next. A chain of asking is what is counted: any number
+           of instances, and types of any size, written in the program are not growth. *)
+        let size = List.fold_left (fun n t -> n + type_size t) 0 tys in
+        let rec grown from count at_most =
+          match Hashtbl.find_opt st.asked_by from with
+          | Some (u, sz, parent) ->
+              if u = uname && sz < at_most then grown parent (count + 1) sz else grown parent count at_most
+          | None -> count in
+        if grown !(st.compiling) 0 size >= 16 then begin
+          let sg = (Hashtbl.find st.prog.fns uname).fsig in
+          raise (Syntax.Error ("E0231", sg.sloc,
+                               Printf.sprintf "'%s' is used at a type that it reaches from itself at a smaller one, again and again: it would need forms without end (the last asked for is %s[%s])"
+                                 sg.sdisplay sg.sdisplay (String.concat ", " (List.map show_ty tys))))
+        end;
+        Hashtbl.replace st.asked_by cname (uname, size, !(st.compiling));
         Queue.add (cname, uname, tys) st.queue
       end;
       cname
@@ -4153,7 +4181,7 @@ let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~d
   let st = {
     prog; fwd = Buffer.create 1024; typedefs = Buffer.create 4096; boxed_bodies = Buffer.create 1024;
     protos = Buffer.create 4096; helpers = Buffer.create 4096; funcs = Buffer.create 16384;
-    defined = Hashtbl.create 64; pending_boxed = Queue.create (); instances = Hashtbl.create 64;
+    defined = Hashtbl.create 64; pending_boxed = Queue.create (); instances = Hashtbl.create 64; asked_by = Hashtbl.create 64; compiling = ref "";
     queue = Queue.create (); strlits = Hashtbl.create 64; dps = ref None; reuse = ref []; movable = ref []; pinned = Hashtbl.create 32; self_sliced = Hashtbl.create 16; view_vars = Hashtbl.create 16; loops = Hashtbl.create 64; in_main = ref false; entries = Hashtbl.create 8; entry_defs = Hashtbl.create 32; errtypes = Hashtbl.create 8;
     layouts = Hashtbl.create 64; marking = ref false; cur = ref (Syntax.noloc, ""); marks = ref []; excused = ref []; records = ref []; names = ref []; demoted = Hashtbl.create 16; explain = explain <> None; profile;
     debug; counter = 0 }
