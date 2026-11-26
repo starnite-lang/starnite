@@ -1,0 +1,16 @@
+# expect: E0605 14:13
+type Num = struct(value: Int)
+trait Step:
+    fn step(p: Self) -> Int
+impl Step for Num:
+    fn step(p: Num) -> Int:
+        a(p.value)
+fn b(n: Int) -> Int:
+    Num(n).step()
+inplace fn a(n: Int) -> Int:
+    if n == 0:
+        0
+    else:
+        1 + b(n - 1)
+fn main() ! io:
+    print(f"{a(3)}")
