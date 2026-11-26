@@ -26,6 +26,12 @@ fn main() ! io:
     var counts: Map[Str, Int] = {}
     let snapshot = counts
     counts["a"] = 1
+    # a count raised inside the runtime is put down to the line that called it: the slice below,
+    # not the array literal before it
+    let cell = Cons(7, Nil)
+    let cells = [cell, cell]
+    let front = cells[0..1]
+    print(f"{len(front)}")
     let l = Cons(1, Cons(2, Nil))
     let m = bump(l, 1)
     match l:

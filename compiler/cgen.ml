@@ -821,8 +821,28 @@ let array_index fc v (index : texpr) value len loc =
 (* The cells for reuse that are left after an if or a match: those that no branch spent. Each
    branch starts with what there was before, so each may use a cell; after them all, a cell that
    any of them used is gone. *)
+(* [afters] holds what each branch that comes out at the join left: one that returns, breaks or
+   fails takes its cell with it and has no say in what follows. *)
 let unspent before (afters : (string * string * Buffer.t) list list) =
   List.filter (fun (tok, _, _) -> List.for_all (fun after -> List.exists (fun (t', _, _) -> t' = tok) after) afters) before
+
+(* whether control can come out at the end of an expression: not one that always returns, breaks
+   or fails, whose type is Never *)
+let falls fc (e : texpr) =
+  let rec leaves (x : texpr) =
+    repr (ts fc x.ty) = TNever
+    || (match x.e with
+        | XFail _ -> true
+        | XBlock (ss, v) ->
+            List.exists (fun (s : tstmt) -> match s.st with
+                | SReturn _ | SBreak | SContinue -> true
+                | SExpr y -> leaves y
+                | _ -> false) ss
+            || leaves v
+        | XIf (_, a, b) -> leaves a && leaves b
+        | XMatch (_, arms) -> arms <> [] && List.for_all (fun (a : tarm) -> leaves a.body) arms
+        | _ -> false) in
+  not (leaves e)
 
 let note fc (at : Syntax.loc * string) =
   let st = fc.st in
@@ -850,11 +870,12 @@ let describe (e : texpr) =
   | XFail _ -> "this fail"
   | _ -> "this expression"
 
-(* The first call of a function to itself that is neither in tail position nor the one field of a
-   constructor in tail position (rule 5 of section 9.6). A return is a tail position wherever it
-   stands. *)
-let stray_self_call uname (body : texpr) (walk : (texpr -> unit) -> (tstmt -> unit) -> texpr -> unit) =
-  let is_self (x : texpr) = match x.e with XCall (CFn (u, _), _, _) -> u = uname | _ -> false in
+(* The first call that can come back to the function, of itself or of a function that calls it in
+   turn, that is neither in tail position nor the one field of a constructor in tail position
+   (rule 5 of section 9.6). A return is a tail position wherever it stands. [returns g] says
+   whether g can call the function, directly or through others. *)
+let stray_self_call uname (returns : string -> bool) (body : texpr) (walk : (texpr -> unit) -> (tstmt -> unit) -> texpr -> unit) =
+  let is_self (x : texpr) = match x.e with XCall (CFn (u, _), _, _) -> u = uname || returns u | _ -> false in
   let tails = ref [] in
   let rec tail (x : texpr) =
     if is_self x then tails := x :: !tails
@@ -978,7 +999,7 @@ and expr_at fc (e : texpr) : r =
           line fc "} else {";
           fc.ind <- fc.ind + 1;
           discard fc b;
-          st.reuse := unspent before [ after_a; !(st.reuse) ];
+          st.reuse := unspent before ((if falls fc a then [ after_a ] else []) @ (if falls fc b then [ !(st.reuse) ] else []));
           fc.ind <- fc.ind - 1;
           line fc "}";
           { c = "0"; owned = false }
@@ -995,7 +1016,7 @@ and expr_at fc (e : texpr) : r =
           line fc "} else {";
           fc.ind <- fc.ind + 1;
           assign_into fc res b t;
-          st.reuse := unspent before [ after_a; !(st.reuse) ];
+          st.reuse := unspent before ((if falls fc a then [ after_a ] else []) @ (if falls fc b then [ !(st.reuse) ] else []));
           fc.ind <- fc.ind - 1;
           line fc "}";
           { c = res; owned = true })
@@ -2105,7 +2126,7 @@ and match_ ?tail fc t (s : texpr) arms : r =
          | Some emit -> emit arm.body   (* which leaves the function, or goes round its loop *)
          | None -> if has_value then assign_into fc res arm.body t else discard fc arm.body);
         pop fc;
-        arm_afters := !(st.reuse) :: !arm_afters;
+        if falls fc arm.body then arm_afters := !(st.reuse) :: !arm_afters;
         st.reuse := saved;
         line fc "goto %s;" endl
       in
@@ -2676,6 +2697,22 @@ and walk_texpr (fe : texpr -> unit) (fs : tstmt -> unit) (e : texpr) =
   | XMatch (s, arms) -> we s; List.iter (fun a -> Option.iter we a.guard; we a.body) arms
   | XLambda lam -> we lam.lbody
   | XComp (b, cs) -> we b; List.iter (fun cp -> wit cp.csrc; Option.iter we cp.ccond) cs
+
+(* Whether a function can call another, directly or through the functions it calls by name. *)
+and reaches st (from : string) (target : string) : bool =
+  let seen = Hashtbl.create 16 in
+  let rec go u =
+    (not (Hashtbl.mem seen u))
+    && begin
+      Hashtbl.replace seen u ();
+      match Hashtbl.find_opt st.prog.fns u with
+      | None -> false
+      | Some f ->
+          let callees = ref [] in
+          walk_texpr (fun (x : texpr) -> match x.e with XCall (CFn (g, _), _, _) -> callees := g :: !callees | _ -> ()) (fun _ -> ()) f.fbody;
+          List.exists (fun g -> g = target || go g) !callees
+    end in
+  go from
 
 (* Whether a function loops, itself or through a function it calls by name. *)
 and loops st uname =
@@ -3802,7 +3839,7 @@ let compile_instance st cname uname tys =
       st.records := { Verify.cname; display; mods = sg.smods; floc = sg.sloc; text = Buffer.contents b;
                       marks = List.rev (mine !(st.marks));
                       excused = List.filter_map (fun (b', lo, hi) -> if b' == b then Some (lo, hi) else None) !(st.excused);
-                      stray = Option.map (fun (x : texpr) -> x.l) (stray_self_call uname tf.fbody walk_texpr) } :: !(st.records)
+                      stray = Option.map (fun (x : texpr) -> x.l) (stray_self_call uname (fun g -> reaches st g uname) tf.fbody walk_texpr) } :: !(st.records)
     end;
     st.names := (cname, sg.sdisplay) :: !(st.names);
     st.marking := false in
@@ -4003,9 +4040,13 @@ let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~d
     (* From here on, whatever can copy a shared value or raise a count first names the line it is
        on. The helpers above are left alone: they work for the statement that called them. *)
     let at name = pr out "#define %s(...) (stn_profile_at(__FILE__, __LINE__), %s(__VA_ARGS__))\n" name name in
-    List.iter at [ "stn_array_make_unique"; "stn_array_copy_for_write"; "stn_array_push_slow"; "stn_array_reserve"; "stn_array_extend";
-                   "stn_array_insert"; "stn_array_remove"; "stn_array_clear"; "stn_array_sort_i64"; "stn_array_reverse_i64";
-                   "stn_map_make_unique_for_write"; "stn_map_put"; "stn_map_slot"; "stn_map_slot_ref"; "stn_map_remove"; "stn_map_clear" ];
+    (* Every function of the runtime, not a chosen few: any of them may copy or raise a count
+       somewhere inside, a slice of an array of counted values for one, and what it does must be
+       put down to the line that called it, not to whichever line named itself last. *)
+    ignore (Lazy.force Verify.quiet);
+    List.iter at (List.sort_uniq compare (List.filter (fun n ->
+        String.length n > 4 && String.sub n 0 4 = "stn_" && n <> "stn_profile_at" && n <> "stn_profile_event"
+        && n <> "stn_dup" && n <> "stn_error_dup" && n <> "stn_str_dup") !Verify.runtime_functions));
     (* The runtime reports a count where one is raised, and a view where one is copied: keeping a
        string that is inline does neither, and keeping a struct raises one count for each counted
        field. These only say where. *)
