@@ -109,7 +109,8 @@ let internal_names : (string * string) list ref = ref []
 let visible_fns tb n =
   let all x = try Hashtbl.find tb.by_name x with Not_found -> [] in
   let sg u = Hashtbl.find tb.fns u in
-  let n = match List.assoc_opt n !internal_names with Some inner -> "core!" ^ inner | None -> n in
+  (* only in the module the driver made the names up for: in another module they are ordinary names *)
+  let n = match (if tb.cur = tb.entry then List.assoc_opt n !internal_names else None) with Some inner -> "core!" ^ inner | None -> n in
   if String.length n > 5 && String.sub n 0 5 = "core!" then
     List.filter (fun u -> (sg u).smodule = "core") (all (String.sub n 5 (String.length n - 5)))
   else
@@ -2676,7 +2677,7 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
       (* The loop a `measure:` block becomes (section 20.3) is ended by the runtime, which then
          reports the counters and checks the budgets. Leaving it any other way would skip that. *)
       (match cnd.d with
-       | Call ({ d = Name running; _ }, _) when List.assoc_opt running !internal_names = Some "bench_running" ->
+       | Call ({ d = Name running; _ }, _) when c.tb.cur = c.tb.entry && List.assoc_opt running !internal_names = Some "bench_running" ->
            let rec scan in_loop (b : block) =
              List.iter (fun (st : stmt) ->
                  match st.s with

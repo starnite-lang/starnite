@@ -1,0 +1,7 @@
+# The names the compiler makes up for the bench blocks of a file are made up for that file. A
+# module it imports may have functions of those very names, private ones, and they stay what the
+# module says they are, in the interpreter and in C alike.
+import lib.benchnames
+
+fn main() ! io:
+    print(f"{benchnames.seven()} {benchnames.running()}")
