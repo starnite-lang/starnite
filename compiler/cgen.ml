@@ -482,7 +482,9 @@ let str_lit st s =
    drops something goes in through stn_release_enter, so that releases cannot nest without bound
    (section 9.7). *)
 let release_fn name before drops =
-  if String.trim drops = "" then Printf.sprintf "static void %s(void* p) { %s stn_free(p); }\n" name before
+  (* one that drops nothing starts no release, but is an object of the budget all the same *)
+  if String.trim drops = "" then
+    Printf.sprintf "static void %s(void* p) { if (--stn_release_left < 0) { stn_release_defer(p, %s); return; } %s stn_free(p); }\n" name name before
   else Printf.sprintf "static void %s(void* p) { if (stn_release_enter(p, %s)) return; %s %s stn_free(p); stn_release_leave(); }\n" name name before drops
 
 let err_id st t =
@@ -3408,13 +3410,14 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       { c = res; owned = true }
   | "read_all@" -> owned (Printf.sprintf "stn_read_all(%s)" (loc_args e.l))
   | "clock_ns@" -> value "stn_clock_ns()"
-  | "bench_more@Str" ->
-      (* the strings are literals and the numbers plain, so evaluating them each turn of the
-         measured loop counts as nothing *)
+  | "bench_running@" -> value "stn_bench_running()"
+  | "bench_start@Str" ->
+      (* called before the measured block starts, and once after it has ended: what its
+         arguments cost to evaluate is never counted *)
       let name = sref fc (b 0) and label = sref fc (b 1) in
       let n = b 2 in
       let spec = sref fc (b 3) in
-      value (Printf.sprintf "stn_bench_more(%s, %s, %s, %s, %s, %s, %s, %s)" name label n spec (b 4) (b 5) (b 6) (b 7))
+      value (Printf.sprintf "stn_bench_start(%s, %s, %s, %s, %s, %s, %s, %s)" name label n spec (b 4) (b 5) (b 6) (b 7))
   | "len@Array" -> (
       match (arg 0).a.e with
       | XVar v when Hashtbl.mem fc.cached v.vid -> value (snd (Hashtbl.find fc.cached v.vid))

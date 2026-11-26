@@ -34,6 +34,12 @@ bench "read a list" budget count_ops == 0 budget allocs == 0:
     measure:
         sum = sum + total(xs)
 
+# a limit that itself allocates: it is worked out before the counters start
+bench "a limit that allocates" budget allocs <= len([1, 2]) - 2:
+    var sum = 0
+    measure:
+        sum = sum + 1
+
 bench "build a list" for n in [100] budget allocs <= 50 budget time < 5ms:
     var sum = 0
     measure:

@@ -159,7 +159,8 @@ let doc_tests (src : string) : string =
    A bench is turned into a function before the file is parsed, line for line, so that positions
    in the rest of the file stay as they are: the first line becomes the head of a function, which
    takes n when there is a `for`, and `measure:` becomes the loop that the runtime ends
-   (bench_more in the prelude). The calls of those functions make up a main of their own, which
+   (bench_running and bench_start in the prelude), which is given the budgets before anything
+   is counted. The calls of those functions make up a main of their own, which
    takes the place of the program's for `starnite bench` and for the budget checks of
    `starnite test`. In any other build the functions are checked like the rest and never run.
 
@@ -224,7 +225,7 @@ let bench_blocks file (src : string) : string * string list =
       while not !found && !j < n && (lines.(!j) = "" || lines.(!j).[0] = ' ' || lines.(!j).[0] = '#' || String.trim lines.(!j) = "") do
         if String.trim lines.(!j) = "measure:" then begin
           let indent = String.sub lines.(!j) 0 (String.index lines.(!j) 'm') in
-          lines.(!j) <- Printf.sprintf "%swhile bench_more(%s, \"%s\", %s, \"%s\", %s):" indent name
+          lines.(!j) <- Printf.sprintf "%swhile bench_running() or bench_start(%s, \"%s\", %s, \"%s\", %s):" indent name
               (match var with Some v -> v | None -> "") (match var with Some v -> v | None -> "0")
               (String.concat " " spec) (String.concat ", " limits);
           found := true

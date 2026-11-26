@@ -484,11 +484,16 @@ void    stn_print(const StnStr* s);
 int     stn_read_line(StnStr* out);
 StnStr  stn_read_all(const char* file, int line, int col);
 int64_t stn_clock_ns(void);
-/* The loop of a `measure` block (section 20.3): true while it should run again. In the counting
-   build it runs once, then prints the counters and checks the budgets in spec ("allocs<= copies==",
-   their limits in a to d); otherwise it runs for STN_BENCH_MS milliseconds and prints the time. */
-uint8_t stn_bench_more(const StnStr* name, const StnStr* label, int64_t n, const StnStr* spec,
-                       int64_t a, int64_t b, int64_t c, int64_t d);
+/* The loop of a `measure` block (section 20.3) is `while stn_bench_running() || stn_bench_start(...)`.
+   stn_bench_start is given the bench and its budgets ("allocs<= copies==", their limits in a to
+   d) before anything is counted. stn_bench_running says
+   whether the block should run again. Its first run is not measured. After it, in the counting
+   build the block runs once more, and the counters of that run are printed and held to the
+   budgets; otherwise it runs for STN_BENCH_MS milliseconds and the time is printed. The limits are evaluated once more as the loop ends, after the counters were
+   read, for the call of stn_bench_start that only says the block is over. */
+uint8_t stn_bench_start(const StnStr* name, const StnStr* label, int64_t n, const StnStr* spec,
+                        int64_t a, int64_t b, int64_t c, int64_t d);
+uint8_t stn_bench_running(void);
 StnArray* stn_str_chars(const StnStr* s, const StnElemOps* char_ops);
 StnArray* stn_str_split(const StnStr* s, const StnStr* sep, const StnElemOps* str_ops, const char* file, int line, int col);
 StnStr  stn_str_join_parts(const StnStr* parts, int64_t n, StnStr sep);

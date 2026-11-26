@@ -476,6 +476,8 @@ void stn_array_release(void* p) {
         stn_release_leave();
         return;
     }
+    /* an array that holds nothing counted starts no release, but is an object of the budget */
+    if (__builtin_expect(--stn_release_left < 0, 0)) { stn_release_defer(p, stn_array_release); return; }
     stn_free(a);
 }
 
@@ -1047,7 +1049,7 @@ int64_t stn_clock_ns(void) {
 
 /* ---- bench blocks (section 20.3) ---- */
 static int stn_bench_on, stn_bench_failed;
-static int64_t stn_bench_start, stn_bench_iters, stn_bench_target;
+static int64_t stn_bench_start_ns, stn_bench_iters, stn_bench_target;
 #ifdef STN_COUNTERS
 static uint64_t stn_bench_base[4];
 #endif
@@ -1060,27 +1062,52 @@ static void stn_bench_title(const StnStr* name, const StnStr* label, int64_t n) 
     if (l > 0) printf("  %.*s=%lld", (int)l, lb, (long long)n);
 }
 
-uint8_t stn_bench_more(const StnStr* name, const StnStr* label, int64_t n, const StnStr* spec,
-                       int64_t a, int64_t b, int64_t c, int64_t d) {
+/* what stn_bench_start was given, kept for the report: the strings are literals of the program */
+static StnStr stn_bench_name, stn_bench_label, stn_bench_spec;
+static int64_t stn_bench_n, stn_bench_limits[4];
+static int stn_bench_ended;
+
+uint8_t stn_bench_start(const StnStr* name, const StnStr* label, int64_t n, const StnStr* spec,
+                        int64_t a, int64_t b, int64_t c, int64_t d) {
+    /* the call that follows the end of the block: its arguments were evaluated once more, after
+       the counters were read */
+    if (stn_bench_ended) { stn_bench_ended = 0; return 0; }
+    stn_bench_name = *name; stn_bench_label = *label; stn_bench_spec = *spec; stn_bench_n = n;
+    stn_bench_limits[0] = a; stn_bench_limits[1] = b; stn_bench_limits[2] = c; stn_bench_limits[3] = d;
+    /* The block now runs once unmeasured. What is measured starts at the next call of
+       stn_bench_running, by when everything this call's arguments left behind has been released. */
+    stn_bench_on = 1;
+    return 1;
+}
+
+uint8_t stn_bench_running(void) {
+    if (!stn_bench_on) return 0;
+    if (stn_bench_on == 1) {
+        /* the unmeasured run is over: from here the block is counted, or timed */
+        stn_bench_on = 2;
 #ifdef STN_COUNTERS
-    if (!stn_bench_on) {
-        stn_bench_on = 1;
         stn_bench_base[0] = stn_count_allocs; stn_bench_base[1] = stn_count_bytes;
         stn_bench_base[2] = stn_count_copies; stn_bench_base[3] = stn_count_ops;
+#else
+        const char* ms = getenv("STN_BENCH_MS");
+        stn_bench_target = (ms && atoll(ms) > 0 ? atoll(ms) : 300) * 1000000LL;
+        stn_bench_iters = 0;
+        stn_bench_start_ns = stn_clock_ns();
+#endif
         return 1;
     }
+#ifdef STN_COUNTERS
     static const char* const names[4] = { "allocs", "alloc_bytes", "copies", "count_ops" };
     uint64_t got[4] = { stn_count_allocs - stn_bench_base[0], stn_count_bytes - stn_bench_base[1],
                         stn_count_copies - stn_bench_base[2], stn_count_ops - stn_bench_base[3] };
-    stn_bench_on = 0;
+    stn_bench_on = 0; stn_bench_ended = 1;
     stn_flush();
-    stn_bench_title(name, label, n);
+    stn_bench_title(&stn_bench_name, &stn_bench_label, stn_bench_n);
     for (int i = 0; i < 4; i++) printf("  %s %llu", names[i], (unsigned long long)got[i]);
     printf("\n");
-    /* the budgets: each a counter and a comparison, with its limit among a to d in order */
-    int64_t limits[4] = { a, b, c, d };
+    /* the budgets: each a counter and a comparison, with its limit in order */
     int64_t len;
-    const char* text = stn_str_span(spec, &len);
+    const char* text = stn_str_span(&stn_bench_spec, &len);
     int which = 0;
     for (int64_t i = 0; i < len && which < 4; which++) {
         while (i < len && text[i] == ' ') i++;
@@ -1094,31 +1121,24 @@ uint8_t stn_bench_more(const StnStr* name, const StnStr* label, int64_t n, const
             if ((int64_t)strlen(names[j]) == op - from && memcmp(names[j], text + from, (size_t)(op - from)) == 0) counter = j;
         if (counter < 0) continue;   /* time: not a counter, and not checked here */
         int strict = i - op == 1, equal = text[op] == '=';
-        uint64_t limit = (uint64_t)limits[which];
-        int ok = limits[which] >= 0 && (equal ? got[counter] == limit : strict ? got[counter] < limit : got[counter] <= limit);
+        int64_t wanted = stn_bench_limits[which];
+        uint64_t limit = (uint64_t)wanted;
+        int ok = wanted >= 0 && (equal ? got[counter] == limit : strict ? got[counter] < limit : got[counter] <= limit);
         if (!ok) {
             printf("FAIL budget %s %.*s %lld: it was %llu\n", names[counter], (int)(i - op), text + op,
-                   (long long)limits[which], (unsigned long long)got[counter]);
+                   (long long)wanted, (unsigned long long)got[counter]);
             stn_bench_failed = 1;
         }
     }
     fflush(stdout);
     return 0;
 #else
-    (void)spec; (void)a; (void)b; (void)c; (void)d;
-    if (!stn_bench_on) {
-        const char* ms = getenv("STN_BENCH_MS");
-        stn_bench_target = (ms && atoll(ms) > 0 ? atoll(ms) : 300) * 1000000LL;
-        stn_bench_on = 1; stn_bench_iters = 0;
-        stn_bench_start = stn_clock_ns();
-        return 1;
-    }
     stn_bench_iters++;
-    int64_t spent = stn_clock_ns() - stn_bench_start;
+    int64_t spent = stn_clock_ns() - stn_bench_start_ns;
     if (spent < stn_bench_target) return 1;
-    stn_bench_on = 0;
+    stn_bench_on = 0; stn_bench_ended = 1;
     stn_flush();
-    stn_bench_title(name, label, n);
+    stn_bench_title(&stn_bench_name, &stn_bench_label, stn_bench_n);
     printf("  %.1f ns per iteration over %lld\n", (double)spent / (double)stn_bench_iters, (long long)stn_bench_iters);
     fflush(stdout);
     return 0;
@@ -1344,6 +1364,7 @@ void stn_map_release(void* p) {
     const StnMapOps* ops = m->ops;
     int nests = ops->kdrop || ops->vdrop;
     if (nests && stn_release_enter(p, stn_map_release)) return;
+    if (!nests && __builtin_expect(--stn_release_left < 0, 0)) { stn_release_defer(p, stn_map_release); return; }
     if (nests)
         for (int64_t i = 0; i < m->used; i++) {
             char* e = m->entries + (size_t)i * m->stride;

@@ -2665,7 +2665,7 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
       (* The loop a `measure:` block becomes (section 20.3) is ended by the runtime, which then
          reports the counters and checks the budgets. Leaving it any other way would skip that. *)
       (match cnd.d with
-       | Call ({ d = Name "bench_more"; _ }, _) ->
+       | Binop ("or", { d = Call ({ d = Name "bench_running"; _ }, _); _ }, _) ->
            let rec scan in_loop (b : block) =
              List.iter (fun (st : stmt) ->
                  match st.s with
