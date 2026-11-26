@@ -63,6 +63,17 @@ fn counted[T: Counted](c: T) -> Int:
 inplace fn plain_plus_one(n: Int) -> Int:
     1 + counted(Plain(n))
 
+# A call between two forms of one function is a call of another function: stepped[Outer] runs
+# Outer.count, which runs stepped[Plain], which ends.
+type Outer = struct(value: Int)
+
+impl Counted for Outer:
+    fn count(c: Outer) -> Int:
+        stepped(Plain(c.value))
+
+inplace fn stepped[T: Counted](c: T) -> Int:
+    1 + c.count()
+
 noalloc fn total(xs: Array[Int]) -> Int:
     var t = 0
     for x in xs:
@@ -122,6 +133,6 @@ fn main() ! io:
     let other = bump_evens(kept, 10)
     print(f"{sum(kept)} {sum(other)} {drop_all(other)}")
     print(f"{sum(first_or_next(Cons(5, Nil), true))} {sum(first_or_next(Cons(5, Nil), false))}")
-    print(f"{plain_plus_one(3)}")
+    print(f"{plain_plus_one(3)} {stepped(Outer(3))}")
     var a = [1, 2]
     print(f"{pick(1, 2, true)} {pick(1.5, 2.5, false)} {size(mut a)}")
