@@ -27,9 +27,22 @@ typedef uint8_t StnUnit;
 void* stn_alloc(size_t size);
 void  stn_free(void* p);
 
+/* ---- counters of --profile-copies (section 9.8) ---- */
+/* Generated code names the statement it is in before anything that can copy or raise a count;
+   the runtime reports what then happens there. Compiled in only for a profiled build. */
+#ifdef STN_PROFILE_COPIES
+enum { STN_PROFILE_ARRAY, STN_PROFILE_MAP, STN_PROFILE_VIEW, STN_PROFILE_DUP };
+void stn_profile_at(const char* file, int line);
+void stn_profile_event(int kind);
+#endif
+
 static inline void stn_dup(void* p) {
     if ((uintptr_t)p & 1) return;                 /* field-less variant */
     stn_header* h = (stn_header*)p;
+#ifdef STN_PROFILE_COPIES
+    /* only where a count does change: not for a field-less variant, nor a value never counted */
+    if (!(h->flags & STN_NOCOUNT)) stn_profile_event(STN_PROFILE_DUP);
+#endif
     if (h->flags == 0) {
         if (__builtin_expect(++h->rc == UINT32_MAX, 0)) h->flags |= STN_NOCOUNT;
         return;
@@ -134,8 +147,12 @@ void   stn_str_release(void* p);
 StnStr stn_str_new_heap(const char* data, int64_t len);
 static inline __attribute__((always_inline)) StnStr stn_str_dup(StnStr s) {
     if (stn_str_heap(s)) {
-        if (__builtin_expect((s.w1 & STN_STR_VIEW_BIT) != 0, 0))
+        if (__builtin_expect((s.w1 & STN_STR_VIEW_BIT) != 0, 0)) {
+#ifdef STN_PROFILE_COPIES
+            stn_profile_event(STN_PROFILE_VIEW);
+#endif
             return stn_str_new_heap(s.ptr, (int64_t)(s.w1 & STN_STR_LEN_MASK));
+        }
         stn_dup(stn_str_buf(s));
     }
     return s;

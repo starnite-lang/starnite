@@ -1,0 +1,10 @@
+# expect: E0602 6:26
+type List = Nil | Cons(head: Int, tail: List)
+inplace fn twice(take xs: List) -> List:
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) -> Cons(x, Cons(x, rest))
+fn main() ! io:
+    match twice(Cons(1, Nil)):
+        Cons(x, _) -> print(f"{x}")
+        Nil -> print("none")

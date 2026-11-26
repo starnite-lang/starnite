@@ -1,0 +1,6 @@
+# expect: E0601 4:5
+type List = Nil | Cons(head: Int, tail: List)
+noalloc fn build(n: Int) -> Array[Int]:
+    [n, n]
+fn main() ! io:
+    print(f"{len(build(1))}")

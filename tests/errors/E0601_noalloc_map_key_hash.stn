@@ -1,0 +1,25 @@
+# expect: E0601 14:6
+type K = struct(a: Int)
+
+impl Eq for K:
+    fn eq(a: K, b: K) -> Bool:
+        a.a == b.a
+
+impl Hash for K:
+    fn hash(x: K) -> Int:
+        let junk = [x.a, 3, 4, 5, 6, 7, 8, 9, 10]
+        len(junk) + x.a
+
+noalloc fn has(m: Map[K, Int], k: K) -> Bool:
+    m.contains(k)
+
+noalloc fn many(m: Map[K, Int], n: Int) -> Int:
+    var t = 0
+    for i in 0..n:
+        if has(m, K(i % 3)):
+            t += 1
+    t
+
+fn main():
+    let m = {K(1): 2}
+    print(f"{many(m, 100000)}")

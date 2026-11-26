@@ -1,0 +1,8 @@
+# expect: E0601 4:5
+type List = Nil | Cons(head: Int, tail: List)
+noalloc fn set(mut xs: Array[Int], v: Int):
+    xs[0] = v
+fn main() ! io:
+    var a = [1]
+    set(mut a, 2)
+    print(f"{a[0]}")

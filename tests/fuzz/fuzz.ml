@@ -309,6 +309,11 @@ type gen = {
   mutable scopes : (string * string * bool) list list;   (* name, type, mutable *)
   mutable n : int;
   mutable fns : (string * string list) list;              (* functions returning Int *)
+  (* How many loops over an array the statements being made are inside. There, no array that is
+     already in scope is made longer: a loop over an array that lengthens it, inside another such
+     loop, multiplies its length at every turn, and the program does not finish in the time a run
+     is given. A loop over a range has a fixed number of turns and is no such loop. *)
+  mutable array_loops : int;
 }
 
 let int g k = Random.State.int g.rng k
@@ -514,7 +519,7 @@ and stmt g ind d =
         | [] -> fallback ()
         | vs -> (
             let v = choice_l g vs in
-            match int g 4 with
+            match (if g.array_loops > 0 then 1 + int g 3 else int g 4) with
             | 0 -> [ sprintf "%s%s.push(%s)" p v (expr g "Int" 2) ]
             | 1 -> [ sprintf "%sif len(%s) > 0:" p v; sprintf "%s    %s[0] = %s" p v (expr g "Int" 2) ]
             | 2 -> [ sprintf "%ssort(mut %s)" p v ]
@@ -529,7 +534,10 @@ and stmt g ind d =
     | 7 ->
         let n = fresh g "i" in
         let head = sprintf "%sfor %s in %s:" p n (expr g "Array[Int]" 2) in
-        head :: with_scope g [ (n, "Int", false) ] (fun () -> stmts g (ind + 1) (range g 1 3) (d - 1))
+        g.array_loops <- g.array_loops + 1;
+        let body = with_scope g [ (n, "Int", false) ] (fun () -> stmts g (ind + 1) (range g 1 3) (d - 1)) in
+        g.array_loops <- g.array_loops - 1;
+        head :: body
     | 8 ->
         let head = sprintf "%smatch %s:" p (expr g "Shape" 2) in
         let arms =
@@ -553,10 +561,13 @@ and stmt g ind d =
         (* a loop over trait values: each is called through its method table *)
         let n = fresh g "f" in
         let head = sprintf "%sfor %s in %s:" p n (expr g "Array[any Fig]" 2) in
-        head
-        :: with_scope g [ (n, "any Fig", false) ] (fun () ->
+        g.array_loops <- g.array_loops + 1;
+        let body =
+          with_scope g [ (n, "any Fig", false) ] (fun () ->
                [ sprintf "%s    print(describe(%s))" p n; sprintf {|%s    print(f"{%s.scale(%s)}")|} p n (small g) ]
-               @ stmts g (ind + 1) 1 (d - 1))
+               @ stmts g (ind + 1) 1 (d - 1)) in
+        g.array_loops <- g.array_loops - 1;
+        head :: body
     | 11 ->
         let head = sprintf "%smatch %s:" p (expr g "(any Fig)?" 2) in
         let n = fresh g "f" in
@@ -569,7 +580,8 @@ and stmt g ind d =
         | [] -> fallback ()
         | vs -> (
             let v = choice_l g vs in
-            match int g 5 with
+            (* inside a loop over an array, only what leaves its length or shortens it *)
+            match (if g.array_loops > 0 then (if chance g 0.5 then 1 else 4) else int g 5) with
             | 0 -> [ sprintf "%s%s.push(%s)" p v (expr g "any Fig" 2) ]
             | 1 -> [ sprintf "%sif len(%s) > 0:" p v; sprintf "%s    %s[0] = %s" p v (expr g "any Fig" 2) ]
             | 2 -> [ sprintf "%sfor %s in %s:" p (fresh g "f") (expr g "Array[any Fig]" 1); sprintf "%s    %s.push(%s)" p v (expr g "any Fig" 1) ]
@@ -658,7 +670,7 @@ and stmt g ind d =
            shared when the loop starts, and the shapes beside it that it must leave alone *)
         let a, decl =
           match vars_of ~mutable_:true g "Array[Int]" with
-          | vs when vs <> [] && chance g 0.4 -> (choice_l g vs, [])
+          | vs when vs <> [] && g.array_loops = 0 && chance g 0.4 -> (choice_l g vs, [])
           | _ ->
               let a = fresh g "a" in
               let line = sprintf "%svar %s: Array[Int] = %s" p a (expr g "Array[Int]" 1) in
@@ -693,7 +705,7 @@ and stmt g ind d =
     | _ -> [ sprintf "%sprint(%s)" p (if chance g 0.5 then sprintf "describe(%s)" (expr g "any Fig" 2) else expr g "Str" 3) ]
 
 let program seed =
-  let g = { rng = Random.State.make [| seed |]; scopes = [ [] ]; n = 0; fns = [] } in
+  let g = { rng = Random.State.make [| seed |]; scopes = [ [] ]; n = 0; fns = []; array_loops = 0 } in
   let fns =
     List.init (int g 3) (fun _ ->
         let name = fresh g "f" in

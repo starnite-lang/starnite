@@ -1,0 +1,12 @@
+# expect: E0604 7:16
+type List = Nil | Cons(head: Int, tail: List)
+fn fresh(n: Int) -> List:
+    Cons(n, Nil)
+inplace fn swap(take xs: List) -> List:
+    match xs:
+        Nil -> fresh(0)
+        Cons(x, rest) -> Cons(x, rest)
+fn main() ! io:
+    match swap(Nil):
+        Cons(x, _) -> print(f"{x}")
+        Nil -> print("none")

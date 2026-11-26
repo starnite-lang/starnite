@@ -423,6 +423,9 @@ StnArray* stn_array_new(const StnElemOps* ops, int64_t cap) {
 /* A write needs the box unshared (section 4.5): copy it when its count is not 1.
    The copy is shallow: boxed elements gain one reference each. */
 static StnArray* stn_array_copy(StnArray* a, int64_t cap) {
+#ifdef STN_PROFILE_COPIES
+    stn_profile_event(STN_PROFILE_ARRAY);
+#endif
     StnArray* b = stn_array_new(a->ops, cap);
     size_t sz = a->ops->size;
     memcpy(b->data, a->data, (size_t)a->len * sz);
@@ -1196,6 +1199,9 @@ void stn_map_release(void* p) {
 
 /* A write needs the box unshared (section 4.5): the copy keeps the order and shares nothing. */
 static void stn_map_copy_for_write(StnMap** pm) {
+#ifdef STN_PROFILE_COPIES
+    stn_profile_event(STN_PROFILE_MAP);
+#endif
     StnMap* m = *pm;
     const StnMapOps* ops = m->ops;
     StnMap* c = stn_map_new(ops);
@@ -1741,8 +1747,62 @@ void stn_runtime_init(void) {
 void stn_runtime_init(void) { stn_hash_init(); }
 #endif
 
+/* ---- counters of --profile-copies (section 9.8) ---- */
+#ifdef STN_PROFILE_COPIES
+typedef struct { const char* file; int line; int kind; uint64_t count; } StnProfileSite;
+#define STN_PROFILE_SITES 4096
+static StnProfileSite stn_profile_sites[STN_PROFILE_SITES];
+static const char* stn_profile_file;
+static int stn_profile_line;
+static uint64_t stn_profile_lost;
+
+void stn_profile_at(const char* file, int line) { stn_profile_file = file; stn_profile_line = line; }
+
+void stn_profile_event(int kind) {
+    if (!stn_profile_file) return;   /* before the first statement of the program */
+    /* the name of a file is one string of the generated code, so its address stands for it */
+    size_t i = (((size_t)(uintptr_t)stn_profile_file >> 3) * 31u + (size_t)stn_profile_line * 4u + (size_t)kind) % STN_PROFILE_SITES;
+    for (size_t n = 0; n < STN_PROFILE_SITES; n++, i = (i + 1) % STN_PROFILE_SITES) {
+        StnProfileSite* s = &stn_profile_sites[i];
+        if (!s->file) { s->file = stn_profile_file; s->line = stn_profile_line; s->kind = kind; }
+        if (s->file == stn_profile_file && s->line == stn_profile_line && s->kind == kind) { s->count++; return; }
+    }
+    stn_profile_lost++;
+}
+
+static int stn_profile_order(const void* a, const void* b) {
+    const StnProfileSite* x = a; const StnProfileSite* y = b;
+    if (x->count != y->count) return x->count < y->count ? 1 : -1;
+    int f = strcmp(x->file, y->file);
+    if (f) return f;
+    if (x->line != y->line) return x->line < y->line ? -1 : 1;
+    return x->kind - y->kind;
+}
+
+static void stn_profile_report(void) {
+    static const char* const what[] = {
+        "an array was copied before a write, because something else held it",
+        "a map or set was copied before a write, because something else held it",
+        "a view of a string was copied to be kept",
+        "a count was raised" };
+    size_t n = 0;
+    for (size_t i = 0; i < STN_PROFILE_SITES; i++)
+        if (stn_profile_sites[i].file) stn_profile_sites[n++] = stn_profile_sites[i];
+    qsort(stn_profile_sites, n, sizeof *stn_profile_sites, stn_profile_order);
+    fprintf(stderr, "copies and count updates (--profile-copies):\n");
+    if (n == 0) fprintf(stderr, "  none\n");
+    for (size_t i = 0; i < n; i++)
+        fprintf(stderr, "%12llu  %s:%d  %s\n", (unsigned long long)stn_profile_sites[i].count,
+                stn_profile_sites[i].file, stn_profile_sites[i].line, what[stn_profile_sites[i].kind]);
+    if (stn_profile_lost) fprintf(stderr, "%12llu  at more places than the table holds\n", (unsigned long long)stn_profile_lost);
+}
+#endif
+
 void stn_runtime_exit(int status) {
     stn_flush();
+#ifdef STN_PROFILE_COPIES
+    stn_profile_report();
+#endif
 #ifdef STN_DEBUG
     /* an error that reaches main returns normally through every frame, so counts must
        balance then too; only a trap (exit 2) leaves objects behind */

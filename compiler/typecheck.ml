@@ -2878,7 +2878,7 @@ let make_sig tb ~modname ~uname (fd : Syntax.fn_def) (extra_tps : (string * (str
     | None -> (fd.fexport, no_eff)
   in
   { sname = uname; sdisplay = fd.fname; stparams = tps; sparams = params; sret = ret; seff = eff;
-    sdeclared = declared; sexport = fd.fexport; sloc = fd.floc; smodule = modname;
+    sdeclared = declared; sexport = fd.fexport; smods = fd.fmods; sloc = fd.floc; smodule = modname;
     slend = (match fd.fret_lend with Some "lend mut" -> Some true | Some _ -> Some false | None -> None) }
 
 let register_fn tb (sg : fsig) =
@@ -3275,7 +3275,7 @@ let check_const tb n =
     Fun.protect ~finally:(fun () -> const_in_progress := List.filter (fun x -> x <> n) !const_in_progress) @@ fun () ->
     in_module tb cmod @@ fun () ->
     let sg = { sname = "const:" ^ n; sdisplay = n; stparams = []; sparams = []; sret = TUnit; seff = no_eff; sdeclared = false;
-               sexport = false; sloc = e.loc; smodule = ""; slend = None } in
+               sexport = false; smods = []; sloc = e.loc; smodule = ""; slend = None } in
     let c = new_ctx tb sg None in
     let te = match t with Some t -> check c e t | None -> infer c e in
     finish_ctx c e.loc;
@@ -3358,7 +3358,7 @@ let check_program (prelude : Syntax.file) (imported : (string * Syntax.file) lis
       (function
         | ITest t when t.tsrejects = None ->
             let sg = { sname = "test"; sdisplay = t.tsname; stparams = []; sparams = []; sret = TUnit; seff = no_eff;
-                       sdeclared = false; sexport = false; sloc = t.tsloc; smodule = entry; slend = None } in
+                       sdeclared = false; sexport = false; smods = []; sloc = t.tsloc; smodule = entry; slend = None } in
             in_module tb entry @@ fun () ->
             let c = new_ctx tb sg None in
             let body = check_block c t.tsbody (Some TUnit) t.tsloc in

@@ -1,0 +1,16 @@
+# expect: E0603 6:16
+type List = Nil | Cons(head: Int, tail: List)
+
+inplace fn pick(take xs: List, m: Map[Int, List]) -> List:
+    match xs:
+        Nil -> m[0]
+        Cons(_, rest) -> rest
+
+fn main():
+    let m = {0: Cons(5, Nil)}
+    var t = 0
+    for i in 0..3:
+        match pick(Nil, m):
+            Nil -> t += 0
+            Cons(x, _) -> t += x
+    print(f"{t}")

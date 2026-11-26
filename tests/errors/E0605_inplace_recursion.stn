@@ -1,0 +1,8 @@
+# expect: E0605 6:30
+type List = Nil | Cons(head: Int, tail: List)
+inplace fn count(take xs: List) -> Int:
+    match xs:
+        Nil -> 0
+        Cons(_, rest) -> 1 + count(take rest)
+fn main() ! io:
+    print(f"{count(Cons(1, Nil))}")

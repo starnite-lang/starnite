@@ -1,0 +1,10 @@
+# expect: E0601 6:11
+type List = Nil | Cons(head: Int, tail: List)
+fn helper(n: Int) -> List:
+    Cons(n, Nil)
+noalloc fn outer(n: Int) -> Int:
+    match helper(n):
+        Cons(x, _) -> x
+        Nil -> 0
+fn main() ! io:
+    print(f"{outer(1)}")

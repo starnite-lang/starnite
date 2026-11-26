@@ -20,6 +20,8 @@ options:
   -o <path>       output path for build
   --cc <cmd>      C compiler to use (default: $CC or cc)
   --keep-c        keep the generated C file
+  --explain-copies  list where a write may copy a shared value, and where a loop raises a count
+  --profile-copies  count those at run time and print the totals when the program ends
 |}
 
 let json = ref false
@@ -145,12 +147,14 @@ let run_tests_interp file (user : Syntax.file) imported (prog : Types.tprog) =
 
 let () =
   let args = List.tl (Array.to_list Sys.argv) in
-  let interp = ref false and release = ref false and out = ref None and cc = ref None and keep = ref false in
+  let interp = ref false and release = ref false and out = ref None and cc = ref None and keep = ref false and explain = ref None and profile = ref false in
   let rec parse_opts acc = function
     | "--interp" :: rest -> interp := true; parse_opts acc rest
     | "--release" :: rest -> release := true; parse_opts acc rest
     | "--json" :: rest -> json := true; parse_opts acc rest
     | "--keep-c" :: rest -> keep := true; parse_opts acc rest
+    | "--explain-copies" :: rest -> explain := Some (ref []); parse_opts acc rest
+    | "--profile-copies" :: rest -> profile := true; parse_opts acc rest
     | "-o" :: p :: rest -> out := Some p; parse_opts acc rest
     | "--cc" :: p :: rest -> cc := Some p; parse_opts acc rest
     | x :: rest -> parse_opts (x :: acc) rest
@@ -164,14 +168,22 @@ let () =
   in
   try
     let user, imported, prog = front_end file in
+    (match cmd with "check" | "test" -> Cgen.check ?explain:!explain prog | "run" when !interp -> Cgen.check ?explain:!explain prog | _ -> ());
+    (* the list of --explain-copies, once the code that it describes has been generated *)
+    let explained () =
+      Option.iter (fun found ->
+          if !found = [] then prerr_endline "no copies to explain"
+          else List.iter (fun ((l : Syntax.loc), msg) -> Printf.eprintf "%s:%d:%d: %s\n" l.file l.line l.col msg) !found;
+          found := []) !explain in
+    explained ();
     match cmd with
     | "check" -> ()
     | "run" when !interp -> run_interp prog
     | "test" -> run_tests_interp file user imported prog
     | "run" | "build" | "emit-c" ->
-        let opts = { Backend.release = !release; cc = !cc; keep_c = !keep } in
+        let opts = { Backend.release = !release; cc = !cc; keep_c = !keep; profile = !profile; explain = !explain } in
         (match cmd with
-         | "emit-c" -> print_string (Cgen.emit prog ~debug:(not !release))
+         | "emit-c" -> print_string (Cgen.emit ?explain:!explain ~profile:!profile prog ~debug:(not !release)); explained ()
          | "build" ->
              let exe =
                match !out with
@@ -197,8 +209,13 @@ let () =
                   Printf.eprintf "error: %s is the source file; choose another output with -o\n" out;
                   exit 1
               | None -> ());
-             Backend.build opts prog exe
-         | _ -> exit (Backend.run opts prog file))
+             Backend.build opts prog exe; explained ()
+         | _ ->
+             (* a run prints the list before the program's own output *)
+             if !explain <> None then begin
+               Cgen.check ?explain:!explain prog; explained ();
+               exit (Backend.run { opts with explain = None } prog file)
+             end else exit (Backend.run opts prog file))
     | c -> Printf.eprintf "unknown command '%s'\n%s" c usage; exit 2
   with
   | Error (code, l, msg) -> report code l msg; exit 1

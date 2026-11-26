@@ -1,0 +1,6 @@
+tests/copies/copies.stn:14:5: in 'set_first', this statement writes to an array, which is copied first if anything else holds it
+tests/copies/copies.stn:23:23: in 'main', this call raises a count in a loop
+tests/copies/copies.stn:25:14: in 'main', this call of push keeps a string in a loop: its count is raised each time, and it is copied if it is a view of another
+tests/copies/copies.stn:25:14: in 'main', this call of push writes to an array, which is copied first if anything else holds it
+tests/copies/copies.stn:28:5: in 'main', this call of put writes to a map or set, which is copied first if anything else holds it
+exit 0

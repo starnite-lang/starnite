@@ -1,7 +1,11 @@
 (* SPDX-License-Identifier: GPL-3.0-or-later *)
 (* Driving the C compiler (section 11.6). *)
 
-type opts = { release : bool; cc : string option; keep_c : bool }
+type opts = {
+  release : bool; cc : string option; keep_c : bool;
+  profile : bool;                                     (* --profile-copies (section 9.8) *)
+  explain : (Syntax.loc * string) list ref option;    (* --explain-copies: where the list goes *)
+}
 
 (* A fresh private directory: the name is random, and an existing path is never reused,
    so nobody else can place or swap the files that are compiled and run. *)
@@ -24,7 +28,7 @@ let cc_cmd o =
   | None -> (match Sys.getenv_opt "CC" with Some c when c <> "" -> c | _ -> "cc")
 
 let build o (prog : Types.tprog) (exe : string) =
-  let c = Cgen.emit prog ~debug:(not o.release) in
+  let c = Cgen.emit ?explain:o.explain ~profile:o.profile prog ~debug:(not o.release) in
   let dir = scratch_dir () in
   write (Filename.concat dir "stn_runtime.h") Runtime_src.header;
   write (Filename.concat dir "stn_runtime.c") Runtime_src.source;
@@ -34,6 +38,8 @@ let build o (prog : Types.tprog) (exe : string) =
      a loop depends on where the code before it happens to end: moving unchanged code by sixteen
      bytes changed single benchmarks by up to 80%. It costs about 5% of the size of the code. *)
   let flags = if o.release then "-O2 -fno-strict-aliasing -falign-functions=64 -falign-loops=64" else "-O0 -g -DSTN_DEBUG" in
+  (* the runtime counts copies only when it is compiled to *)
+  let flags = if o.profile then flags ^ " -DSTN_PROFILE_COPIES" else flags in
   let cmd =
     Printf.sprintf "%s -std=c11 %s -w -I%s -o %s %s %s -lm" (cc_cmd o) flags (Filename.quote dir) (Filename.quote exe)
       (Filename.quote cfile) (Filename.quote (Filename.concat dir "stn_runtime.c"))
