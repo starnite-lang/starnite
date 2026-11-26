@@ -47,11 +47,9 @@ type st = {
   marks : (Buffer.t * int * Syntax.loc * string * bool) list ref;   (* where the code of each expression starts, and whether a loop of the program is around it *)
   explain : bool;                        (* --explain-copies: every function is recorded *)
   profile : bool;                        (* --profile-copies: generated code says which statement it is in *)
-  excused : (Buffer.t * int * int) list ref;   (* code that runs only when a take argument is shared *)
-  (* variables that hold what a take parameter brought, or a field moved out of it: what rule 1 of
-     section 9.6 lets an inplace function treat as held by nothing else *)
-  from_take : (int, unit) Hashtbl.t;
-  trusted : string list ref;             (* cells for reuse taken from such a value *)
+  excused : (Buffer.t * int * int) list ref;   (* code left out of the checks: none now that a take argument of an inplace function is unique (section 6.2) *)
+  from_take : (int, unit) Hashtbl.t;     (* unused since then *)
+  trusted : string list ref;             (* cells for reuse taken from a value known to have no other holder: there for certain *)
   records : Verify.fn_record list ref;
   demoted : (string * int, unit) Hashtbl.t;   (* take parameters passed as read-only ones (section 9.4): function, position *)
   names : (string * string) list ref;    (* every function generated, and its name in the program *)

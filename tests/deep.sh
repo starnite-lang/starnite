@@ -26,5 +26,11 @@ for mode in "" --release; do
         else echo "FAIL deep/release ${mode:-debug} ${budget:+budget $budget}"; diff "$here/deep/release.out" "$tmp/out" | head -10; fail=$((fail + 1)); fi
     done
 done
+# a deep copy, asked for and made for a unique parameter, of a list a million long (section 6.2)
+for mode in "" --release; do
+    "$starnite" run $mode "$here/deep/copy.stn" < /dev/null > "$tmp/out" 2>&1; echo "exit $?" >> "$tmp/out"
+    if cmp -s "$tmp/out" "$here/deep/copy.out"; then pass=$((pass + 1))
+    else echo "FAIL deep/copy ${mode:-debug}"; diff "$here/deep/copy.out" "$tmp/out" | head -10; fail=$((fail + 1)); fi
+done
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]

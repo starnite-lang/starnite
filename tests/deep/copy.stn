@@ -1,0 +1,35 @@
+# copy() of a long list, and an inplace function over what it gives (section 6.2): both run as
+# loops, so a million cells need no more stack than one.
+type List = Nil | Cons(head: Int, tail: List)
+
+fn range_list(n: Int) -> unique List:
+    var out = Nil
+    var i = n
+    while i > 0:
+        out = Cons(i, take out)
+        i -= 1
+    out
+
+inplace fn bump(take xs: List) -> unique List:
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) -> Cons(x + 1, bump(take rest))
+
+fn sum(xs: List) -> Int:
+    var t = 0
+    var at = xs
+    while true:
+        match at:
+            Nil -> break
+            Cons(x, rest) ->
+                t += x
+                at = rest
+    t
+
+fn main() ! io:
+    let a = range_list(1000000)
+    let b = copy(a)
+    # a is still used below, so bump is handed a copy of it
+    let c = bump(a)
+    let d = bump(take c)
+    print(f"{sum(a)} {sum(b)} {sum(d)}")

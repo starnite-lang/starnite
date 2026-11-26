@@ -529,8 +529,6 @@ void stn_array_copy_for_write(StnArray** pa) {
     *pa = b;
 }
 
-StnArray* stn_array_clone(StnArray* a) { return stn_array_copy(a, a->len > 0 ? a->len : 1); }
-
 /* A counted loop that pushes once per turn says how many elements are coming. Growing once to that
    size saves the copies of doubling and leaves no slack. It is only a hint: it never traps, an
    array that is shared or small is left alone, and a failed allocation leaves ordinary growth to
@@ -1430,7 +1428,6 @@ static inline void stn_map_make_unique(StnMap** pm) {
     if (__builtin_expect(!stn_unique(*pm), 0)) stn_map_copy_for_write(pm);
 }
 void stn_map_make_unique_for_write(StnMap** pm) { stn_map_make_unique(pm); }
-StnMap* stn_map_clone(StnMap* m) { stn_dup(m); stn_map_copy_for_write(&m); return m; }
 
 /* The entry of the key, or NULL. When it is there and slot is given, *slot is the slot of the
    index that names it. */
@@ -2025,3 +2022,10 @@ void stn_runtime_exit(int status) {
 #endif
     exit(status);
 }
+
+/* ---- copies that share nothing (section 6.2) ----
+   The first step of a deep copy: a block of its own with the same elements, each counted once
+   more. Generated code then replaces each element that holds a block with a copy of it. These are
+   at the end of the file so that adding them moved no other function. */
+StnArray* stn_array_clone(StnArray* a) { return stn_array_copy(a, a->len > 0 ? a->len : 1); }
+StnMap* stn_map_clone(StnMap* m) { stn_dup(m); stn_map_copy_for_write(&m); return m; }
