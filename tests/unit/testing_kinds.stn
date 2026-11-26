@@ -124,6 +124,52 @@ fn layers[T](l: Layer[T]) -> Int:
 test "a type inside itself" for l: Layer[Layer[Int]]:
     assert layers(l) >= 0
 
+# a long way to a value is still a way: thirty layers of one type, and thirty structs in a row
+test "a type thirty deep in itself" for l: Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Layer[Int]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]:
+    assert layers(l) >= 0
+
+type Box0 = struct(inner: Box1)
+type Box1 = struct(inner: Box2)
+type Box2 = struct(inner: Box3)
+type Box3 = struct(inner: Box4)
+type Box4 = struct(inner: Box5)
+type Box5 = struct(inner: Box6)
+type Box6 = struct(inner: Box7)
+type Box7 = struct(inner: Box8)
+type Box8 = struct(inner: Box9)
+type Box9 = struct(inner: Box10)
+type Box10 = struct(inner: Box11)
+type Box11 = struct(inner: Box12)
+type Box12 = struct(inner: Box13)
+type Box13 = struct(inner: Box14)
+type Box14 = struct(inner: Box15)
+type Box15 = struct(inner: Box16)
+type Box16 = struct(inner: Box17)
+type Box17 = struct(inner: Box18)
+type Box18 = struct(inner: Box19)
+type Box19 = struct(inner: Box20)
+type Box20 = struct(inner: Box21)
+type Box21 = struct(inner: Box22)
+type Box22 = struct(inner: Box23)
+type Box23 = struct(inner: Box24)
+type Box24 = struct(inner: Box25)
+type Box25 = struct(inner: Box26)
+type Box26 = struct(inner: Box27)
+type Box27 = struct(inner: Box28)
+type Box28 = struct(inner: Box29)
+type Box29 = struct(inner: Box30)
+type Box30 = struct(inner: Int)
+
+type Root = Retry(next: Root) | Finish(value: Box0)
+
+fn retries(r: Root) -> Int:
+    match r:
+        Retry(next) -> 1 + retries(next)
+        Finish(_) -> 0
+
+test "a long chain of structs" for r: Root:
+    assert retries(r) >= 0
+
 test "a snapshot":
     assert_snapshot [(area(Rect(2, 3)), "rect"), (area(Circle(1)), "circle")]
     assert_snapshot larger(4, 9)

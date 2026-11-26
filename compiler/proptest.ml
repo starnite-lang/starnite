@@ -72,24 +72,34 @@ let generable env (t : ty) : bool =
    or a data type with a variant of such fields. A data type picks such a variant at size 0, so
    that generation ends, through other declarations too: `type First = More(next: Second) |
    End(value: Int)` with `type Second = Back(next: First)` ends with End. *)
-let rec finite env (within : string list) (t : ty) : bool =
+let rec type_size (t : ty) : int =
+  match repr t with
+  | TArray e -> 1 + type_size e
+  | TTuple ts | TNamed (_, ts) -> List.fold_left (fun n x -> n + type_size x) 1 ts
+  | _ -> 1
+
+let rec finite env ?limit (within : string list) (t : ty) : bool =
+  (* how large a type the search may come to: well past the one it started from *)
+  let limit = match limit with Some l -> l | None -> type_size t + 64 in
   match repr t with
   | TArray _ | TNamed (("Map" | "Set"), _) -> true
-  | TTuple ts -> List.for_all (finite env within) ts
+  | TTuple ts -> List.for_all (finite env ~limit within) ts
   | TNamed (n, args) ->
       (* The types on the way are whole types, with their arguments: Layer[Int] inside
-         Layer[Layer[Int]] is another type, and Done(Done(0)) a value. A type whose arguments
-         grow at every step, Nest[Array[T]], is never met twice, so the way is also not followed
-         past a length no written type would need. *)
+         Layer[Layer[Int]] is another type, and Done(Done(0)) a value. A way that comes back to a
+         type it has passed goes nowhere. A type whose arguments grow at every step,
+         Nest[Array[T]], is never met twice: that way is given up when its types have grown well
+         past the one the search started from, which no way through a finite chain of
+         declarations, however long, does by itself. *)
       let key = show_ty (repr t) in
-      (not (List.mem key within)) && List.length within < 24
+      (not (List.mem key within)) && type_size t <= limit
       && (match decl env n with
           | Some { dbody = DStruct fs; dparams; _ } when List.length dparams = List.length args ->
               let s = List.combine dparams args in
-              List.for_all (fun (f : field_info) -> finite env (key :: within) (subst s f.fty)) fs
+              List.for_all (fun (f : field_info) -> finite env ~limit (key :: within) (subst s f.fty)) fs
           | Some { dbody = DData vs; dparams; _ } when List.length dparams = List.length args ->
               let s = List.combine dparams args in
-              List.exists (fun (v : variant_info) -> List.for_all (fun (f : field_info) -> finite env (key :: within) (subst s f.fty)) v.vfields) vs
+              List.exists (fun (v : variant_info) -> List.for_all (fun (f : field_info) -> finite env ~limit (key :: within) (subst s f.fty)) v.vfields) vs
           | _ -> true)
   | _ -> true
 
