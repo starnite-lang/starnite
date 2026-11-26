@@ -11,10 +11,14 @@
 #include <emmintrin.h>
 #endif
 
-/* ---- object header (section 11.1) ---- */
+/* ---- heap block header (section 11.1) ---- */
+/* A heap block, in full a heap allocation block, is one piece of counted memory that backs a
+   value: the buffer of an array or of a long string, the table of a map or set, one cell of a
+   boxed data type, a closure. The language has only values; these are how the runtime stores
+   them, and no program sees one. */
 typedef struct stn_header {
     uint32_t rc;          /* reference count */
-    uint16_t tag;         /* variant index; 0 for other objects */
+    uint16_t tag;         /* variant index; 0 for other heap blocks */
     uint8_t  flags;       /* STN_NOCOUNT | STN_ATOMIC */
     uint8_t  size_class;  /* allocator class, for reuse and free */
 } stn_header;
@@ -73,18 +77,18 @@ void stn_check_header(void* p);
 #endif
 
 /* ---- releasing large structures (section 9.7) ---- */
-/* A release function that drops what its object holds can start other releases. Each such
+/* A release function that drops what its heap block holds can start other releases. Each such
    function goes in through stn_release_enter, which lets them nest only STN_RELEASE_DEPTH deep:
-   past that, and once STN_FREE_BUDGET objects have been released in one go, the object is put on
+   past that, and once STN_FREE_BUDGET heap blocks have been released in one go, the heap block is put on
    a list instead, and released when the nesting has unwound, or at a later allocation when it was
    the budget that stopped it. The stack a release needs is therefore bounded whatever the shape
    of the structure. A release that drops nothing, a string's or an array of numbers', does not
    take part and costs what it did. */
 #define STN_RELEASE_DEPTH 256
 extern int32_t stn_release_depth;      /* releases now running, one inside another */
-extern int64_t stn_release_left;       /* objects that may still be released before a pause */
+extern int64_t stn_release_left;       /* heap blocks that may still be released before a pause */
 extern int64_t stn_release_budget;     /* STN_FREE_BUDGET, or INT64_MAX without one */
-extern size_t  stn_release_pending;    /* objects on the list */
+extern size_t  stn_release_pending;    /* heap blocks on the list */
 void stn_release_defer(void* p, void (*release)(void*));
 void stn_release_drain(int fresh);
 
@@ -458,7 +462,7 @@ static inline int64_t stn_index(int64_t i, int64_t len, const char* file, int li
 typedef struct StnClosure {
     stn_header h;
     void* code;                           /* first parameter is the closure itself */
-    void (*release)(void* self);          /* releases the captures and the object */
+    void (*release)(void* self);          /* releases the captures and the heap block */
 } StnClosure;
 
 static inline void stn_closure_drop(StnClosure* c) { stn_drop(c, c->release); }

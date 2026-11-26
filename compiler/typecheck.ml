@@ -1266,7 +1266,7 @@ and infer_name c l n exp : texpr =
                   let sg = Hashtbl.find c.tb.fns u in
                   if sg.slend <> None then
                     err "E0320" l "'%s' lends a place, so it cannot be used as a function value" n;
-                  (* a built-in has no body to make a closure object of, on the interpreter and in C alike *)
+                  (* a built-in has no body to make a closure block of, on the interpreter and in C alike *)
                   if is_builtin u then err "E0201" l "'%s' is built in, so it is called directly; wrap it to use it as a value, as in fn(...): %s(...)" n n;
                   let s, ps, ret, eff = instantiate sg in
                   let ty = TFn { fps = List.map (fun (m, _, t, _) -> (m, t)) ps; fret = ret; feff = eff } in

@@ -140,7 +140,7 @@ void stn_free(void* p) {
 #ifdef STN_DEBUG
     stn_live_objects--;
     /* Freed memory is poisoned and held in a quarantine, so a later drop of the same
-       object reads the poison rather than memory malloc has reused. */
+       heap block reads the poison rather than memory malloc has reused. */
     if (cls) memset(h, 0xDB, cls * 16); else memset(h, 0xDB, sizeof(stn_header));
     static void* quarantine[1 << 16];
     static size_t next = 0;
@@ -159,7 +159,7 @@ void stn_free(void* p) {
 void stn_check_header(void* p) {
     stn_header* h = (stn_header*)p;
     if (h->rc == 0xDBDBDBDBu || (h->flags == 0 && h->rc == 0)) {
-        fputs("debug runtime: drop of a released object\n", stderr);
+        fputs("debug runtime: drop of a released heap block\n", stderr);
         abort();
     }
 }
@@ -485,7 +485,7 @@ void stn_array_release(void* p) {
         stn_release_leave();
         return;
     }
-    /* an array that holds nothing counted starts no release, but is an object of the budget */
+    /* an array that holds nothing counted starts no release, but is a heap block of the budget */
     if (__builtin_expect(--stn_release_left < 0, 0)) { stn_release_defer(p, stn_array_release); return; }
     stn_free(a);
 }
@@ -2001,9 +2001,9 @@ void stn_runtime_exit(int status) {
 #endif
 #ifdef STN_DEBUG
     /* an error that reaches main returns normally through every frame, so counts must
-       balance then too; only a trap (exit 2) leaves objects behind */
+       balance then too; only a trap (exit 2) leaves heap blocks behind */
     if ((status == 0 || status == 1) && stn_live_objects != 0 && getenv("STN_ALLOW_LEAKS") == NULL) {
-        fprintf(stderr, "debug runtime: %lld object(s) still live at exit; counts do not balance\n",
+        fprintf(stderr, "debug runtime: %lld heap block(s) still live at exit; counts do not balance\n",
                 (long long)stn_live_objects);
         exit(3);
     }

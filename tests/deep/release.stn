@@ -2,7 +2,7 @@
 # values each held in the array of the next, are released without a stack as deep as they are:
 # releases nest only so far before the rest is put on a list. tests/deep.sh runs this with the
 # debug and release C builds, and again with STN_FREE_BUDGET, which releases a bounded number of
-# objects at a time. The debug runtime checks at exit that everything was released.
+# heap blocks at a time. The debug runtime checks at exit that everything was released.
 type Tree = Leaf | Node(left: Tree, value: Int, right: Tree)
 type Rose = Rose(value: Int, kids: Array[Rose])
 

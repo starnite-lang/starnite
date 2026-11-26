@@ -482,11 +482,11 @@ let str_lit st s =
       end;
       n
 
-(* A release function for the object at p: drops is what it holds, as C statements. One that
+(* A release function for the heap block at p: drops is what it holds, as C statements. One that
    drops something goes in through stn_release_enter, so that releases cannot nest without bound
    (section 9.7). *)
 let release_fn name before drops =
-  (* one that drops nothing starts no release, but is an object of the budget all the same *)
+  (* one that drops nothing starts no release, but is a heap block of the budget all the same *)
   if String.trim drops = "" then
     Printf.sprintf "static void %s(void* p) { if (--stn_release_left < 0) { stn_release_defer(p, %s); return; } %s stn_free(p); }\n" name name before
   else Printf.sprintf "static void %s(void* p) { if (stn_release_enter(p, %s)) return; %s %s stn_free(p); stn_release_leave(); }\n" name name before drops
@@ -1482,7 +1482,7 @@ and call_instance fc (e : texpr) uname tys (sg : fsig) targs convs : r =
   end else
     { c = tmp fc t (Printf.sprintf "%s(%s)" name (String.concat ", " avs)); owned = true }
 
-(* a named function used as a value: a constant closure object (section 13.1) *)
+(* a named function used as a value: a constant closure block (section 13.1) *)
 and fn_closure fc uname tys : string =
   let st = fc.st in
   let key = "fnclo_" ^ inst_name uname tys in
@@ -2188,7 +2188,7 @@ and closure fc (lam : lambda) : string =
   let cap_ctype (v : var) =
     if is_cell fc v then cell_type st (ts fc v.vty) ^ "*" else ct fc v.vty
   in
-  (* the closure object type *)
+  (* the closure block type *)
   pr st.typedefs "typedef struct { StnClosure base; %s } %s_t;\n"
     (String.concat " " (List.map (fun v -> cap_ctype v ^ " " ^ cap_field v ^ ";") caps)) name;
   pr st.protos "static void %s_release(void* p);\n" name;
@@ -2232,7 +2232,7 @@ and closure fc (lam : lambda) : string =
   line fc' "return 0;";
   pr b "}\n";
   Buffer.add_buffer st.funcs b;
-  (* build the object *)
+  (* build the heap block *)
   let o = fresh st "_clo" in
   line fc "%s_t* %s = (%s_t*)stn_alloc(sizeof(%s_t));" name o name name;
   line fc "%s->base.code = (void*)%s_code; %s->base.release = %s_release;" o name o name;
