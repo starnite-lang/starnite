@@ -60,6 +60,17 @@ bench "a name of its own" for __bench_a in [7] budget allocs == 0:
     measure:
         print(f"{__bench_a} {__bench_b}")
 
+# functions of the program with the names of the two the prelude has for benches: a bench goes
+# on meaning the prelude's
+fn bench_begin(name: Str, label: Str, n: Int, spec: Str, a: Int, b: Int, c: Int, d: Int):
+    print("not this one")
+
+fn bench_running() -> Bool:
+    false
+
+fn assert_snapshot_text(s: Str) ! io:
+    print("nor this one")
+
 bench "build a list" for n in [100] budget allocs <= 50 budget time < 5ms:
     var sum = 0
     measure:

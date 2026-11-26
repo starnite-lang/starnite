@@ -237,10 +237,10 @@ let bench_blocks file (src : string) : string * int array * string list * string
           let indent = String.sub lines.(!j) 0 (String.index lines.(!j) 'm') in
           lines.(!j) <- String.concat "\n" [
               Printf.sprintf "%slet (%s_a, %s_b, %s_c, %s_d) = (%s)" indent prefix prefix prefix prefix (String.concat ", " limits);
-              Printf.sprintf "%sbench_begin(%s, \"%s\", %s, \"%s\", %s_a, %s_b, %s_c, %s_d)" indent name
+              Printf.sprintf "%s%s_begin(%s, \"%s\", %s, \"%s\", %s_a, %s_b, %s_c, %s_d)" indent prefix name
                 (match var with Some v -> v | None -> "") (match var with Some v -> v | None -> "0") (String.concat " " spec)
                 prefix prefix prefix prefix;
-              Printf.sprintf "%swhile bench_running():" indent ];
+              Printf.sprintf "%swhile %s_running():" indent prefix ];
           found := true
         end;
         incr j
@@ -265,6 +265,9 @@ let front_end ?(docs = false) ?(bench = false) file =
   let src = if docs then src ^ doc_tests src else src in
   let pre = load_prelude () in
   (* positions are those of the file as it was written; the modules it imports are read as they are *)
+  (* the two calls made up for a measure block mean the prelude's functions, whatever the program
+     has by those names *)
+  Typecheck.internal_names := [ (prefix ^ "_begin", "bench_begin"); (prefix ^ "_running", "bench_running") ];
   Lexer.line_map := line_map;
   let user = try Parser.parse_file file src with e -> Lexer.line_map := [||]; raise e in
   Lexer.line_map := [||];

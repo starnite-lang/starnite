@@ -97,11 +97,22 @@ let find_variant tb n =
 
 let found_opt = function Found (k, v) -> Some (k, v) | Private _ | Absent -> None
 
+(* Names that mean a function of the prelude and nothing else, whatever the program defines. The
+   compiler itself calls a few prelude functions for the program: for `assert_snapshot`, and for
+   the `measure:` block of a bench (section 20.3). Those calls are written `core!name`, which is
+   not a name a program can write, or, in text the driver makes up before parsing, by a name the
+   driver has checked stands nowhere in the file and lists here. *)
+let internal_names : (string * string) list ref = ref []
+
 (* The functions the name [n] can mean in the current module: its own and the prelude's, or,
    written `alias.name`, the exported ones of an imported module. *)
 let visible_fns tb n =
   let all x = try Hashtbl.find tb.by_name x with Not_found -> [] in
   let sg u = Hashtbl.find tb.fns u in
+  let n = match List.assoc_opt n !internal_names with Some inner -> "core!" ^ inner | None -> n in
+  if String.length n > 5 && String.sub n 0 5 = "core!" then
+    List.filter (fun u -> (sg u).smodule = "core") (all (String.sub n 5 (String.length n - 5)))
+  else
   match split_qual n with
   | Some (alias, x) -> (
       match import_of tb alias with
@@ -2633,7 +2644,7 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
   (* the value as Show formats it goes to the test runner, which holds the stored copy *)
   | AssertSnapshot e ->
       let shown = { d = FStr [ FExpr e ]; loc = l } in
-      let call = { d = Call ({ d = Name "assert_snapshot_text"; loc = l }, [ { aname = None; amode = None; aexpr = shown; aloc = l } ]); loc = l } in
+      let call = { d = Call ({ d = Name "core!assert_snapshot_text"; loc = l }, [ { aname = None; amode = None; aexpr = shown; aloc = l } ]); loc = l } in
       mks (SExpr (infer c call))
   | Expr e -> mks (SExpr (infer c e))
   | If _ | Match _ -> mks (SExpr (check_stmt_expr c s None))
@@ -2665,7 +2676,7 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
       (* The loop a `measure:` block becomes (section 20.3) is ended by the runtime, which then
          reports the counters and checks the budgets. Leaving it any other way would skip that. *)
       (match cnd.d with
-       | Call ({ d = Name "bench_running"; _ }, _) ->
+       | Call ({ d = Name running; _ }, _) when List.assoc_opt running !internal_names = Some "bench_running" ->
            let rec scan in_loop (b : block) =
              List.iter (fun (st : stmt) ->
                  match st.s with
