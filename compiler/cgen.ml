@@ -675,7 +675,14 @@ let no_implicit_copies = ref false
 let u_returns = ref false   (* the function being generated is declared `-> unique T` *)
 (* the parameters of the function being generated that must be handed a unique value *)
 let u_dps_needs : (int, unit) Hashtbl.t = Hashtbl.create 4
+(* variables that a loop body declares, taken to be unique while the body is read ahead of its code *)
+let u_ahead : (int, unit) Hashtbl.t = Hashtbl.create 8
+(* how many loops of the program the code being written is inside, and for each unique variable
+   how many it was declared inside *)
+let u_depth = ref 0
+let u_decl_depth : (int, int) Hashtbl.t = Hashtbl.create 32
 let u_reset () =
+  Hashtbl.reset u_ahead; Hashtbl.reset u_decl_depth; u_depth := 0;
   Hashtbl.reset u_vars; Hashtbl.reset u_views; Hashtbl.reset u_home; Hashtbl.reset u_must; Hashtbl.reset u_dps_needs; u_fresh := []; u_returns := false
 
 let line fc fmt =
@@ -1061,7 +1068,10 @@ let rec expr fc (e : texpr) : r =
   let saved = !(fc.st.cur) in
   note fc (e.l, describe e);
   if !(fc.st.marking) then touch_keys fc e;
+  let looping = (match e.e with XComp _ -> true | _ -> false) in
+  if looping then incr u_depth;
   let r = expr_at fc e in
+  if looping then decr u_depth;
   note fc saved;
   (* whether the value has no other holder, from what its parts were when their code was written *)
   if boxy fc.st (ts fc e.ty) then begin
@@ -2524,8 +2534,10 @@ and closure fc (lam : lambda) : string =
   (* a closure's result is its own, whatever the function around it is declared to return *)
   let outer_returns = !u_returns in
   u_returns := false;
+  incr u_depth;
   u_scan fc' ~deep:false (Some lam.lbody);
   let x = expr fc' lam.lbody in
+  decr u_depth;
   u_returns := outer_returns;
   let rv = own fc' x lam.lbody.ty in
   let rv = if repr (ts fc' lam.lbody.ty) = TNever then "0" else rv in
@@ -3351,10 +3363,20 @@ and moves fc (e : texpr) (v : var) =
   && (match Hashtbl.find_opt fc.vars v.vid with
       | Some (VDirect n) -> List.exists (fun (f : frame) -> List.exists (fun (o, _) -> o = n) f.owned) fc.frames
       | _ -> false)
-  && (match repr (ts fc v.vty) with
-      | TStr | TArray _ | TNamed (("Map" | "Set"), _) -> true
-      | TNamed _ as t -> is_data fc.st t && layout fc.st t = LBoxed
-      | _ -> false)
+  && movable_type fc.st (ts fc v.vty)
+
+(* A type whose variable can be left holding something its release ignores: a string, an array, a
+   map, a set, a boxed value, or a struct or tuple with something counted in it, all of whose
+   counted parts are such. *)
+and movable_type st (t : ty) : bool =
+  let rec part t =
+    match repr t with
+    | TStr | TArray _ | TNamed (("Map" | "Set"), _) -> true
+    | TTuple ts -> List.for_all part ts
+    | TNamed _ as t when is_struct st t -> List.for_all (fun (_, ft) -> part ft) (struct_fields st t)
+    | TNamed _ as t when is_data st t -> layout st t = LBoxed || not (needs_rc st t)
+    | t -> not (needs_rc st t) in
+  needs_rc st t && part t
 
 (* ---------- uniqueness (section 6.2) ---------- *)
 
@@ -3378,6 +3400,14 @@ and u_base (e : texpr) : var option =
 and u_lose (l : Syntax.loc) (v : var) =
   let r = u_root_var v in
   if Hashtbl.mem u_vars r.vid then begin
+    (* A variable declared outside the loop whose code is being written should have lost its
+       uniqueness when the loop was read ahead, before any of that code. If it is lost only now,
+       code already written for the loop took it to be unique on every turn. The tests run with
+       STN_CHECK_UNIQUE set, and the compiler then stops here. *)
+    (match Hashtbl.find_opt u_decl_depth r.vid with
+     | Some d when d < !u_depth && Sys.getenv_opt "STN_CHECK_UNIQUE" <> None ->
+         failwith (Printf.sprintf "uniqueness: '%s' is lost inside a loop that was read ahead without losing it (%s:%d:%d)" r.vname l.file l.line l.col)
+     | _ -> ());
     (match Hashtbl.find_opt u_must r.vid with
      | Some name ->
          raise (Syntax.Error ("E0608", l, Printf.sprintf
@@ -3400,6 +3430,7 @@ and u_add fc (v : var) =
 (* [v] is declared here, in the scope that is innermost now *)
 and u_declare fc (v : var) =
   Hashtbl.remove u_vars v.vid; Hashtbl.remove u_views v.vid;
+  Hashtbl.replace u_decl_depth v.vid !u_depth;
   match u_scope fc with Some f -> Hashtbl.replace u_home v.vid f | None -> Hashtbl.remove u_home v.vid
 
 and u_is_fresh fc (e : texpr) =
@@ -3426,11 +3457,20 @@ and u_mentions (r : var) (e : texpr) : bool =
 and u_gives fc (e : texpr) : bool =
   not (boxy fc.st (ts fc e.ty))
   || (match e.e with
-      | XVar v -> u_known v && Hashtbl.mem u_vars v.vid && moves fc e v
+      | XVar v -> u_known v && Hashtbl.mem u_vars v.vid && (moves fc e v || u_will_move fc e v)
       | XTuple es | XArray es | XStruct (_, _, es) | XVariant (_, _, _, es) -> List.for_all (u_gives fc) es
       | XCall (CBuiltin ("copy@T", _), _, _) -> true
       | XCall (CFn (u, _), _, _) -> let sg = (Hashtbl.find fc.st.prog.fns u).fsig in sg.sruniq && sg.slend = None
       | _ -> false)
+
+(* For a variable that the body of a loop declares, read before the body's code is written: whether
+   this occurrence will move it, as far as that is settled before the variable exists. *)
+and u_will_move fc (e : texpr) (v : var) : bool =
+  Hashtbl.mem u_ahead v.vid
+  && List.memq e !(fc.st.movable)
+  && not (Hashtbl.mem fc.st.pinned v.vid)
+  && not v.vcell
+  && movable_type fc.st (ts fc v.vty)
 
 (* which parameters of a function must be handed a unique value: those declared unique, and the
    take parameters of an inplace function that hold a block (rule 1 of section 9.6). A parameter
@@ -3464,7 +3504,7 @@ and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr o
     match e.e with
     | XVar v ->
         if boxy_t v.vty then begin
-          if own then (if not (moves fc e v) then u_lose e.l v)
+          if own then (if not (moves fc e v || u_will_move fc e v) then u_lose e.l v)
           else held := v :: !held
         end
     | XField (b, _, _) | XTupleGet (b, _) -> if boxy_t e.ty then go own b else plain b
@@ -3485,7 +3525,7 @@ and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr o
        read then, once the variables the statements declare are known *)
     | XBlock (ss, v) -> if !deep then (List.iter gs ss; go own v) else if ss = [] then go own v
     | XMatch (s, arms) ->
-        let handed = match s.e with XVar v -> moves fc s v | _ -> false in
+        let handed = match s.e with XVar v -> moves fc s v || u_will_move fc s v | _ -> false in
         if not handed then begin
           go false s;
           match u_base s with
@@ -3598,7 +3638,17 @@ and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr o
         end
   and gs (s : tstmt) =
     match s.st with
-    | SLet (_, e) | SVar (_, e) | SReturn e | SAssertFails (_, e) | SLend e -> go true e
+    | SLet (TPVar v, e) | SVar (v, e) ->
+        go true e;
+        (* read ahead of its code, a variable the loop declares is unique when what it starts as will be *)
+        if !deep && not (Hashtbl.mem fc.vars v.vid) then begin
+          Hashtbl.remove u_views v.vid;
+          if boxy_t v.vty && (not v.vcell) && (not v.vcaptured) && u_gives fc e
+             && not (Hashtbl.mem st.self_sliced v.vid)
+          then (Hashtbl.replace u_vars v.vid (); Hashtbl.replace u_ahead v.vid ())
+          else Hashtbl.remove u_vars v.vid
+        end
+    | SLet (_, e) | SReturn e | SAssertFails (_, e) | SLend e -> go true e
     | SExpr e | SAssert (e, _) | SCheck e -> go false e
     | SAssign (p, e) ->
         Option.iter (go true) p.via;
@@ -3616,7 +3666,10 @@ and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr o
   in
   (* Read again until nothing more is lost: in a loop, what one statement is taken to give depends
      on variables that a later statement may end the uniqueness of, for the turns after the first. *)
+  let forget () =
+    Hashtbl.iter (fun vid () -> Hashtbl.remove u_vars vid) u_ahead; Hashtbl.reset u_ahead in
   let rec settle () =
+    forget ();
     let before = Hashtbl.length u_vars in
     writes := []; held := [];
     Option.iter gs stmt;
@@ -3626,6 +3679,7 @@ and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr o
     List.iter (fun ((w : var), l) ->
         let r = u_root_var w in
         if List.exists (fun (h : var) -> (u_root_var h).vid = r.vid) !held then u_lose l w) !writes;
+    forget ();
     if Hashtbl.length u_vars < before then settle () in
   settle ()
 
@@ -3633,6 +3687,10 @@ and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr o
 and moved_out st t n =
   match repr t with
   | TStr -> Printf.sprintf "%s = (StnStr){ .w0 = 0, .w1 = 0 };" n
+  | TTuple ts ->
+      String.concat " " (List.mapi (fun i ft -> if needs_rc st ft then moved_out st ft (Printf.sprintf "%s.f%d" n i) else "") ts)
+  | TNamed _ as t when is_struct st t ->
+      String.concat " " (List.map (fun (f, ft) -> if needs_rc st ft then moved_out st ft (Printf.sprintf "%s.%s" n (fname f)) else "") (struct_fields st t))
   | _ -> Printf.sprintf "%s = (%s)(void*)1;" n (cty st t)
 
 (* Finds the occurrences that may move a variable (section 9.2). An occurrence qualifies when it
@@ -3653,6 +3711,8 @@ and note_moves st (owned_params : var list) (body : texpr) =
   let decl : (int, int) Hashtbl.t = Hashtbl.create 32 in
   (* statements that assign a whole variable, `x = e`, with no break or continue inside e *)
   let kills : (int * int, int) Hashtbl.t = Hashtbl.create 16 in
+  (* return statements: nothing that follows one in the text runs after it *)
+  let returns : (int, unit) Hashtbl.t = Hashtbl.create 8 in
   let jumps = ref 0 in
   let use (v : var) node stmt ctx =
     Hashtbl.replace occs v.vid ((node, stmt, ctx, !path) :: (try Hashtbl.find occs v.vid with Not_found -> [])) in
@@ -3707,7 +3767,8 @@ and note_moves st (owned_params : var list) (body : texpr) =
         if Hashtbl.mem st.self_sliced v.vid then pin e;
         w e;
         Hashtbl.replace decl v.vid ctx
-    | SExpr e | SReturn e | SAssert (e, _) | SAssertFails (_, e) | SCheck e -> w e
+    | SReturn e -> Hashtbl.replace returns stmt (); w e
+    | SExpr e | SAssert (e, _) | SAssertFails (_, e) | SCheck e -> w e
     | SLend e -> pin e; w e
     | SAssign (p, e) ->
         Option.iter w p.via;
@@ -3736,6 +3797,12 @@ and note_moves st (owned_params : var list) (body : texpr) =
             (match node with
              | Some node when c = ctx
                               && List.for_all (fun (_, _, _, q) -> apart p q) later
+                              && List.for_all (fun (_, s, _, q) -> s <> stmt || apart p q) earlier ->
+                 st.movable := node :: !(st.movable)
+             (* in what a return statement returns: the function ends there, in a loop too, so only
+                the statement's own other occurrences count against it *)
+             | Some node when Hashtbl.mem returns stmt
+                              && List.for_all (fun (_, s, _, q) -> s <> stmt || apart p q) later
                               && List.for_all (fun (_, s, _, q) -> s <> stmt || apart p q) earlier ->
                  st.movable := node :: !(st.movable)
              | _ -> ());
@@ -3836,7 +3903,10 @@ and stmt fc (s : tstmt) =
    | SVar (v, _) | SLocalFn (v, _) -> Hashtbl.remove u_vars v.vid; Hashtbl.remove u_views v.vid
    | _ -> ());
   u_scan fc ~deep:false ~stmt:s None;
+  let looping = (match s.st with SWhile _ | SFor _ -> true | _ -> false) in
+  if looping then incr u_depth;
   stmt_at fc s;
+  if looping then decr u_depth;
   (* what follows the statement is not the statement's: releases at the end of a block, say *)
   note fc saved
 
@@ -4629,6 +4699,7 @@ let compile_instance st cname uname tys =
     looped := true;
     (* the body runs again on each turn, with the parameters the turn before gave it *)
     u_scan fc ~deep:true (Some tf.fbody);
+    u_depth := 1;
     (* a function that returns a constructor holding a call of itself runs as a loop (section 9.5) *)
     line fc "%s _res;" (cty st ret);
     line fc "%s* _dst = &_res;" (cty st ret);

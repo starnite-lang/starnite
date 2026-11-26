@@ -1,0 +1,41 @@
+# What a return statement returns moves at that return, whatever other paths use later (sections 9.2 and 6.2).
+fn fill(mut xs: unique Array[Int], n: Int):
+    if n > 0:
+        xs.push(n)
+        fill(mut xs, n - 1)
+
+fn rows(mut g: unique Array[Array[Int]], n: Int):
+    for i in 0..n:
+        g.push([])
+        fill(mut g[i], i)
+    for i in 0..len(g):
+        fill(mut g[i], 1)
+    var i = 0
+    while i < len(g):
+        g[i][0] = -1
+        i += 2
+
+fn count(take xs: unique Array[Int], n: Int) -> unique Array[Int]:
+    if n == 0:
+        return copy(xs)
+    var ys = xs
+    ys.push(n)
+    count(take ys, n - 1)
+
+type S = struct(a: Array[Int], g: Array[Array[Int]])
+
+fn init(mut s: unique S):
+    fill(mut s.a, 2)
+    rows(mut s.g, 3)
+    s.g[0] = [42]
+    s.a = count([], 3)
+
+fn main() ! io:
+    var g: Array[Array[Int]] = [[9]]
+    rows(mut g, 3)
+    print(f"{g} {count([], 4)}")
+    var s = S([], [])
+    init(mut s)
+    let t = copy(s)
+    init(mut s)
+    print(f"{s.a} {s.g} {t.a} {t.g}")

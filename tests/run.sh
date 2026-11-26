@@ -11,6 +11,9 @@ starnite=${STARNITE:-"$root/_build/default/compiler/main.exe"}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail=0; pass=0
+# the compiler checks its own account of what is unique (section 6.2) while it runs here, and a
+# release build keeps the tests that account lets it leave out
+export STN_CHECK_UNIQUE=1
 note() { printf '%s\n' "$*"; }
 
 # runs a program, recording output and exit status
@@ -25,7 +28,7 @@ for f in "$here"/run/*.stn; do
     (cd "$root" && capture "$starnite" run --interp "$rel" < "$input") > "$tmp/interp"
     (cd "$root" && capture "$starnite" run "$rel" < "$input") > "$tmp/debug"
     # the release build also makes the tests the compiler left out for values it took to be unique
-    (cd "$root" && STN_CHECK_UNIQUE=1 capture "$starnite" run --release "$rel" < "$input") > "$tmp/release"
+    (cd "$root" && capture "$starnite" run --release "$rel" < "$input") > "$tmp/release"
     golden="$here/run/$name.out"
     if [ "${UPDATE:-}" = 1 ]; then cp "$tmp/interp" "$golden"; fi
     ok=1

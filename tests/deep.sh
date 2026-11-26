@@ -11,6 +11,9 @@ starnite=${STARNITE:-"$root/_build/default/compiler/main.exe"}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail=0; pass=0
+# the compiler checks its own account of what is unique (section 6.2) while it runs here, and a
+# release build keeps the tests that account lets it leave out
+export STN_CHECK_UNIQUE=1
 sed 's/4000/1000000/g; s/1600/400000/' "$here/run/destination_passing.stn" > "$tmp/deep.stn"
 for mode in "" --release; do
     "$starnite" run $mode "$tmp/deep.stn" < /dev/null > "$tmp/out" 2>&1; echo "exit $?" >> "$tmp/out"

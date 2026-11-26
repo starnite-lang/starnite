@@ -9,6 +9,9 @@ starnite=${STARNITE:-"$root/_build/default/compiler/main.exe"}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail=0; pass=0
+# the compiler checks its own account of what is unique (section 6.2) while it runs here, and a
+# release build keeps the tests that account lets it leave out
+export STN_CHECK_UNIQUE=1
 check() { # name, expected file
     if cmp -s "$tmp/out" "$2"; then pass=$((pass + 1))
     else echo "FAIL copies/$1"; diff "$2" "$tmp/out" | head -10; fail=$((fail + 1)); fi
