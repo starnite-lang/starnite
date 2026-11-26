@@ -49,5 +49,13 @@ else
     echo "FAIL str_limits"; cat "$tmp/err" "$tmp/out" 2> /dev/null | head -10; fail=$((fail + 1))
 fi
 
+# a release that STN_FREE_BUDGET put off is taken up by the next allocation of any size
+# (tests/release_budget.c)
+if "${CC:-cc}" -std=c11 -O1 -w -I"$root/runtime" "$here/release_budget.c" "$root/runtime/stn_runtime.c" -lm -o "$tmp/release_budget.exe" 2> "$tmp/err" && "$tmp/release_budget.exe" > "$tmp/out" 2>&1; then
+    pass=$((pass + 1))
+else
+    echo "FAIL release_budget"; cat "$tmp/err" "$tmp/out" 2> /dev/null | head -10; fail=$((fail + 1))
+fi
+
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]

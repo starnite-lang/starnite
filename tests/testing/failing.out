@@ -20,7 +20,10 @@ FAIL wrong: nothing to generate (tests/testing/failing.stn:43)
      no inputs can be generated for the type Ring
 ok   names collide!
 FAIL names collide? (tests/testing/failing.stn:50)
-     the snapshot of this test would be kept in tests/testing/snapshots/failing/names_collide_.snap, which is where that of the test "names collide!" is kept; give one of them another name at tests/testing/failing.stn:51:5
+     the snapshot of this test would be kept in tests/testing/snapshots/failing/names_collide_.snap, which is where that of the test "names collide!" at line 47 is kept; give one of them another name at tests/testing/failing.stn:51:5
+ok   same
+FAIL same (tests/testing/failing.stn:57)
+     the snapshot of this test would be kept in tests/testing/snapshots/failing/same.snap, which is where that of the test "same" at line 54 is kept; give one of them another name at tests/testing/failing.stn:58:5
 
-1 passed, 7 failed
+2 passed, 8 failed
 exit 1

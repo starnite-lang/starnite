@@ -271,7 +271,7 @@ let run_tests_interp ~cases ~seed ~update file (user : Syntax.file) imported (pr
   let pass = ref 0 and failn = ref 0 in
   (* which test each snapshot file belongs to: two names can differ only in characters that a
      file name does not keep *)
-  let snapshot_owner : (string, string) Hashtbl.t = Hashtbl.create 8 in
+  let snapshot_owner : (string, string * int) Hashtbl.t = Hashtbl.create 8 in
   List.iter
     (fun (name, body, (l : loc), inputs, cond) ->
       let env = { Interp.prog; vars = Hashtbl.create 16; sub = [] } in
@@ -286,9 +286,10 @@ let run_tests_interp ~cases ~seed ~update file (user : Syntax.file) imported (pr
           incr nth;
           let dir, path = snapshot_path file name !nth in
           (match Hashtbl.find_opt snapshot_owner path with
-           | Some other when other <> name ->
-               raise (Interp.Assert_failed (Printf.sprintf "the snapshot of this test would be kept in %s, which is where that of the test \"%s\" is kept; give one of them another name" path other, sl))
-           | _ -> Hashtbl.replace snapshot_owner path name);
+           (* a test is the one at its line: two may have the same name *)
+           | Some (other, line) when (other, line) <> (name, l.line) ->
+               raise (Interp.Assert_failed (Printf.sprintf "the snapshot of this test would be kept in %s, which is where that of the test \"%s\" at line %d is kept; give one of them another name" path other line, sl))
+           | _ -> Hashtbl.replace snapshot_owner path (name, l.line));
           let write () = mkdirs dir; Out_channel.with_open_bin path (fun oc -> output_string oc text; output_char oc '\n') in
           let stored = if Sys.file_exists path then Some (In_channel.with_open_bin path In_channel.input_all) else None in
           match stored with
@@ -366,7 +367,7 @@ let () =
     | "--update-snapshots" :: rest -> update := true; parse_opts acc rest
     | "--cases" :: n :: rest when int_of_string_opt n <> None ->
         (* a run of no cases would pass whatever the property says *)
-        if int_of_string n <= 0 then (prerr_endline "error: --cases takes a number of at least 1"; exit 2);
+        if int_of_string n <= 0 || int_of_string n > 1_000_000 then (prerr_endline "error: --cases takes a number from 1 to 1000000"; exit 2);
         cases := int_of_string n; parse_opts acc rest
     | "--seed" :: n :: rest when int_of_string_opt n <> None -> seed := int_of_string_opt n; parse_opts acc rest
     | "-o" :: p :: rest -> out := Some p; parse_opts acc rest

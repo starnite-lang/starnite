@@ -41,9 +41,11 @@ let seed_of (name : string) (given : int option) : int =
 
 let decl env n = Hashtbl.find_opt env.prog.decls n
 
-(* Whether values of a type can be generated. A type met again while it is being looked at,
-   directly or through an array or another type, is taken on trust, or the question would not
-   end: `type Tree = Leaf | Node(children: Array[Tree])`. *)
+(* Whether values of a type can be generated. A declared type met again while it is being looked
+   at is taken on trust, or the question would not end: directly or through an array or another
+   type, as in `type Tree = Leaf | Node(children: Array[Tree])`, and with other type arguments
+   too, as in `type Nest[T] = End | Down(next: Nest[Array[T]])`, which never comes back to the
+   same type twice. What the trust lets through, the generator still refuses when it gets there. *)
 let generable env (t : ty) : bool =
   let rec go (seen : string list) (t : ty) =
     match repr t with
@@ -52,7 +54,7 @@ let generable env (t : ty) : bool =
     | TTuple ts -> List.for_all (go seen) ts
     | TNamed (("Map" | "Set"), args) -> List.for_all (go seen) args
     | TNamed (n, args) ->
-        let key = show_ty (repr t) in
+        let key = n in
         List.mem key seen
         || (match decl env n with
             | Some { dbody = DStruct fs; dparams; _ } when List.length dparams = List.length args ->
@@ -126,8 +128,19 @@ and gen_at env (r : rng) (size : int) (t : ty) : value =
           VStruct (Array.of_list (List.map (fun (f : field_info) -> gen env r size (subst s f.fty)) fs))
       | Some { dbody = DData vs; dparams; _ } ->
           let s = List.combine dparams args in
-          (* at size 0 the variant with the fewest fields, so that a type that holds itself ends *)
-          let fewest = List.fold_left (fun (best : variant_info) (v : variant_info) -> if List.length v.vfields < List.length best.vfields then v else best) (List.hd vs) vs in
+          (* At size 0, a variant that ends: one with no field of this type itself, and of those
+             the one with the fewest fields. `Link(next: Chain) | End(value: Int)` ends with End,
+             whichever is written first. An array, a map or a set of this type is no obstacle:
+             at size 0 it is empty. *)
+          let rec holds (u : ty) = match repr u with
+            | TNamed (m, margs) -> m = n || (m <> "Map" && m <> "Set" && List.exists holds margs)
+            | TTuple us -> List.exists holds us
+            | _ -> false in
+          let ends (v : variant_info) = not (List.exists (fun (f : field_info) -> holds (subst s f.fty)) v.vfields) in
+          let shortest = function
+            | [] -> None
+            | first :: rest -> Some (List.fold_left (fun (best : variant_info) (v : variant_info) -> if List.length v.vfields < List.length best.vfields then v else best) first rest) in
+          let fewest = match shortest (List.filter ends vs) with Some v -> v | None -> Option.get (shortest vs) in
           let v = if size <= 0 then fewest else List.nth vs (below r (List.length vs)) in
           let inner = if size <= 0 then 0 else size / 2 in
           VVariant (v.vindex, Array.of_list (List.map (fun (f : field_info) -> gen env r inner (subst s f.fty)) v.vfields))

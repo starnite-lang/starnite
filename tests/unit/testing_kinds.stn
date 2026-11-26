@@ -64,6 +64,28 @@ fn tips(r: Rose) -> Int:
 test "a tree of arrays of trees" for r: Rose:
     assert tips(r) >= 0
 
+# the variant that ends is not the first, and has as many fields as the one that goes on
+type Chain = Link(next: Chain) | End(value: Int)
+
+fn links(c: Chain) -> Int:
+    match c:
+        Link(next) -> 1 + links(next)
+        End(_) -> 0
+
+test "a chain ends" for c: Chain:
+    assert links(c) >= 0
+
+# every step down is another type: Nest[Int], Nest[Array[Int]], and so on
+type Nest[T] = Stop | Down(next: Nest[Array[T]])
+
+fn steps[T](n: Nest[T]) -> Int:
+    match n:
+        Stop -> 0
+        Down(next) -> 1 + steps(next)
+
+test "a type whose arguments grow" for n: Nest[Int]:
+    assert steps(n) >= 0
+
 test "a snapshot":
     assert_snapshot [(area(Rect(2, 3)), "rect"), (area(Circle(1)), "circle")]
     assert_snapshot larger(4, 9)

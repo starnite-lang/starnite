@@ -49,3 +49,10 @@ test "names collide!":
 
 test "names collide?":
     assert_snapshot 1
+
+# two tests of one name
+test "same":
+    assert_snapshot 1
+
+test "same":
+    assert_snapshot 2

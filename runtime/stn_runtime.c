@@ -45,10 +45,11 @@ void* stn_alloc(size_t size) {
     stn_header* h;
     /* compare before rounding up, so a huge size cannot wrap into a small class */
     size_t cls = size <= (size_t)STN_CLASSES * 16 ? (size + 15) / 16 : STN_CLASSES + 1;
+    /* a release that STN_FREE_BUDGET stopped goes on here, a budget's worth at a time, whatever
+       the size asked for */
+    if (__builtin_expect(stn_release_pending != 0, 0) && stn_release_depth == 0) stn_release_drain(1);
     if (cls <= STN_CLASSES) {
         if (cls == 0) cls = 1;
-        /* a release that STN_FREE_BUDGET stopped goes on here, a budget's worth at a time */
-        if (__builtin_expect(stn_release_pending != 0, 0) && stn_release_depth == 0) stn_release_drain(1);
         stn_free_node* n = stn_free_lists[cls];
         if (n) {
             stn_free_lists[cls] = n->next; h = (stn_header*)n;
