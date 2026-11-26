@@ -40,6 +40,29 @@ inplace fn first_or_next(take xs: List, stop: Bool) -> List:
                 return Cons(x, Nil)
             Cons(x + 1, Nil)
 
+# The call below runs counted[Plain], which runs Plain.count and nothing else. That another
+# type's count calls back into plain_plus_one is no recursion here: the check follows the
+# function instances the program has, as code generation does.
+trait Counted:
+    fn count(c: Self) -> Int
+
+type Plain = struct(value: Int)
+type Looping = struct(value: Int)
+
+impl Counted for Plain:
+    fn count(c: Plain) -> Int:
+        c.value
+
+impl Counted for Looping:
+    fn count(c: Looping) -> Int:
+        plain_plus_one(c.value)
+
+fn counted[T: Counted](c: T) -> Int:
+    c.count()
+
+inplace fn plain_plus_one(n: Int) -> Int:
+    1 + counted(Plain(n))
+
 noalloc fn total(xs: Array[Int]) -> Int:
     var t = 0
     for x in xs:
@@ -99,5 +122,6 @@ fn main() ! io:
     let other = bump_evens(kept, 10)
     print(f"{sum(kept)} {sum(other)} {drop_all(other)}")
     print(f"{sum(first_or_next(Cons(5, Nil), true))} {sum(first_or_next(Cons(5, Nil), false))}")
+    print(f"{plain_plus_one(3)}")
     var a = [1, 2]
     print(f"{pick(1, 2, true)} {pick(1.5, 2.5, false)} {size(mut a)}")
