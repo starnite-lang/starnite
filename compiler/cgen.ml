@@ -1271,9 +1271,24 @@ and arg_strings fc (items : [ `Addr of (unit -> string) * ty | `Arg of string ] 
   go items
 
 and args_c fc (params : (mode * ty) list) (targs : targ list) : string list =
+  (* Arguments are evaluated left to right (section 4.4). A read-only argument is a C expression
+     that is read when the call is made, after the arguments that follow it have run; when it
+     names something they can change, a variable declared with var or a place inside one, and
+     one of them can write, its value is taken now. A counted value is held with a count of its
+     own until the statement ends, so that what the callee reads is not released under it. *)
+  let rec root (x : texpr) = match x.e with
+    | XVar v -> Some v
+    | XField (b, _, _) | XTupleGet (b, _) | XIndex (b, _) | XSlice (b, _, _) -> root b
+    | _ -> None in
+  let can_change (x : texpr) = match root x with
+    | Some v -> v.vmut || v.vcell || v.vkind = VParam MMut
+    | None -> false in
+  let rec with_later = function
+    | [] -> []
+    | x :: rest -> (x, rest) :: with_later rest in
   arg_strings fc
-    (List.map2
-       (fun (m, pt) ta ->
+    (List.map
+       (fun (((m, pt), ta), later) ->
          match m with
          | MMut ->
              let finish = place_deferred_of_expr fc ta.a in
@@ -1282,9 +1297,15 @@ and args_c fc (params : (mode * ty) list) (targs : targ list) : string list =
          | MTake -> `Arg (tmp fc ta.a.ty (own fc (expr fc ta.a) ta.a.ty))
          | MBorrow ->
              let x = expr fc ta.a in
-             let v = borrow fc x ta.a.ty in
-             `Arg v)
-       params targs)
+             let later_writes = List.exists (fun ((_, (la : targ))) -> la.amode = MMut || not (writes_nothing la.a)) later in
+             if later_writes && can_change ta.a && not x.owned then begin
+               if rc fc ta.a.ty then begin
+                 let held = tmp fc ta.a.ty (dup_expr fc.st (ts fc ta.a.ty) x.c) in
+                 own_in fc held ta.a.ty;
+                 `Arg held
+               end else `Arg (tmp fc ta.a.ty x.c)
+             end else `Arg (borrow fc x ta.a.ty))
+       (with_later (List.combine params targs)))
 
 and call fc (e : texpr) (cl : callee) (targs : targ list) convs : r =
   let st = fc.st in
