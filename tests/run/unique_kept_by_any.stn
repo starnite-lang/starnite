@@ -1,0 +1,21 @@
+# A function whose result is an `any` value can keep what it was lent inside it (section 6.2).
+trait Peek:
+    fn peek(s: Self) -> Int
+
+type W = struct(items: Array[Int])
+
+impl Peek for W:
+    fn peek(s: W) -> Int:
+        s.items[0]
+
+fn wrap(xs: Array[Int]) -> any Peek:
+    W(xs)
+
+fn wrap_opt(xs: Array[Int]) -> (any Peek)?:
+    Some(wrap(xs))
+
+fn main() ! io:
+    var a = [1, 2]
+    let w = wrap(a)
+    a[0] = 10
+    print(f"{w.peek()} {a}")

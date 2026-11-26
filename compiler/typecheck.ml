@@ -2716,6 +2716,8 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
       let fty = { fps = List.map2 (fun (p : Syntax.param) v -> (p.pmode, v.vty)) ps params; fret = ret; feff = { errs = c'.errs; io = c'.io; poly = false } } in
       incr lambda_counter;
       let lam = { lparams = params; lbody = body; lcaps = lr.caps; lfn = fty; lname = Printf.sprintf "%s_%d" fd.fname !lambda_counter } in
+      (* as for a closure written as an expression: the parameter is the caller's variable, not a cell *)
+      List.iter (fun (v : var) -> if v.vkind = VParam MMut then err "E0320" l "a closure cannot capture the mut parameter '%s'" v.vname) lr.caps;
       if c.tb.final_pass then c.tb.lambdas <- lam :: c.tb.lambdas;
       let v = new_var fd.fname (TFn fty) false VLocal in
       bind c v l;

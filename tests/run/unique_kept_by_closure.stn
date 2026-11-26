@@ -1,0 +1,27 @@
+# A function whose result holds a closure can keep what it was lent, or what it was handed as mut,
+# inside it (section 6.2): the argument is not unique afterwards, and a write to it copies.
+fn total(xs: Array[Int]) -> Int:
+    var t = 0
+    for x in xs:
+        t += x
+    t
+
+fn g(mut xs: Array[Int]) -> fn() -> Int:
+    let k = xs
+    xs.push(4)
+    fn(): total(k)
+
+fn h(mut xs: Array[Int]) -> fn() -> Int:
+    xs.push(4)
+    let k = xs
+    fn(): total(k)
+
+fn main() ! io:
+    var a = [1, 2, 3]
+    let f = g(mut a)
+    a[0] = 10
+    print(f"{f()} {total(a)}")
+    var b = [1, 2, 3]
+    let f2 = h(mut b)
+    b[0] = 10
+    print(f"{f2()} {total(b)}")

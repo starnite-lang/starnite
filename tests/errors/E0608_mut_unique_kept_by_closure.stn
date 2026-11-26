@@ -1,0 +1,12 @@
+# expect: E0608 6:8
+fn mk(xs: Array[Array[Int]]) -> fn() -> Array[Int]:
+    fn(): xs[0]
+
+fn bad(mut p: unique Array[Array[Int]]) -> fn() -> Array[Int]:
+    mk(p)
+
+fn main() ! io:
+    var g = [[1], [2]]
+    let f = bad(mut g)
+    g[0][0] = 9
+    print(f"{f()} {g}")

@@ -2521,7 +2521,12 @@ and closure fc (lam : lambda) : string =
       | MTake -> Hashtbl.replace fc'.vars v.vid (VDirect (var_name v)); if rc fc' v.vty then own_in fc' (var_name v) v.vty
       | MBorrow -> Hashtbl.replace fc'.vars v.vid (VDirect (var_name v)))
     params;
+  (* a closure's result is its own, whatever the function around it is declared to return *)
+  let outer_returns = !u_returns in
+  u_returns := false;
+  u_scan fc' ~deep:false (Some lam.lbody);
   let x = expr fc' lam.lbody in
+  u_returns := outer_returns;
   let rv = own fc' x lam.lbody.ty in
   let rv = if repr (ts fc' lam.lbody.ty) = TNever then "0" else rv in
   let rt = tmp fc' ft.fret rv in
@@ -3476,7 +3481,9 @@ and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr o
     | XTry a -> go own a
     | XFail a | XPack a -> go true a
     | XIf (c, a, b) -> go false c; go own a; go own b
-    | XBlock (ss, v) -> if !deep then List.iter gs ss; go own v
+    (* outside a loop, a block with statements is read when its code is written: its value is
+       read then, once the variables the statements declare are known *)
+    | XBlock (ss, v) -> if !deep then (List.iter gs ss; go own v) else if ss = [] then go own v
     | XMatch (s, arms) ->
         let handed = match s.e with XVar v -> moves fc s v | _ -> false in
         if not handed then begin
@@ -3540,7 +3547,9 @@ and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr o
     let by_sig (uname : string) (sg : fsig) =
       let mode i m = if Hashtbl.mem st.demoted (uname, i) then MBorrow else m in
       let uniq i = try List.nth sg.suniq i with _ -> false in
-      let safe = (not (sig_can_fail sg)) && (not code) && sg.slend = None && ((not result_boxy) || sg.sruniq) in
+      (* a result that holds a closure or an `any` value can hold whatever the function was given *)
+      let safe = (not (sig_can_fail sg)) && (not code) && sg.slend = None && ((not result_boxy) || sg.sruniq)
+                 && not (has_code st (ts fc e.ty)) in
       let modes = List.mapi (fun i (m, _, _, _) -> mode i m) sg.sparams in
       let all_mut_unique = List.for_all2 (fun i m -> m <> MMut || uniq i) (List.init (List.length modes) Fun.id) modes in
       let any_mut = List.mem MMut modes in
@@ -3555,7 +3564,8 @@ and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr o
                 else go true a.a
             | MMut ->
                 let alone = List.for_all (fun (b : targ) -> b == a) boxy_args in
-                mut_place a ((not (boxy_t a.a.ty)) || (safe && (uniq i || (flat st (ts fc a.a.ty) && alone)))))
+                (* a parameter declared unique is unique whenever its function returns, however it does *)
+                mut_place a ((not (boxy_t a.a.ty)) || uniq i || (safe && flat st (ts fc a.a.ty) && alone)))
           args in
     match cl with
     | CClosure f ->
@@ -4600,7 +4610,10 @@ let compile_instance st cname uname tys =
           u_add fc v;
           if Hashtbl.mem u_vars v.vid then begin
             if m = MMut then Hashtbl.replace u_must v.vid v.vname else Hashtbl.replace u_dps_needs v.vid ()
-          end
+          end else if m = MMut then
+            (* callers go by the signature, so what cannot be followed cannot be promised *)
+            raise (Syntax.Error ("E0608", sg.sloc, Printf.sprintf
+              "'%s' is declared 'mut %s: unique', and a function inside this one captures it, so the compiler cannot tell that it stays unique" v.vname v.vname))
         end)
       params (u_needs fc uname sg tys);
   if lend then begin
