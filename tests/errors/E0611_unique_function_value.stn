@@ -1,0 +1,9 @@
+# expect: E0611 9:20
+fn eat(take xs: unique Array[Int]) -> Int:
+    len(xs)
+
+fn apply(f: fn(take Array[Int]) -> Int, take xs: Array[Int]) -> Int:
+    f(take xs)
+
+fn main() ! io:
+    print(f"{apply(eat, [1])}")

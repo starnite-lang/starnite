@@ -1,4 +1,4 @@
-# expect: E0603 6:26
+# expect: E0602 6:56
 type List = Nil | Cons(head: Int, tail: List)
 inplace fn both(take xs: List) -> List:
     match xs:

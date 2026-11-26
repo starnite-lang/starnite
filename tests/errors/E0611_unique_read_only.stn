@@ -1,0 +1,6 @@
+# expect: E0611 2:10
+fn total(xs: unique Array[Int]) -> Int:
+    len(xs)
+
+fn main() ! io:
+    print(f"{total([1])}")

@@ -42,6 +42,8 @@ let build o (prog : Types.tprog) (exe : string) =
   (* the runtime counts copies only when it is compiled to *)
   let flags = if o.profile then flags ^ " -DSTN_PROFILE_COPIES" else flags in
   let flags = if o.counters then flags ^ " -DSTN_COUNTERS" else flags in
+  (* for the tests: a release build that still checks what the compiler took to be unique *)
+  let flags = if Sys.getenv_opt "STN_CHECK_UNIQUE" <> None then flags ^ " -DSTN_CHECK_UNIQUE" else flags in
   let cmd =
     Printf.sprintf "%s -std=c11 %s -w -I%s -o %s %s %s -lm" (cc_cmd o) flags (Filename.quote dir) (Filename.quote exe)
       (Filename.quote cfile) (Filename.quote (Filename.concat dir "stn_runtime.c"))

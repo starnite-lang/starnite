@@ -287,7 +287,9 @@ let rec conv_ty tb (tps : string list) (self : ty option) (t : Syntax.ty) : ty =
   | TyTuple ([], _) -> TUnit
   | TyTuple (ts, _) -> TTuple (List.map (conv_ty tb tps self) ts)
   | TyOpt (t, _) -> opt (conv_ty tb tps self t)
-  | TyQual (_, t, _) -> conv_ty tb tps self t   (* iso/frozen/unique: milestone 2 and 6 *)
+  | TyQual ("unique", _, l) ->
+      err "E0611" l "'unique' is for the type of a parameter or of a result: uniqueness is a fact about a variable, not part of a type (section 6.2)"
+  | TyQual (_, t, _) -> conv_ty tb tps self t   (* iso/frozen: milestone 6 *)
 
 and conv_effects tb tps self es =
   List.fold_left
@@ -2894,15 +2896,23 @@ let make_sig tb ~modname ~uname (fd : Syntax.fn_def) (extra_tps : (string * (str
   let own = tparams_of ~outer:(List.map fst extra_tps) tb fd.fgenerics self in
   let tps = extra_tps @ own in
   let names = List.map fst tps in
+  (* unique is written on the type of a parameter or of the result, and is not part of the type *)
+  let strip = function Syntax.TyQual ("unique", t, _) -> (true, t) | t -> (false, t) in
   let params =
     List.map
       (fun (p : Syntax.param) ->
         match p.pty with
-        | Some t -> (p.pmode, p.pname, conv_ty tb names self t, p.pdefault)
+        | Some t -> (p.pmode, p.pname, conv_ty tb names self (snd (strip t)), p.pdefault)
         | None -> err "E0104" p.ploc "parameter '%s' needs a type" p.pname)
       fd.fparams
   in
-  let ret = match fd.fret with Some t -> conv_ty tb names self t | None -> TUnit in
+  let suniq = List.map (fun (p : Syntax.param) -> match p.pty with Some t -> fst (strip t) | None -> false) fd.fparams in
+  List.iter2 (fun (p : Syntax.param) u ->
+      if u && p.pmode = MBorrow then
+        err "E0611" p.ploc "a read-only parameter cannot be 'unique': write 'take %s: unique ...' or 'mut %s: unique ...'" p.pname p.pname)
+    fd.fparams suniq;
+  let sruniq = match fd.fret with Some t -> fst (strip t) | None -> false in
+  let ret = match fd.fret with Some t -> conv_ty tb names self (snd (strip t)) | None -> TUnit in
   let declared, eff =
     match fd.feffects with
     | Some es -> (true, conv_effects tb names self es)
@@ -2910,7 +2920,8 @@ let make_sig tb ~modname ~uname (fd : Syntax.fn_def) (extra_tps : (string * (str
   in
   { sname = uname; sdisplay = fd.fname; stparams = tps; sparams = params; sret = ret; seff = eff;
     sdeclared = declared; sexport = fd.fexport; smods = fd.fmods; sloc = fd.floc; smodule = modname;
-    slend = (match fd.fret_lend with Some "lend mut" -> Some true | Some _ -> Some false | None -> None) }
+    slend = (match fd.fret_lend with Some "lend mut" -> Some true | Some _ -> Some false | None -> None);
+    suniq; sruniq }
 
 let register_fn tb (sg : fsig) =
   Hashtbl.replace tb.fns sg.sname sg;
@@ -3021,6 +3032,8 @@ let declare_items tb modname (items : item list) =
             List.map
               (fun (fd : Syntax.fn_def) ->
                 let sg = make_sig tb ~modname ~uname:(tk ^ "." ^ fd.fname) fd (List.map (fun p -> (p, [])) info.trparams) (Some (TParam "Self")) in
+                if sg.sruniq || List.mem true sg.suniq then
+                  err "E0611" fd.floc "'unique' is not allowed in the method of a trait yet: a call through 'any' could not check it";
                 (fd.fname, { sg with sdeclared = true }))
               tr.trmethods
           in
@@ -3099,6 +3112,8 @@ let declare_items tb modname (items : item list) =
                 Hashtbl.replace seen_m fd.fname ();
                 let uname = unique_name tb modname (trn ^ "_" ^ head fty ^ "_" ^ fd.fname) in
                 let sg = make_sig tb ~modname ~uname fd tps (Some fty) in
+                if sg.sruniq || List.mem true sg.suniq then
+                  err "E0611" fd.floc "'unique' is not allowed in the method of a trait yet: a call through 'any' could not check it";
                 (* the impl's effects may be fewer than the trait's, never more *)
                 let tsig = List.assoc fd.fname info.trmethods_ in
                 (* The impl's method must have the trait method's signature, with Self and the
@@ -3306,7 +3321,7 @@ let check_const tb n =
     Fun.protect ~finally:(fun () -> const_in_progress := List.filter (fun x -> x <> n) !const_in_progress) @@ fun () ->
     in_module tb cmod @@ fun () ->
     let sg = { sname = "const:" ^ n; sdisplay = n; stparams = []; sparams = []; sret = TUnit; seff = no_eff; sdeclared = false;
-               sexport = false; smods = []; sloc = e.loc; smodule = ""; slend = None } in
+               sexport = false; smods = []; sloc = e.loc; smodule = ""; slend = None; suniq = []; sruniq = false } in
     let c = new_ctx tb sg None in
     let te = match t with Some t -> check c e t | None -> infer c e in
     finish_ctx c e.loc;
@@ -3389,7 +3404,7 @@ let check_program (prelude : Syntax.file) (imported : (string * Syntax.file) lis
       (function
         | ITest t when t.tsrejects = None ->
             let sg = { sname = "test"; sdisplay = t.tsname; stparams = []; sparams = []; sret = TUnit; seff = no_eff;
-                       sdeclared = false; sexport = false; smods = []; sloc = t.tsloc; smodule = entry; slend = None } in
+                       sdeclared = false; sexport = false; smods = []; sloc = t.tsloc; smodule = entry; slend = None; suniq = []; sruniq = false } in
             in_module tb entry @@ fun () ->
             let c = new_ctx tb sg None in
             (* the inputs of a property test are variables of its body and of its where clause *)

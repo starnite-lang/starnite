@@ -12,13 +12,13 @@ impl Step for Point:
     noalloc fn step(p: Point) -> Point:
         Point(p.x + 1, p.y + 1)
 
-inplace fn bump(take xs: List, by: Int) -> List:
+inplace fn bump(take xs: List, by: Int) -> unique List:
     match xs:
         Nil -> Nil
         Cons(x, rest) -> Cons(x + by, bump(take rest, by))
 
 # the last use of rest in each branch moves it: neither branch raises its count
-inplace fn keep_even(take xs: List) -> List:
+inplace fn keep_even(take xs: List) -> unique List:
     match xs:
         Nil -> Nil
         Cons(x, rest) ->

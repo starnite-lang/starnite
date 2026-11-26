@@ -1,0 +1,174 @@
+# Uniqueness (section 6.2). A value built here, or returned by a function declared `-> unique`,
+# has no other holder: writes to it make no test, a match takes it apart with no test, and it can
+# be handed to a parameter declared unique as it is. Each case below gives such a value a second
+# holder in some way and then writes to it: what held the old value must still show it. A debug
+# build makes every test the compiler left out, and traps if one fails.
+type List = Nil | Cons(head: Int, tail: List)
+
+fn build(n: Int) -> unique Array[Int]:
+    var out = []
+    for i in 0..n:
+        out.push(i)
+    out
+
+noalloc fn bump(mut xs: unique Array[Int], i: Int):
+    xs[i] += 1
+
+noalloc fn total(xs: Array[Int]) -> Int:
+    var t = 0
+    for x in xs:
+        t += x
+    t
+
+fn consume(take xs: unique Array[Int]) -> Int:
+    var ys = xs
+    ys[0] = 100
+    total(ys)
+
+fn range_list(n: Int) -> unique List:
+    var out = Nil
+    var i = n
+    while i > 0:
+        out = Cons(i, take out)
+        i -= 1
+    out
+
+inplace fn double(take xs: List) -> unique List:
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) -> Cons(x * 2, double(take rest))
+
+fn sum(xs: List) -> Int:
+    match xs:
+        Nil -> 0
+        Cons(x, rest) -> x + sum(rest)
+
+fn declared() ! io:
+    var a = build(5)
+    bump(mut a, 2)
+    a[0] = 7
+    print(f"{total(a)}")
+    let held = a
+    print(f"{consume(a)} {total(held)} {total(a)}")
+    print(f"{consume(take a)}")
+    let l = range_list(4)
+    let m = double(l)
+    print(f"{sum(l)} {sum(m)} {sum(double(take m))}")
+    var grid = [[1, 2], [3, 4]]
+    grid[0][1] = 9
+    let row = grid[0]
+    grid[0][0] = 5
+    print(f"{row[0]} {grid[0][0]} {copy(grid)[1][1]}")
+
+type Tree = Leaf | Node(left: Tree, value: Array[Int], right: Tree)
+type Box = struct(items: Array[Int], n: Int)
+
+fn same(xs: Array[Int]) -> Array[Int]:
+    xs
+
+fn first(g: Array[Array[Int]]) -> Array[Int]:
+    g[0]
+
+fn grow(mut xs: Array[Int]) -> Int:
+    xs.push(100)
+    len(xs)
+
+fn stash(mut into: Array[Array[Int]], x: Array[Int]):
+    into.push(x)
+
+fn swap_rows(mut g: Array[Array[Int]]):
+    g[0] = g[1]
+
+fn pair(a: Array[Int], b: Array[Int]) -> Int:
+    total(a) * 1000 + total(b)
+
+fn wrap[T](x: T) -> Array[T]:
+    [x, x]
+
+fn main() ! io:
+    declared()
+    # 1 alias through let
+    var a = [1, 2, 3]
+    let b = a
+    a[0] = 10
+    print(f"1: {total(a)} {total(b)}")
+    # 2 match holds while an arm writes
+    var c = Cons(1, Cons(2, Nil))
+    var keep = Nil
+    match c:
+        Cons(_, t) ->
+            keep = t
+            c = Cons(9, Nil)
+        Nil -> print("nil")
+    print(f"2: {sum(c)} {sum(keep)}")
+    # 3 a loop holds its array while the body writes
+    var d = [1, 2, 3]
+    var seen = 0
+    for x in d:
+        d[2] = 50
+        seen += x
+    print(f"3: {seen} {total(d)}")
+    # 4 a closure captures
+    var e = [1, 2]
+    let f = fn(): total(e)
+    e[0] = 5
+    print(f"4: {f()} {total(e)}")
+    # 5 returned alias
+    var g = [1, 2]
+    let h = same(g)
+    g[0] = 7
+    print(f"5: {total(g)} {total(h)}")
+    # 6 a part taken out
+    var grid = [[1], [2]]
+    let r = first(grid)
+    grid[0][0] = 8
+    print(f"6: {total(r)} {total(grid[0])}")
+    # 7 argument order
+    var i = [1]
+    print(f"7: {pair(i, [grow(mut i)])} {total(i)}")
+    # 8 a loop that shares at its end
+    var j = [0, 0]
+    var k = [0]
+    for n in 0..3:
+        j[0] = j[0] + n
+        k = j
+    j[1] = 4
+    print(f"8: {total(j)} {total(k)}")
+    # 9 a shared value put into a unique one
+    var rows = [[1]]
+    let row = [5]
+    rows.push(row)
+    rows[1][0] = 6
+    print(f"9: {total(row)} {total(rows[1])}")
+    # 10 unique again in one branch only
+    var m = [1]
+    let m2 = m
+    if len(m) > 0:
+        m = [2, 2]
+    m[0] = 9
+    print(f"10: {total(m)} {total(m2)}")
+    # 11 stored through a mut parameter
+    var store = [[0]]
+    var x = [3]
+    stash(mut store, x)
+    x[0] = 4
+    print(f"11: {total(x)} {total(store[1])}")
+    # 12 rows of a unique value made to share
+    var sw = [[1], [2]]
+    swap_rows(mut sw)
+    sw[0][0] = 7
+    print(f"12: {total(sw[0])} {total(sw[1])}")
+    # 13 a generic function that shares
+    var w = wrap([1])
+    w[0][0] = 5
+    print(f"13: {total(w[0])} {total(w[1])}")
+    # 14 a struct field
+    var bx = Box([1, 2], 2)
+    let its = bx.items
+    bx.items[0] = 9
+    print(f"14: {total(its)} {total(bx.items)}")
+    # 15 a tuple taken apart
+    var tp = ([1], [2])
+    let (p, q) = tp
+    tp = ([7], q)
+    print(f"15: {total(p)} {total(q)}")

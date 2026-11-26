@@ -23,6 +23,7 @@ options:
   --keep-c        keep the generated C file
   --explain-copies  list where a write may copy a shared value, and where a loop raises a count
   --profile-copies  count those at run time and print the totals when the program ends
+  --no-implicit-copies  refuse a shared argument for a unique parameter, where it would be copied
   --cases <n>     inputs each property test is run on (default 100)
   --seed <n>      the seed of the inputs, as a failing property test printed it
   --update-snapshots  accept what assert_snapshot now gives as the stored copy
@@ -417,6 +418,7 @@ let () =
     | "--keep-c" :: rest -> keep := true; parse_opts acc rest
     | "--explain-copies" :: rest -> explain := Some (ref []); parse_opts acc rest
     | "--profile-copies" :: rest -> profile := true; parse_opts acc rest
+    | "--no-implicit-copies" :: rest -> Cgen.no_implicit_copies := true; parse_opts acc rest
     | "--update-snapshots" :: rest -> update := true; parse_opts acc rest
     | "--cases" :: n :: rest when int_of_string_opt n <> None ->
         (* a run of no cases would pass whatever the property says *)

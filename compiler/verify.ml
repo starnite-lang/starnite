@@ -50,6 +50,7 @@ let dups = [ "stn_dup"; "stn_str_dup"; "STN_STR_DUP"; "stn_error_dup" ]
 let reason name =
   match name with
   | "stn_alloc" -> "it allocates a cell"
+  | "stn_array_clone" | "stn_map_clone" -> "it copies a value, so that nothing else holds the copy"
   | "stn_array_make_unique" | "stn_array_copy_for_write" | "STN_POP" | "stn_array_clear" | "stn_array_remove"
   | "stn_array_reverse_i64" | "stn_array_sort_i64" ->
       "it writes to an array, which is copied first if anything else holds it"
@@ -370,11 +371,11 @@ let dup_helpers (helpers : string) : string list =
 
 (* What --explain-copies lists: each write that copies its array, map or set first when something
    else holds it (section 4.5), and each count raised inside a loop of the program. One line per place and kind, in the order of the program. *)
-let explain ~(records : fn_record list) ~(helpers : string) : (loc * string) list =
+let explain ~(records : fn_record list) ~(helpers : string) ~(copies : (loc * string) list) : (loc * string) list =
   (* the helpers alone: a function of the program that raises a count somewhere inside is not a
      count raised where it is called *)
   let helpers = dup_helpers helpers in
-  let out = ref [] in
+  let out = ref copies in
   let array_writes = [ "stn_array_make_unique"; "stn_array_copy_for_write"; "STN_POP"; "STN_PUSH"; "stn_array_push"; "stn_array_extend";
                        "stn_array_insert"; "stn_array_remove"; "stn_array_clear"; "stn_array_sort_i64"; "stn_array_reverse_i64" ] in
   let map_writes = [ "stn_map_make_unique_for_write"; "stn_map_put"; "stn_map_slot"; "stn_map_slot_ref"; "stn_map_remove"; "stn_map_clear" ] in

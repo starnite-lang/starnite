@@ -24,6 +24,11 @@ done
 # are left when tests/run/take_demotion.stn runs
 "$starnite" run --profile-copies tests/run/take_demotion.stn < /dev/null > "$tmp/out" 2>&1; echo "exit $?" >> "$tmp/out"
 check "take demotion" "$here/copies/take_demotion.profile"
+# an argument copied for a unique parameter is listed (section 6.2), and refused when asked
+"$starnite" check --explain-copies tests/copies/unique.stn > "$tmp/out" 2>&1; echo "exit $?" >> "$tmp/out"
+check "explain unique" "$here/copies/unique.explain"
+"$starnite" check --no-implicit-copies tests/copies/unique.stn > "$tmp/out" 2>&1; echo "exit $?" >> "$tmp/out"
+check "no implicit copies" "$here/copies/unique.refused"
 # a program that copies nothing says so, and the flags change nothing else it prints
 "$starnite" run --profile-copies tests/run/basics.stn < /dev/null > "$tmp/out" 2>/dev/null; echo "exit $?" >> "$tmp/out"
 check "output unchanged" "$here/run/basics.out"

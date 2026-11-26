@@ -3,7 +3,8 @@
 # Conformance corpus (section 21.3). Every program in tests/run runs on the reference
 # interpreter, the debug C build and the release C build; all three must agree with
 # each other and with the reviewed golden output (section 21.2, oracle 3). The debug
-# runtime also checks that counts balance at exit (oracle 2).
+# runtime also checks that counts balance at exit (oracle 2), and both C builds check every value
+# the compiler took to be unique (section 6.2).
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(dirname "$here")
 starnite=${STARNITE:-"$root/_build/default/compiler/main.exe"}
@@ -23,7 +24,8 @@ for f in "$here"/run/*.stn; do
     if [ -f "$here/run/$name.stdin-dir" ]; then input=$here; fi
     (cd "$root" && capture "$starnite" run --interp "$rel" < "$input") > "$tmp/interp"
     (cd "$root" && capture "$starnite" run "$rel" < "$input") > "$tmp/debug"
-    (cd "$root" && capture "$starnite" run --release "$rel" < "$input") > "$tmp/release"
+    # the release build also makes the tests the compiler left out for values it took to be unique
+    (cd "$root" && STN_CHECK_UNIQUE=1 capture "$starnite" run --release "$rel" < "$input") > "$tmp/release"
     golden="$here/run/$name.out"
     if [ "${UPDATE:-}" = 1 ]; then cp "$tmp/interp" "$golden"; fi
     ok=1

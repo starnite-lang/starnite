@@ -439,6 +439,120 @@ let elem_ops st t =
   "&" ^ name
 
 (* tag of a data value *)
+(* ---------- uniqueness (section 6.2) ---------- *)
+
+(* whether some type inside t, t itself included, satisfies [p]: through elements, fields and the
+   fields of variants, each named type looked into once *)
+let type_exists st (p : ty -> bool) (t : ty) : bool =
+  let seen = Hashtbl.create 8 in
+  let rec go t =
+    let t = repr t in
+    p t
+    || (match t with
+        | TArray et -> go et
+        | TTuple ts -> List.exists go ts
+        | TNamed (("Map" | "Set"), args) -> List.exists go args
+        | TNamed _ when is_struct st t || is_data st t ->
+            let k = mangle t in
+            if Hashtbl.mem seen k then false
+            else (Hashtbl.replace seen k (); List.exists go (by_value_children st t))
+        | _ -> false) in
+  go t
+
+(* A block of its own that a write can change or a constructor can use again: an array, a map, a
+   set, or a boxed value of a data type. A value is unique when no such block in it has another
+   holder. Strings, closures, `any` values and errors cannot be written through a reference, so
+   uniqueness does not look inside them. *)
+let is_box st (t : ty) =
+  match repr t with
+  | TArray _ | TNamed (("Map" | "Set"), _) -> true
+  | TNamed _ as t when is_data st t -> layout st t = LBoxed
+  | _ -> false
+
+let boxy st t = type_exists st (is_box st) t
+
+(* holds something that can run code or carry any value: what it is given it may keep *)
+let has_code st t = type_exists st (fun t -> match t with TFn _ | TAny _ | TErr _ -> true | _ -> false) t
+
+(* no block inside another: what a function given only this can leave shared is this alone *)
+let flat st t =
+  let t = repr t in
+  match t with
+  | TArray et -> not (boxy st et)
+  | TNamed (("Map" | "Set"), args) -> not (List.exists (boxy st) args)
+  | _ -> not (boxy st t)
+
+(* deepcopy_M: a copy of x that shares no block with it (the copy() of section 6.2). x is read, not
+   taken. A value of a data type is copied in a loop along the last field of its own type, so a long
+   list is copied in constant stack; its other fields are copied by calls. *)
+let rec deep_copy st (t : ty) (e : string) : string =
+  if not (boxy st t) then dup_expr st t e
+  else begin
+    ensure_type st t;
+    let m = mangle t in
+    let name = "deepcopy_" ^ m in
+    let c = cty st t in
+    if not (Hashtbl.mem st.defined name) then begin
+      Hashtbl.replace st.defined name ();
+      pr st.protos "static %s %s(%s x);\n" c name c;
+      let body =
+        match repr t with
+        | TArray et ->
+            let ec = cty st et in
+            Printf.sprintf "StnArray* a = stn_array_clone(x); %s return a;"
+              (if boxy st et then
+                 Printf.sprintf "for (int64_t i = 0; i < a->len; i++) { %s* e = &((%s*)a->data)[i]; %s n = %s; %s *e = n; }"
+                   ec ec ec (deep_copy st et "*e") (drop_stmt st et "*e")
+               else "")
+        | TNamed (("Map" | "Set"), args) ->
+            let part off (pt : ty) =
+              if boxy st pt then
+                let pc = cty st pt in
+                Printf.sprintf "{ %s* q = (%s*)(e + m->%s); %s n = %s; %s *q = n; }" pc pc off pc (deep_copy st pt "*q") (drop_stmt st pt "*q")
+              else "" in
+            let parts = match args with
+              | [ k; v ] -> part "koff" k ^ part "voff" v
+              | [ k ] -> part "koff" k
+              | _ -> "" in
+            Printf.sprintf "StnMap* m = stn_map_clone(x); int64_t pos = 0; for (char* e; (e = stn_map_next(m, &pos)) != NULL; ) { %s } return m;" parts
+        | TTuple ts ->
+            String.concat " " (List.mapi (fun i ft -> Printf.sprintf "x.f%d = %s;" i (deep_copy st ft (Printf.sprintf "x.f%d" i))) ts) ^ " return x;"
+        | TNamed _ when is_struct st t ->
+            String.concat " " (List.map (fun (n, ft) -> Printf.sprintf "x.%s = %s;" (fname n) (deep_copy st ft ("x." ^ fname n))) (struct_fields st t))
+            ^ " return x;"
+        | TNamed _ when layout st t = LInline ->
+            let arms = String.concat " "
+                (List.map (fun ((v : variant_info), fs) ->
+                     if fs = [] then ""
+                     else Printf.sprintf "case %d: %s break;" v.vindex
+                         (String.concat " " (List.mapi (fun i (_, ft) ->
+                              let f = Printf.sprintf "x.u.%s.f%d" (c_ident v.vname_) i in
+                              Printf.sprintf "%s = %s;" f (deep_copy st ft f)) fs)))
+                    (variants st t)) in
+            Printf.sprintf "switch (x.tag) { %s default: break; } return x;" arms
+        | _ ->
+            let arms = String.concat " "
+                (List.map (fun ((v : variant_info), fs) ->
+                     if fs = [] then ""
+                     else begin
+                       let last_self =
+                         List.fold_left (fun acc (i, (_, ft)) -> if mangle ft = m then Some i else acc) None (List.mapi (fun i f -> (i, f)) fs) in
+                       Printf.sprintf "case %d: %s break;" v.vindex
+                         (String.concat " " (List.mapi (fun i (_, ft) ->
+                              let f = Printf.sprintf "u.%s.f%d" (c_ident v.vname_) i in
+                              if Some i = last_self then Printf.sprintf "next = x->%s; hole = &n->%s;" f f
+                              else Printf.sprintf "n->%s = %s;" f (deep_copy st ft ("x->" ^ f))) fs))
+                     end)
+                    (variants st t)) in
+            Printf.sprintf
+              "%s res; %s* dst = &res; for (;;) { if ((uintptr_t)x & 1) { *dst = x; break; } %s n = (%s)stn_alloc(sizeof(struct box_%s)); n->h.tag = x->h.tag; %s next = NULL; %s* hole = NULL; switch (x->h.tag) { %s default: break; } *dst = n; if (hole == NULL) break; dst = hole; x = next; } return res;"
+              c c c c m c c arms
+      in
+      pr st.helpers "static %s %s(%s x) { %s }\n" c name c body
+    end;
+    Printf.sprintf "%s(%s)" name e
+  end
+
 let tag_of st t e =
   match layout st t with
   | LInline -> Printf.sprintf "(%s).tag" e
@@ -540,6 +654,31 @@ type fc = {
 }
 
 type r = { c : string; owned : bool }
+
+(* What is known of uniqueness while a function's code is written (section 6.2). All of it is
+   about the function being generated; compile_instance clears it.
+   A variable is in [u_vars] when the value it holds has no other holder, at any depth: every
+   place that uses this leaves out a test the runtime would have passed, and a build with
+   STN_CHECK_UNIQUE makes that test again and traps if it fails. *)
+let u_vars : (int, unit) Hashtbl.t = Hashtbl.create 32
+(* a variable bound to a part of another's value, which it reads where it is: keeping it shares
+   something inside the other *)
+let u_views : (int, var) Hashtbl.t = Hashtbl.create 32
+(* the scope a variable was declared in: only there can an assignment make it unique again, since
+   an assignment anywhere else is on some paths and not on others *)
+let u_home : (int, frame) Hashtbl.t = Hashtbl.create 32
+(* expressions whose value had no other holder when it was produced *)
+let u_fresh : texpr list ref = ref []
+(* `mut p: unique T` parameters, which must be unique whenever the function can return *)
+let u_must : (int, string) Hashtbl.t = Hashtbl.create 4
+(* the copies made to give a unique parameter its argument, for --explain-copies *)
+let u_copies : (Syntax.loc * string) list ref = ref []
+let no_implicit_copies = ref false
+let u_returns = ref false   (* the function being generated is declared `-> unique T` *)
+(* the parameters of the function being generated that must be handed a unique value *)
+let u_dps_needs : (int, unit) Hashtbl.t = Hashtbl.create 4
+let u_reset () =
+  Hashtbl.reset u_vars; Hashtbl.reset u_views; Hashtbl.reset u_home; Hashtbl.reset u_must; Hashtbl.reset u_dps_needs; u_fresh := []; u_returns := false
 
 let line fc fmt =
   Printf.ksprintf (fun s ->
@@ -926,6 +1065,24 @@ let rec expr fc (e : texpr) : r =
   if !(fc.st.marking) then touch_keys fc e;
   let r = expr_at fc e in
   note fc saved;
+  (* whether the value has no other holder, from what its parts were when their code was written *)
+  if boxy fc.st (ts fc e.ty) then begin
+    let fresh = match e.e with
+      | XVar v -> r.owned && Hashtbl.mem u_vars v.vid && not v.vcell
+      | XTuple es | XArray es | XStruct (_, _, es) | XVariant (_, _, _, es) -> List.for_all (u_is_fresh fc) es
+      | XCall (CBuiltin ("copy@T", _), _, _) -> true
+      | XCall (CBuiltin (("filled@Int" | "repeat@Array" | "chars@Str" | "split@Str"), _), _, _) -> flat fc.st (ts fc e.ty)
+      | XCall (CFn (u, _), _, _) -> let sg = (Hashtbl.find fc.st.prog.fns u).fsig in sg.sruniq && sg.slend = None
+      | XIf (_, a, b) -> u_is_fresh fc a && u_is_fresh fc b
+      | XBlock (_, v) -> u_is_fresh fc v
+      | XMatch (_, arms) -> List.for_all (fun (a : tarm) -> u_is_fresh fc a.body) arms
+      | XComp (b, _) -> u_is_fresh fc b
+      | _ -> false in
+    (* said again each time the code is written: the body of a loop may be written twice *)
+    let was = List.memq e !u_fresh in
+    if fresh && not was then u_fresh := e :: !u_fresh
+    else if was && not fresh then u_fresh := List.filter (fun x -> x != e) !u_fresh
+  end;
   r
 
 and expr_at fc (e : texpr) : r =
@@ -963,7 +1120,14 @@ and expr_at fc (e : texpr) : r =
         line fc "%s" (moved_out st (ts fc v.vty) n);
         { c = m; owned = true }
       end else { c = var_read fc v; owned = false }
-  | XFnRef (n, tys) -> { c = fn_closure fc n (List.map (ts fc) tys); owned = false }
+  | XFnRef (n, tys) ->
+      let tys = List.map (ts fc) tys in
+      let sg = (Hashtbl.find st.prog.fns n).fsig in
+      if List.mem true (u_needs fc n sg tys) then
+        raise (Syntax.Error ("E0611", e.l, Printf.sprintf
+          "'%s' has a parameter that must be handed a unique value, which a call through a function value cannot check; wrap it: fn(x) -> %s(take x)"
+          sg.sdisplay sg.sdisplay));
+      { c = fn_closure fc n tys; owned = false }
   | XCall (cl, args, convs) -> call fc e cl args convs
   | XField (b, _, f) ->
       let bv = borrow fc (expr fc b) b.ty in
@@ -1057,6 +1221,7 @@ and expr_at fc (e : texpr) : r =
           fc.ind <- fc.ind + 1;
           push fc FScope;
           List.iter (stmt fc) ss;
+          u_scan fc ~deep:false ~own:false (Some v);
           discard_value fc v;
           pop fc;
           fc.ind <- fc.ind - 1;
@@ -1069,6 +1234,7 @@ and expr_at fc (e : texpr) : r =
           fc.ind <- fc.ind + 1;
           push fc FScope;
           List.iter (stmt fc) ss;
+          u_scan fc ~deep:false (Some v);
           push fc FStmt;
           let x = expr fc v in
           if not (unreachable_value fc v) then line fc "%s = %s;" res (own fc x v.ty);
@@ -1246,9 +1412,9 @@ and construct fc t i (vals : string list) : r =
              (* allocated only when the cell taken apart was shared, and so not a token; the check
                 of an inplace function lets that pass for a cell a take parameter brought, which
                 its caller is to hand over unshared, and for no other *)
-             let from = Buffer.length fc.b in
-             line fc "%s %s = %s ? %s : (%s)stn_alloc(sizeof(struct box_%s));" (ct fc t) n tok tok (ct fc t) (mangle t);
-             if List.mem tok !(st.trusted) then st.excused := (fc.b, from, Buffer.length fc.b) :: !(st.excused);
+             (* a cell taken from a value known to have no other holder is there for certain *)
+             if List.mem tok !(st.trusted) then line fc "%s %s = %s;" (ct fc t) n tok
+             else line fc "%s %s = %s ? %s : (%s)stn_alloc(sizeof(struct box_%s));" (ct fc t) n tok tok (ct fc t) (mangle t);
              (* the cell is spent: a later constructor on this path allocates, and says so *)
              st.reuse := List.filter (fun (t', _, _) -> t' <> tok) !(st.reuse);
              line fc "%s = NULL;" tok
@@ -1280,7 +1446,42 @@ and arg_strings fc (items : [ `Addr of (unit -> string) * ty | `Arg of string ] 
   in
   go items
 
-and args_c fc (params : (mode * ty) list) (targs : targ list) : string list =
+(* what a function declared `-> unique T` returns must have no other holder *)
+and u_result fc (e : texpr) =
+  (* the value itself, not the block or the branch it ends *)
+  let rec blame (x : texpr) : Syntax.loc =
+    let first = function y :: _ -> blame y | [] -> x.l in
+    match x.e with
+    | XBlock (_, v) -> blame v
+    | XIf (_, a, b) -> first (List.filter (fun y -> not (u_is_fresh fc y)) [ a; b ])
+    | XMatch (_, arms) -> first (List.filter (fun y -> not (u_is_fresh fc y)) (List.map (fun (a : tarm) -> a.body) arms))
+    | _ -> x.l in
+  if !u_returns && not (u_is_fresh fc e) then
+    raise (Syntax.Error ("E0606", blame e,
+      "the function is declared to return a unique value, and this one may be shared, or the compiler cannot tell that it is not; build it here, or return copy(...) of it"))
+
+and u_argument fc (a : texpr) (what : string) : string =
+  (* the argument of a parameter that must be unique: handed over as it is when it has no other
+     holder, and copied first when it may have one (section 6.2) *)
+  let st = fc.st in
+  let x = expr fc a in
+  if u_is_fresh fc a then begin
+    let v = tmp fc a.ty (own fc x a.ty) in
+    if is_box st (ts fc a.ty) then line fc "STN_ASSUME_UNIQUE(%s);" v;
+    v
+  end else begin
+    if !no_implicit_copies then
+      raise (Syntax.Error ("E0609", a.l, Printf.sprintf
+        "%s needs a value that nothing else holds, and this one may be shared; pass copy(...) of it, or leave out --no-implicit-copies to have it copied here" what));
+    u_copies := (a.l, Printf.sprintf "this argument is copied: %s needs a value that nothing else holds, and this one may be shared" what) :: !u_copies;
+    let saved = !(st.cur) in
+    note fc (a.l, "this argument, which may be shared and is copied for a parameter that needs a value nothing else holds");
+    let c = tmp fc a.ty (deep_copy st (ts fc a.ty) (borrow fc x a.ty)) in
+    note fc saved;
+    c
+  end
+
+and args_c ?(needs : bool list = []) ?(callee = "the function") fc (params : (mode * ty) list) (targs : targ list) : string list =
   (* Arguments are evaluated left to right (section 4.4). A read-only argument is a C expression
      that is read when the call is made, after the arguments that follow it have run; when it
      names something they can change, a variable declared with var or a place inside one, and
@@ -1296,10 +1497,16 @@ and args_c fc (params : (mode * ty) list) (targs : targ list) : string list =
   let rec with_later = function
     | [] -> []
     | x :: rest -> (x, rest) :: with_later rest in
+  let needs = if List.length needs = List.length params then needs else List.map (fun _ -> false) params in
+  let what = Printf.sprintf "a unique parameter of %s" callee in
   arg_strings fc
-    (List.map
-       (fun (((m, pt), ta), later) ->
+    (List.map2
+       (fun need (((m, pt), ta), later) ->
          match m with
+         | MMut when need && not (match u_base ta.a with Some r -> Hashtbl.mem u_vars r.vid | None -> false) ->
+             raise (Syntax.Error ("E0607", ta.a.l, Printf.sprintf
+               "%s is 'mut ...: unique', and this may be shared: it must be a variable, or a place in one, whose value nothing else holds" what))
+         | MTake when need -> `Arg (u_argument fc ta.a what)
          | MMut ->
              let finish = place_deferred_of_expr fc ta.a in
              hold_busy fc ta.a;
@@ -1315,6 +1522,7 @@ and args_c fc (params : (mode * ty) list) (targs : targ list) : string list =
                  `Arg held
                end else `Arg (tmp fc ta.a.ty x.c)
              end else `Arg (borrow fc x ta.a.ty))
+       needs
        (with_later (List.combine params targs)))
 
 and call fc (e : texpr) (cl : callee) (targs : targ list) convs : r =
@@ -1414,6 +1622,10 @@ and any_vtable st (l : Syntax.loc) (any : ty) (at : ty) : string =
           | None -> unsupported l "%s cannot be used as %s: its implementation of %s is built in and has no method table" (show_ty at) (show_ty any) tr
           | Some (f, ftys) ->
           let impl_sg = (Hashtbl.find st.prog.fns f).fsig in
+          (* a call through the table hands over whatever it was given *)
+          if List.mem "inplace" impl_sg.smods && List.exists (fun (md, _, pt, _) -> md = MTake && boxy st pt) impl_sg.sparams then
+            raise (Syntax.Error ("E0611", l, Printf.sprintf
+              "the method '%s' is an inplace fn with a take parameter, which must be handed a unique value, and a call through 'any' cannot check that" m));
           (* the type checker keeps an impl from failing where its trait method cannot; the
              table calls the impl as the trait describes, so the two must agree *)
           if sig_can_fail_sg impl_sg && not (sig_can_fail_sg sg) then
@@ -1499,7 +1711,7 @@ and call_instance fc (e : texpr) uname tys (sg : fsig) targs convs : r =
     line fc "%s* %s = %s(%s);" (ct fc t) p name (String.concat ", " avs);
     { c = "(*" ^ p ^ ")"; owned = false }
   end else
-  let avs = args_c fc ps targs in
+  let avs = args_c ~needs:(u_needs fc uname sg tys) ~callee:(Printf.sprintf "'%s'" (if sg.sdisplay = "" then sg.sname else sg.sdisplay)) fc ps targs in
   if sig_can_fail sg then begin
     let res = fresh st "_r" and ev = fresh st "_e" in
     line fc "%s %s; StnError %s;" (ct fc t) res ev;
@@ -2018,6 +2230,7 @@ and dps_next fc (params : (var * mode * ty) list) (call : texpr) : (string * str
       List.concat
         (List.map2 (fun ((v : var), m, pt) (a : targ) ->
              match m with
+             | MTake when Hashtbl.mem u_dps_needs v.vid -> [ (var_name v, u_argument fc a.a "a unique parameter of this function") ]
              | MTake -> [ (var_name v, tmp fc pt (own fc (expr fc a.a) a.a.ty)) ]
              | MBorrow when not (needs_rc st pt) -> [ (var_name v, tmp fc pt (expr fc a.a).c) ]
              | _ -> [])
@@ -2074,6 +2287,7 @@ and dps_tail fc cname params dst (e : texpr) : unit =
       fc.ind <- fc.ind + 1;
       push fc FScope;
       List.iter (stmt fc) ss;
+      u_scan fc ~deep:false (Some v);
       again v;
       pop fc;
       fc.ind <- fc.ind - 1;
@@ -2101,8 +2315,11 @@ and dps_tail fc cname params dst (e : texpr) : unit =
       let next = ref [] in
       let vals =
         List.mapi (fun j (x : texpr) ->
-            if j <> k then tmp fc x.ty (own fc (expr fc x) x.ty)
-            else begin
+            if j <> k then begin
+              let c = tmp fc x.ty (own fc (expr fc x) x.ty) in
+              u_result fc x;
+              c
+            end else begin
               (* the call's arguments, in its place among the fields; the field itself stays empty *)
               next := dps_next fc params x;
               Printf.sprintf "(%s)(uintptr_t)1" (cty st t)
@@ -2128,6 +2345,7 @@ and dps_tail fc cname params dst (e : texpr) : unit =
   | _ ->
       push fc FStmt;
       let x = expr fc e in
+      u_result fc e;
       if repr (ts fc e.ty) <> TNever then begin
         let rv = tmp fc fc.ret (own fc x e.ty) in
         line fc "*%s = %s;" dst rv
@@ -2192,38 +2410,48 @@ and match_ ?tail fc t (s : texpr) arms : r =
          | Some fs ->
              let sty = ts fc s.ty in
              let tok = fresh st "_tok" in
+             (* a value known to have no other holder is taken apart with no test (rule 4 of
+                section 9.3), and what is moved out of it has no other holder either *)
+             let known = match s.e with XVar v -> Hashtbl.mem u_vars v.vid | _ -> u_is_fresh fc s in
+             if known then begin
+               st.trusted := tok :: !(st.trusted);
+               line fc "STN_ASSUME_UNIQUE(%s);" sv;
+               line fc "%s %s = %s;" (cty st sty) tok sv;
+               List.iter (fun (p, ft, path) -> match p with
+                   | TPWild when needs_rc st ft -> line fc "%s" (drop_stmt st ft path)
+                   | _ -> ()) fs
+             end else begin
              line fc "%s %s = NULL;" (cty st sty) tok;
              line fc "if (stn_unique(%s)) {" sv;
              line fc "  %s = %s;" tok sv;
              List.iter (fun (p, ft, path) -> match p with
                  | TPWild when needs_rc st ft -> line fc "  %s" (drop_stmt st ft path)
                  | _ -> ()) fs;
-             let from = Buffer.length fc.b in
              line fc "} else {";
              List.iter (fun (p, ft, _) -> match p with
                  | TPVar v when needs_rc st ft -> line fc "  %s" (dup_stmt st ft (var_name v))
                  | _ -> ()) fs;
              line fc "  %s" (drop_stmt st sty sv);
-             line fc "}";
+             line fc "}"
+             end;
              (* Rule 1 of section 9.6: a take parameter is taken to be held by nothing else, and so
                 is what is moved out of it. The path for a shared value is let pass only there. A
                 value the function got some other way, the result of a call for one, may be shared
                 by the function's own doing, and then its copies are the function's. *)
-             let brought = match s.e with
-               | XVar v -> v.vkind = VParam MTake || Hashtbl.mem st.from_take v.vid
-               | _ -> false in
-             if brought then begin
-               st.excused := (fc.b, from, Buffer.length fc.b) :: !(st.excused);
-               st.trusted := tok :: !(st.trusted);
-               List.iter (fun (p, _, _) -> match p with TPVar v -> Hashtbl.replace st.from_take v.vid () | _ -> ()) fs
-             end;
              line fc "%s = (%s)(void*)1;" sv (cty st sty);
              own_in fc tok (TNamed ("__token", []));
              List.iter (fun (p, ft, _) -> match p with
                  | TPVar v when needs_rc st ft -> own_in fc (var_name v) ft
                  | _ -> ()) fs;
+             (* a guard reads the parts before they are moved out, and may have kept one *)
+             let guarded = List.exists (fun (a : tarm) -> a.guard <> None) arms in
+             List.iter (fun (p, _, _) -> match p with
+                 | TPVar v -> u_declare fc v; if known && not guarded then u_add fc v
+                 | _ -> ()) fs;
              st.reuse := (tok, mangle sty, fc.b) :: saved
          | None -> ());
+        (* the arm is read again now that what it binds is known *)
+        u_scan fc ~deep:false (Some arm.body);
         (match tail with
          | Some emit -> emit arm.body   (* which leaves the function, or goes round its loop *)
          | None -> if has_value then assign_into fc res arm.body t else discard fc arm.body);
@@ -2321,6 +2549,8 @@ and closure fc (lam : lambda) : string =
 
 (* an lvalue for a place, making every array on the way unshared (section 4.5) *)
 and place_lvalue ?(write = true) fc (p : place) : string =
+  (* every block on the way into a variable whose value has no other holder is written as it is *)
+  let sure = p.via = None && Hashtbl.mem u_vars p.root.vid in
   let root () =
     match p.via with
     | Some call -> (expr fc call).c
@@ -2343,7 +2573,7 @@ and place_lvalue ?(write = true) fc (p : place) : string =
     | PIndex ix :: rest ->
         let et = match repr t with TArray et -> et | _ -> assert false in
         let iv = tmp fc (TInt IInt) (expr fc ix).c in
-        if write then line fc "stn_array_make_unique(&%s);" lv;
+        if write then (if sure then line fc "STN_ASSUME_UNIQUE(%s);" lv else line fc "stn_array_make_unique(&%s);" lv);
         go (Printf.sprintf "((%s*)(%s)->data)[stn_index(%s, stn_len(%s), %s)]" (cty fc.st et) lv iv lv (loc_args ix.l)) et rest
   in
   match ((if p.via = None then Hashtbl.find_opt fc.cached p.root.vid else None), p.path) with
@@ -2377,7 +2607,8 @@ and place_deferred ?(write = true) fc (p : place) : unit -> string =
         let iv = tmp fc (TInt IInt) (expr fc ix).c in
         let k = go et rest in
         fun lv ->
-          if write then line fc "stn_array_make_unique(&%s);" lv;
+          if write then (if p.via = None && Hashtbl.mem u_vars p.root.vid then line fc "STN_ASSUME_UNIQUE(%s);" lv
+                         else line fc "stn_array_make_unique(&%s);" lv);
           k (Printf.sprintf "((%s*)(%s)->data)[stn_index(%s, stn_len(%s), %s)]" (cty fc.st et) lv iv lv (loc_args ix.l))
   in
   match ((if p.via = None then Hashtbl.find_opt fc.cached p.root.vid else None), p.path) with
@@ -3122,6 +3353,274 @@ and moves fc (e : texpr) (v : var) =
       | TNamed _ as t -> is_data fc.st t && layout fc.st t = LBoxed
       | _ -> false)
 
+(* ---------- uniqueness (section 6.2) ---------- *)
+
+(* the variable whose value [v] reads into, through the variables bound to parts of it *)
+and u_root_var (v : var) : var =
+  let rec go (v : var) fuel = match Hashtbl.find_opt u_views v.vid with
+    | Some r when fuel > 0 && r.vid <> v.vid -> go r (fuel - 1)
+    | _ -> v in
+  go v 64
+
+and u_known (v : var) = Hashtbl.mem u_vars (u_root_var v).vid && not (Hashtbl.mem u_views v.vid)
+
+(* the variable a place expression starts at *)
+and u_base (e : texpr) : var option =
+  match e.e with
+  | XVar v -> Some v
+  | XField (b, _, _) | XTupleGet (b, _) | XIndex (b, _) | XSlice (b, _, _) -> u_base b
+  | _ -> None
+
+(* [v]'s value, or the value it reads into, may now have another holder *)
+and u_lose (l : Syntax.loc) (v : var) =
+  let r = u_root_var v in
+  if Hashtbl.mem u_vars r.vid then begin
+    (match Hashtbl.find_opt u_must r.vid with
+     | Some name ->
+         raise (Syntax.Error ("E0608", l, Printf.sprintf
+           "'%s' is declared 'mut %s: unique', and this may leave its value shared, or the compiler cannot tell that it does not; the parameter must be unique whenever the function returns" name name))
+     | None -> ());
+    Hashtbl.remove u_vars r.vid
+  end
+
+and u_scope fc : frame option = List.find_opt (fun (f : frame) -> f.fk <> FStmt) fc.frames
+
+(* [v] now holds a value with no other holder *)
+and u_add fc (v : var) =
+  Hashtbl.remove u_views v.vid;
+  if boxy fc.st (ts fc v.vty) && not v.vcell && not v.vcaptured
+     && (match Hashtbl.find_opt fc.vars v.vid with Some (VDirect _) | Some (VPtr _) -> true | _ -> false)
+  then begin
+    Hashtbl.replace u_vars v.vid ()
+  end else Hashtbl.remove u_vars v.vid
+
+(* [v] is declared here, in the scope that is innermost now *)
+and u_declare fc (v : var) =
+  Hashtbl.remove u_vars v.vid; Hashtbl.remove u_views v.vid;
+  match u_scope fc with Some f -> Hashtbl.replace u_home v.vid f | None -> Hashtbl.remove u_home v.vid
+
+and u_is_fresh fc (e : texpr) =
+  let t = ts fc e.ty in
+  repr t = TNever || not (boxy fc.st t) || List.memq e !u_fresh
+
+(* the variables a pattern binds *)
+and u_pat_vars (p : tpat) : var list =
+  match p with
+  | TPVar v -> [ v ]
+  | TPVariant (_, _, _, ps) | TPStruct (_, _, ps) | TPTuple ps -> List.concat_map u_pat_vars ps
+  | TPErrType (_, p) -> u_pat_vars p
+  | TPWild | TPLit _ -> []
+
+(* whether [e], statements included, names [r] or assigns into it *)
+and u_mentions (r : var) (e : texpr) : bool =
+  let hit = ref false in
+  walk_texpr (fun (x : texpr) -> match x.e with XVar v when v.vid = r.vid -> hit := true | _ -> ())
+    (fun (s : tstmt) -> match s.st with SAssign (p, _) when p.root.vid = r.vid -> hit := true | _ -> ())
+    e;
+  !hit
+
+(* whether the value of [e] will have no other holder, as far as can be told before its code is written *)
+and u_gives fc (e : texpr) : bool =
+  not (boxy fc.st (ts fc e.ty))
+  || (match e.e with
+      | XVar v -> u_known v && Hashtbl.mem u_vars v.vid && moves fc e v
+      | XTuple es | XArray es | XStruct (_, _, es) | XVariant (_, _, _, es) -> List.for_all (u_gives fc) es
+      | XCall (CBuiltin ("copy@T", _), _, _) -> true
+      | XCall (CFn (u, _), _, _) -> let sg = (Hashtbl.find fc.st.prog.fns u).fsig in sg.sruniq && sg.slend = None
+      | _ -> false)
+
+(* which parameters of a function must be handed a unique value: those declared unique, and the
+   take parameters of an inplace function that hold a block (rule 1 of section 9.6). A parameter
+   passed as a read-only one (section 9.4) needs nothing. *)
+and u_needs fc (uname : string) (sg : fsig) (tys : ty list) : bool list =
+  let st = fc.st in
+  let s = List.combine (List.map fst sg.stparams) tys in
+  List.mapi (fun i (m, _, pt, _) ->
+      not (Hashtbl.mem st.demoted (uname, i))
+      && boxy st (subst s pt)
+      && ((try List.nth sg.suniq i with _ -> false) || (m = MTake && List.mem "inplace" sg.smods)))
+    sg.sparams
+
+(* Reads a statement or an expression before its code is written, and ends the uniqueness of every
+   variable that the code may leave with another holder. A variable keeps it only through uses
+   that are known to leave nothing behind: reading a value without a block out of it, lending it
+   to a function that cannot keep it, writing into it a value that is itself unique, and its last
+   use, which hands the value over. With [deep], statements inside blocks are read too: that is
+   for a loop, whose body runs again after anything in it has run. Without it they are left to
+   be read when their own code is written, by which time the variables declared before them are
+   known. [own] says whether the value of the expression is kept by what uses it. *)
+and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr option) : unit =
+  let st = fc.st in
+  let deep = ref deep in
+  let boxy_t t = boxy st (ts fc t) in
+  let writes : (var * Syntax.loc) list ref = ref [] and held : var list ref = ref [] in
+  let view_of (r : var) (p : tpat) =
+    List.iter (fun (pv : var) -> if boxy_t pv.vty then begin Hashtbl.remove u_vars pv.vid; Hashtbl.replace u_views pv.vid r end) (u_pat_vars p) in
+  let in_loop f = let saved = !deep in deep := true; f (); deep := saved in
+  let rec go own (e : texpr) =
+    match e.e with
+    | XVar v ->
+        if boxy_t v.vty then begin
+          if own then (if not (moves fc e v) then u_lose e.l v)
+          else held := v :: !held
+        end
+    | XField (b, _, _) | XTupleGet (b, _) -> if boxy_t e.ty then go own b else plain b
+    | XIndex (b, i) -> go false i; if boxy_t e.ty then go own b else plain b
+    | XSlice (a, lo, hi) ->
+        go false lo; go false hi;
+        (* a slice of an array holds its elements too *)
+        (match repr (ts fc a.ty) with TArray et when boxy st et -> go true a | _ -> plain a)
+    | XLit _ | XNone | XFnRef _ -> ()
+    | XFStr es -> List.iter (go false) es
+    | XTuple es | XArray es | XStruct (_, _, es) | XVariant (_, _, _, es) -> List.iter (go true) es
+    | XBin (_, a, b) -> go false a; go false b
+    | XNeg a | XNot a | XConv a -> go false a
+    | XTry a -> go own a
+    | XFail a | XPack a -> go true a
+    | XIf (c, a, b) -> go false c; go own a; go own b
+    | XBlock (ss, v) -> if !deep then List.iter gs ss; go own v
+    | XMatch (s, arms) ->
+        let handed = match s.e with XVar v -> moves fc s v | _ -> false in
+        if not handed then begin
+          go false s;
+          match u_base s with
+          | Some r when boxy_t s.ty ->
+              (* the match holds the value for as long as it runs, and its arms read it in place *)
+              if List.exists (fun (a : tarm) -> u_mentions r a.body || (match a.guard with Some g -> u_mentions r g | None -> false)) arms
+              then u_lose s.l r;
+              List.iter (fun (a : tarm) -> view_of r a.pat) arms
+          | _ -> ()
+        end;
+        List.iter (fun (a : tarm) -> Option.iter (go false) a.guard; go own a.body) arms
+    | XLambda lam -> iter_vars (fun v -> u_lose e.l v) lam.lbody
+    | XComp (b, cs) ->
+        in_loop (fun () ->
+            List.iter (fun cp ->
+                iter cp.csrc cp.cvar [ b ];
+                Option.iter (go false) cp.ccond) cs;
+            go true b)
+    | XCall (cl, args, _) -> call e cl args
+  (* read for a value without a block: nothing of the variable is kept *)
+  and plain (b : texpr) =
+    match b.e with
+    | XVar _ -> ()
+    | XField (x, _, _) | XTupleGet (x, _) -> plain x
+    | XIndex (x, i) -> go false i; plain x
+    | _ -> go false b
+  and iter (src : titer) (p : tpat) (bodies : texpr list) =
+    match src with
+    | IRange (a, b) -> go false a; go false b
+    | IArray (a, m) ->
+        go false a;
+        (match u_base a with
+         | Some r ->
+             let et = match repr (ts fc a.ty) with TArray et -> et | _ -> TUnit in
+             if boxy st et then view_of r p;
+             if m = MMut then begin
+               writes := (r, a.l) :: !writes;
+               if boxy st et then u_lose a.l r
+             end;
+             (* the loop holds the array for as long as it runs *)
+             if List.exists (u_mentions r) bodies then u_lose a.l r
+         | None -> ())
+  and call (e : texpr) cl (args : targ list) =
+    let result_boxy = boxy_t e.ty in
+    let code = List.exists (fun (a : targ) -> has_code st (ts fc a.a.ty)) args in
+    let boxy_args = List.filter (fun (a : targ) -> boxy_t a.a.ty) args in
+    let mut_place (a : targ) keeps =
+      (match a.a.e with
+       | XVar _ -> ()
+       | _ -> let rec idx (x : texpr) = match x.e with
+                | XIndex (b, i) -> go false i; idx b
+                | XField (b, _, _) | XTupleGet (b, _) -> idx b
+                | XCall _ -> go true x
+                | _ -> () in
+              idx a.a);
+      match u_base a.a with
+      | Some r -> writes := (r, a.a.l) :: !writes; if not keeps then u_lose a.a.l r
+      | None -> () in
+    let by_sig (uname : string) (sg : fsig) =
+      let mode i m = if Hashtbl.mem st.demoted (uname, i) then MBorrow else m in
+      let uniq i = try List.nth sg.suniq i with _ -> false in
+      let safe = (not (sig_can_fail sg)) && (not code) && sg.slend = None && ((not result_boxy) || sg.sruniq) in
+      let modes = List.mapi (fun i (m, _, _, _) -> mode i m) sg.sparams in
+      let all_mut_unique = List.for_all2 (fun i m -> m <> MMut || uniq i) (List.init (List.length modes) Fun.id) modes in
+      let any_mut = List.mem MMut modes in
+      if List.length modes <> List.length args then List.iter (fun (a : targ) -> go true a.a) args
+      else
+        List.iteri (fun i (a : targ) ->
+            match List.nth modes i with
+            | MTake -> go true a.a
+            | MBorrow ->
+                if not (boxy_t a.a.ty) then go false a.a
+                else if safe && ((not any_mut) || all_mut_unique) then go false a.a
+                else go true a.a
+            | MMut ->
+                let alone = List.for_all (fun (b : targ) -> b == a) boxy_args in
+                mut_place a ((not (boxy_t a.a.ty)) || (safe && (uniq i || (flat st (ts fc a.a.ty) && alone)))))
+          args in
+    match cl with
+    | CClosure f ->
+        go false f;
+        List.iter (fun (a : targ) -> if a.amode = MMut then mut_place a (not (boxy_t a.a.ty)) else go true a.a) args
+    | CFn (u, _) -> by_sig u (Hashtbl.find st.prog.fns u).fsig
+    | CTrait (tr, ta, m, self, _) ->
+        let self = ts fc self and ta = List.map (ts fc) ta in
+        (match repr self with
+         | TAny _ -> List.iter (fun (a : targ) -> if a.amode = MMut then mut_place a (not (boxy_t a.a.ty)) else go true a.a) args
+         | _ ->
+             match Typecheck.impl_method_in (Typecheck.rtab_of_prog st.prog) tr ta m self with
+             | Some (f, _) -> by_sig f (Hashtbl.find st.prog.fns f).fsig
+             | None ->
+                 (* a trait of the prelude on a type without an impl of the program's: it compares,
+                    hashes or shows, and keeps nothing *)
+                 List.iter (fun (a : targ) -> if a.amode = MMut then mut_place a (not (boxy_t a.a.ty)) else go result_boxy a.a) args)
+    | CBuiltin (name, _) ->
+        let muts = List.filter (fun (a : targ) -> a.amode = MMut) args in
+        if String.length name > 4 && String.sub name 0 4 = "len@" then List.iter (fun (a : targ) -> plain a.a) args
+        else if muts = [] then
+          (* what a built-in function is lent it can only hand back in its result *)
+          List.iter (fun (a : targ) -> go (result_boxy && name <> "copy@T") a.a) args
+        else begin
+          let others = List.filter (fun (a : targ) -> a.amode <> MMut) args in
+          (* what is put into a collection must itself be unique for the collection to stay so *)
+          let given = List.for_all (fun (a : targ) -> u_gives fc a.a) others in
+          List.iter (fun (a : targ) -> go true a.a) others;
+          List.iter (fun (a : targ) -> mut_place a ((not (boxy_t a.a.ty)) || (given && ((not result_boxy) || name = "pop@Array")))) muts
+        end
+  and gs (s : tstmt) =
+    match s.st with
+    | SLet (_, e) | SVar (_, e) | SReturn e | SAssertFails (_, e) | SLend e -> go true e
+    | SExpr e | SAssert (e, _) | SCheck e -> go false e
+    | SAssign (p, e) ->
+        Option.iter (go true) p.via;
+        List.iter (function PIndex i -> go false i | _ -> ()) p.path;
+        go true e;
+        if p.path <> [] || p.via <> None then begin
+          writes := (p.root, s.sl) :: !writes;
+          (* outside a loop this is settled once the value's code is written *)
+          if !deep && boxy_t e.ty && not (u_gives fc e) then u_lose s.sl p.root
+        end else if !deep && boxy_t p.root.vty && not (u_gives fc e) then u_lose s.sl p.root
+    | SBreak | SContinue -> ()
+    | SWhile (c, b) -> in_loop (fun () -> go false c; go false b)
+    | SFor (p, it, b) -> in_loop (fun () -> iter it p [ b ]; go false b)
+    | SLocalFn (_, lam) -> iter_vars (fun v -> u_lose s.sl v) lam.lbody
+  in
+  (* Read again until nothing more is lost: in a loop, what one statement is taken to give depends
+     on variables that a later statement may end the uniqueness of, for the turns after the first. *)
+  let rec settle () =
+    let before = Hashtbl.length u_vars in
+    writes := []; held := [];
+    Option.iter gs stmt;
+    Option.iter (go own) top;
+    (* a write, or a mut argument, in the same statement as something that holds the whole value:
+       the holder may still be reading it *)
+    List.iter (fun ((w : var), l) ->
+        let r = u_root_var w in
+        if List.exists (fun (h : var) -> (u_root_var h).vid = r.vid) !held then u_lose l w) !writes;
+    if Hashtbl.length u_vars < before then settle () in
+  settle ()
+
 (* what a moved variable is left holding: an empty string, or a pointer that stn_drop ignores *)
 and moved_out st t n =
   match repr t with
@@ -3324,6 +3823,11 @@ and array_reduction fc p src body =
 
 and stmt fc (s : tstmt) =
   let saved = !(fc.st.cur) in
+  (match s.st with
+   | SLet (p, _) -> List.iter (fun (v : var) -> Hashtbl.remove u_vars v.vid; Hashtbl.remove u_views v.vid) (u_pat_vars p)
+   | SVar (v, _) | SLocalFn (v, _) -> Hashtbl.remove u_vars v.vid; Hashtbl.remove u_views v.vid
+   | _ -> ());
+  u_scan fc ~deep:false ~stmt:s None;
   stmt_at fc s;
   (* what follows the statement is not the statement's: releases at the end of a block, say *)
   note fc saved
@@ -3393,6 +3897,8 @@ and stmt_at fc (s : tstmt) =
        fc.frames <- List.tl fc.frames;
        emit_drops fc f;
        declare_var fc v init;
+       u_declare fc v;
+       if u_is_fresh fc e then u_add fc v;
        fc.frames <- { fk = FStmt; owned = [] } :: fc.frames
    | SLet (p, e) ->
        let x = expr fc e in
@@ -3444,13 +3950,26 @@ and stmt_at fc (s : tstmt) =
        end;
        let lv = place_lvalue fc p in
        if rc fc p.pty then line fc "%s" (drop_stmt st (ts fc p.pty) lv);
-       line fc "%s = %s;" lv nv
+       line fc "%s = %s;" lv nv;
+       if boxy st (ts fc e.ty) then begin
+         let fresh = u_is_fresh fc e in
+         if p.path <> [] || p.via <> None then (if not fresh then u_lose s.sl p.root)
+         else if not fresh then u_lose s.sl p.root
+         else if not (Hashtbl.mem u_vars p.root.vid) then begin
+           (* made unique again only where the variable was declared: anywhere else the assignment is
+              on some paths and not on others *)
+           match u_scope fc, Hashtbl.find_opt u_home p.root.vid with
+           | Some here, Some home when here == home -> u_add fc p.root
+           | _ -> ()
+         end
+       end
    | SExpr e -> discard_value fc e
    | SReturn e when (match !(st.dps) with Some (_, b, _) -> b == fc.b | None -> false) ->
        (* in a function that runs as a loop (section 9.5), what is returned is in tail position *)
        (match !(st.dps) with Some (_, _, tail) -> tail e | None -> ())
    | SReturn e ->
        let x = expr fc e in
+       u_result fc e;
        let v = if repr (ts fc e.ty) = TNever then "0" else own fc x e.ty in
        let rv = tmp fc fc.ret v in
        drop_until fc (fun _ -> false);
@@ -3858,8 +4377,10 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       let f = match name with "union@Set" -> "stn_set_union" | "intersection@Set" -> "stn_set_intersection" | _ -> "stn_set_difference" in
       owned (Printf.sprintf "%s(%s, %s)" f a bb)
   | "copy@T" ->
+      (* a copy that shares no block with what it was made from (section 6.2) *)
       let x = expr fc (arg 0).a in
-      { c = tmp fc t (own fc x t); owned = true }
+      if boxy st t then { c = tmp fc t (deep_copy st t (borrow fc x t)); owned = true }
+      else { c = tmp fc t (own fc x t); owned = true }
   | "unreachable@Str" ->
       line fc "stn_trap_str(\"unreachable\", %s, %s);" la (b 0);
       let res = fresh st "_r" in
@@ -4028,6 +4549,8 @@ let compile_instance st cname uname tys =
     end;
     st.names := (cname, (if sg.sdisplay = "" then sg.sname else sg.sdisplay)) :: !(st.names);
     st.marking := false in
+  u_reset ();
+  u_returns := sg.sruniq && sg.slend = None && boxy st ret;
   note_self_sliced st tf.fbody;
   st.movable := [];
   note_moves st (List.filter_map (fun (v, m, _) -> if m = MTake then Some v else None) params) tf.fbody;
@@ -4071,6 +4594,17 @@ let compile_instance st cname uname tys =
             (List.hd fc.frames).owned <- (c, TNamed ("__cell", [ t ])) :: (List.hd fc.frames).owned
           end else Hashtbl.replace fc.vars v.vid (if lend then VPtr n else VDirect n))
     params;
+  (* the parameters that are handed a value with no other holder (section 6.2) *)
+  if not lend then
+    List.iter2 (fun ((v : var), m, _) need ->
+        u_declare fc v;
+        if need then begin
+          u_add fc v;
+          if Hashtbl.mem u_vars v.vid then begin
+            if m = MMut then Hashtbl.replace u_must v.vid v.vname else Hashtbl.replace u_dps_needs v.vid ()
+          end
+        end)
+      params (u_needs fc uname sg tys);
   if lend then begin
     (* every path ends in a lend statement, which returns; the checker proved it *)
     discard fc tf.fbody;
@@ -4082,6 +4616,8 @@ let compile_instance st cname uname tys =
   end else if (not can_fail) && List.for_all (fun ((v : var), m, _) -> m <> MMut && not v.vcell) params
             && dps_body fc cname params tf.fbody then begin
     looped := true;
+    (* the body runs again on each turn, with the parameters the turn before gave it *)
+    u_scan fc ~deep:true (Some tf.fbody);
     (* a function that returns a constructor holding a call of itself runs as a loop (section 9.5) *)
     line fc "%s _res;" (cty st ret);
     line fc "%s* _dst = &_res;" (cty st ret);
@@ -4102,7 +4638,9 @@ let compile_instance st cname uname tys =
     Buffer.add_buffer st.funcs b
   end else begin
   push fc FStmt;
+  u_scan fc ~deep:false (Some tf.fbody);
   let x = expr fc tf.fbody in
+  u_result fc tf.fbody;
   let never = repr (ts fc tf.fbody.ty) = TNever in
   let rv = if never then "0" else own fc x tf.fbody.ty in
   let f = List.hd fc.frames in
@@ -4206,7 +4744,7 @@ let note_demotions st =
       if not sg.sexport && prog.main <> Some u && sg.slend = None && not (Hashtbl.mem methods u) && not (Hashtbl.mem valued u)
          && not (List.exists (fun (m, _, _, _) -> m = MMut) sg.sparams) && not (loop_shaped u f.fbody) then
         List.iteri (fun i ((v : var), (m, _, _, _)) ->
-            if m = MTake && not v.vcell && not v.vcaptured then candidates := (u, i, v, f.fbody) :: !candidates)
+            if m = MTake && not v.vcell && not v.vcaptured && not (try List.nth sg.suniq i with _ -> false) then candidates := (u, i, v, f.fbody) :: !candidates)
           (List.combine f.fparams sg.sparams)) prog.fns;
   List.iter (fun (u, i, _, _) -> Hashtbl.replace st.demoted (u, i) ()) !candidates;
   let only_read (v : var) (body : texpr) =
@@ -4295,12 +4833,13 @@ let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~d
     debug; counter = 0 }
   in
   note_demotions st;
+  u_copies := [];
   let main_u = match prog.main with
     | Some m -> m
     | None -> if check_only then "" else raise (Unsupported ("no main function", Syntax.noloc)) in
   (* a noalloc or inplace function is checked whether or not main reaches it; one with type
      parameters is checked in each form the program uses *)
-  let checked = List.filter (fun u -> let sg = (Hashtbl.find prog.fns u).fsig in sg.smods <> [] && sg.stparams = []) prog.fn_order in
+  let checked = List.filter (fun u -> let sg = (Hashtbl.find prog.fns u).fsig in (sg.smods <> [] || sg.sruniq || List.mem true sg.suniq) && sg.stparams = []) prog.fn_order in
   if check_only then begin
     List.iter (fun u -> ignore (!request_instance st u [])) (checked @ (if main_u = "" then [] else [ main_u ]));
     let rec drain () =
@@ -4312,7 +4851,7 @@ let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~d
       end in
     drain ();
     Verify.run ~records:!(st.records) ~names:!(st.names) ~text:(verify_text st);
-    Option.iter (fun out -> out := Verify.explain ~records:!(st.records) ~helpers:(Buffer.contents st.helpers)) explain;
+    Option.iter (fun out -> out := Verify.explain ~records:!(st.records) ~helpers:(Buffer.contents st.helpers) ~copies:!u_copies) explain;
     raise Exit
   end;
   let main_sg = (Hashtbl.find prog.fns main_u).fsig in
@@ -4337,7 +4876,7 @@ let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~d
   flush_boxed st;
   ignore show_err;
   Verify.run ~records:!(st.records) ~names:!(st.names) ~text:(verify_text st);
-  Option.iter (fun out -> out := Verify.explain ~records:!(st.records) ~helpers:(Buffer.contents st.helpers)) explain;
+  Option.iter (fun out -> out := Verify.explain ~records:!(st.records) ~helpers:(Buffer.contents st.helpers) ~copies:!u_copies) explain;
   let out = Buffer.create 65536 in
   pr out "/* Generated by the Starnite compiler. */\n";
   if debug then pr out "#define STN_DEBUG 1\n";
@@ -4390,5 +4929,5 @@ let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~d
 (* The checks of section 9.6 alone, for the commands that write no C. A program the C backend
    does not cover yet is left unchecked. *)
 and check ?explain (prog : tprog) : unit =
-  if explain <> None || Hashtbl.fold (fun _ (f : tfn) acc -> acc || f.fsig.smods <> []) prog.fns false then
+  if explain <> None || Hashtbl.fold (fun _ (f : tfn) acc -> acc || f.fsig.smods <> [] || f.fsig.sruniq || List.mem true f.fsig.suniq) prog.fns false then
     try ignore (emit ~check_only:true ?explain prog ~debug:true) with Exit | Unsupported _ -> ()

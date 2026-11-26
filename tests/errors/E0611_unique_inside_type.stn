@@ -1,0 +1,4 @@
+# expect: E0611 3:19
+fn main() ! io:
+    let xs: Array[unique Array[Int]] = [[1]]
+    print(f"{len(xs)}")

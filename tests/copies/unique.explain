@@ -1,0 +1,2 @@
+tests/copies/unique.stn:10:18: this argument is copied: a unique parameter of 'bump' needs a value that nothing else holds, and this one may be shared
+exit 0
