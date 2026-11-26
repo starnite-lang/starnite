@@ -31,6 +31,15 @@ inplace fn keep_even(take xs: List) -> List:
 inplace fn bump_evens(take xs: List, by: Int) -> List:
     bump(keep_even(take xs), by)
 
+# one cell, and one constructor on each way out: a branch that returns takes its cell with it
+inplace fn first_or_next(take xs: List, stop: Bool) -> List:
+    match xs:
+        Nil -> Nil
+        Cons(x, _) ->
+            if stop:
+                return Cons(x, Nil)
+            Cons(x + 1, Nil)
+
 noalloc fn total(xs: Array[Int]) -> Int:
     var t = 0
     for x in xs:
@@ -89,5 +98,6 @@ fn main() ! io:
     let kept = Cons(4, Cons(5, Cons(6, Nil)))
     let other = bump_evens(kept, 10)
     print(f"{sum(kept)} {sum(other)} {drop_all(other)}")
+    print(f"{sum(first_or_next(Cons(5, Nil), true))} {sum(first_or_next(Cons(5, Nil), false))}")
     var a = [1, 2]
     print(f"{pick(1, 2, true)} {pick(1.5, 2.5, false)} {size(mut a)}")

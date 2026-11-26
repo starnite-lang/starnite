@@ -168,6 +168,9 @@ let bookkeeping = [ "stn_release_defer"; "stn_release_drain" ]
 (* What the runtime does without allocating: its functions, and its macros that take arguments,
    from which no path reaches the allocator of C. Read from the runtime's own source, which the
    compiler carries, so the list cannot fall behind it. *)
+(* the functions of the runtime, by name: not its macros *)
+let runtime_functions : string list ref = ref []
+
 let quiet : (string, unit) Hashtbl.t Lazy.t = lazy (
   let src = Runtime_src.header ^ "\n" ^ Runtime_src.source in
   (* a line that ends in a backslash goes on *)
@@ -197,7 +200,7 @@ let quiet : (string, unit) Hashtbl.t Lazy.t = lazy (
         Buffer.add_char plain '\n'
       end else (Buffer.add_string plain l; Buffer.add_char plain '\n')) (String.split_on_char '\n' src);
   let plain = Buffer.contents plain in
-  List.iter (fun (nm, lo, hi) -> add nm (String.sub plain lo (hi - lo))) (definitions plain);
+  List.iter (fun (nm, lo, hi) -> add nm (String.sub plain lo (hi - lo)); runtime_functions := nm :: !runtime_functions) (definitions plain);
   let calls = Hashtbl.create 256 in
   Hashtbl.iter (fun nm body ->
       let acc = ref [] in
@@ -312,7 +315,7 @@ let run ~(records : fn_record list) ~(names : (string * string) list) ~(text : s
         (match r.stray with
          | Some l ->
              report "E0605" l
-               (Printf.sprintf "inplace fn '%s' calls itself here, which is neither a tail call nor the one field of a constructor it returns" r.display)
+               (Printf.sprintf "inplace fn '%s' calls itself here, directly or through another function, and the call is neither a tail call nor the one field of a constructor it returns" r.display)
          | None -> ());
         List.iter (fun (off, tok) ->
             if not (excused r off) then begin

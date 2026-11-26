@@ -1,0 +1,10 @@
+# expect: E0605 6:13
+inplace fn a(n: Int) -> Int:
+    if n == 0:
+        0
+    else:
+        1 + b(n - 1)
+fn b(n: Int) -> Int:
+    a(n)
+fn main() ! io:
+    print(f"{a(3)}")
