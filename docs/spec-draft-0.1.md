@@ -89,7 +89,7 @@ ptype      = [ "mut" | "take" ] [ "local" ] type ;               (* fn(mut Stats
 path       = IDENT { "." IDENT } ;
 
 block      = NEWLINE INDENT stmt { stmt } DEDENT | simple NEWLINE ;
-stmt       = simple NEWLINE | if_stmt | if_let | let_else | try_stmt | match_stmt | for_stmt
+stmt       = simple NEWLINE | if_stmt | if_let | while_let | let_else | try_stmt | match_stmt | for_stmt
            | while_stmt | par_stmt | with_stmt | handle ;         (* 6.5, 7.3 *)
 simple     = "let" pattern [ ":" type ] "=" expr
            | [ "shared" ] "var" IDENT [ ":" type ] "=" expr
@@ -102,7 +102,8 @@ simple     = "let" pattern [ ":" type ] "=" expr
 assert_stmt = "assert" expr | "assert_fails" targs expr | "assert_snapshot" expr ;
 assign_op  = "=" | "+=" | "-=" | "*=" | "/=" | "%=" ;
 if_stmt    = "if" expr ":" block { "elif" expr ":" block } [ "else" ":" block ] ;
-if_let     = "if" "let" pattern "=" expr ":" block [ "else" ":" block ] ;
+if_let     = "if" [ "let" ] pattern "=" expr ":" block [ "else" ":" block ] ;
+while_let  = "while" [ "let" ] pattern "=" expr ":" block ;
 let_else   = "let" pattern "=" expr "else" ( simple NEWLINE | ":" block ) ;
 try_stmt   = "try" ":" block "catch" pattern ":" block { "catch" pattern ":" block } ;
 match_stmt = "match" expr ":" NEWLINE INDENT { pattern [ "if" expr ] "->" block } DEDENT ;
@@ -153,9 +154,9 @@ Notes:
 - **Bodies.** A function without a body appears only inside `trait_def` and `extern_block`. Every foreign function is declared in an `extern_block` (section 18.1).
 - **Tail statements.** A block's value is its last statement. An `if`, `match`, `with` or `handle` statement in last position is an expression whose value is that of the branch taken, so `match try f(): ...` can end a function.
 - **Shorter forms.** Five forms are other ways to write a `match`, and mean exactly what the match does.
-  - `if let PATTERN = e: A else: B` is `match e:` with the arms `PATTERN -> A` and `_ -> B`.
+  - `if PATTERN = e: A else: B` is `match e:` with the arms `PATTERN -> A` and `_ -> B`. A condition binds when it has a `=` of its own outside any brackets, which a condition that is an expression never has; `let` may be written before the pattern and changes nothing. `while PATTERN = e: A` goes round for as long as the pattern matches: it is `while true:` around `match e:` with the arms `PATTERN -> A` and `_ -> break`.
   - `let PATTERN = e else S`, followed by the rest of its block R, is `match e:` with the arms `PATTERN -> R` and `_ -> S`. S must leave: it ends in `return`, `break`, `continue` or a call that never returns, such as `fail` (E0207), since R needs what the pattern binds.
-  - In those two forms a pattern that is a plain name or a tuple would match anything, so it stands for `Some` of itself: `if let v = m.get(k):` is `if let Some(v) = m.get(k):`, and `let (a, b) = split_once(s, sep) else return` takes the pair out of the option.
+  - In those two forms a pattern that is a plain name or a tuple would match anything, so it stands for `Some` of itself: `if v = m.get(k):` is `if Some(v) = m.get(k):`, and `let (a, b) = split_once(s, sep) else return` takes the pair out of the option.
   - `a ?: b` is `match a:` with the arms `Some(v) -> v` and `None -> b`. `a` is an option, `b` runs only when it is `None`, and `b` may be a call of `fail`. It binds more loosely than `or`, and to the right.
   - `try: B`, then `catch P1: C1`, and so on, is `match try B:` with the arms `Ok(v) -> v`, then `Err(P1) -> C1` and so on. When no catch is a name or `_` and the catches do not name every error, a last arm `Err(e) -> fail(e)` passes on what was not caught, so the function still lists those errors; when they name every error, nothing is passed on. The value of B is the value of the statement where one is wanted.
   - A variant written `V(from T)` holds one value of type T, and stands also for `impl From[T]` for its type, with `from(x)` giving `V(x)`. An error of type T raised inside a function that lists the variant's type then becomes `V(...)` on the way out (section 5.4). It is not available in a type with type parameters.
