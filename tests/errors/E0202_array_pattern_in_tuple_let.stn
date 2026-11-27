@@ -1,0 +1,5 @@
+# expect: E0202 4:10
+fn main() ! io:
+    let empty: Array[Int] = []
+    let ([x], n) = (empty, 0)
+    print(f"{x} {n}")

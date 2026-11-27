@@ -324,6 +324,7 @@ and tpat =
   | TPVariant of string * ty list * int * tpat list
   | TPStruct of string * ty list * tpat list
   | TPTuple of tpat list
+  | TPArray of tpat list * bool          (* an array of these elements; with true, one that starts with them *)
   | TPErrType of ty * tpat               (* inside Err on a union: matches that member type *)
 
 and tstmt = { st : ts; sl : loc }

@@ -102,6 +102,14 @@ Not done yet:
 
 ## Milestone 2 so far
 
+- **Shorter forms (section 2.2).** Other ways to write a `match` or an impl, each defined by what it stands for. All are read by the parser as that, except the two marked.
+  - `type T = struct:` with a field to a line.
+  - Array patterns, `[a, b]` for exactly two elements and `[a, b, ..]` for two or more, in any pattern (a pattern of their own in the checker, the interpreter and the C backend). A match on an array needs a `_` or `[..]` arm: the check does not yet see that `[]`, `[x]` and `[x, y, ..]` cover every array.
+  - `let PATTERN = e else ...`: the rest of the block is where the pattern matched; the else must leave (E0207).
+  - `if PATTERN = e:` with an optional `else:`, and `while PATTERN = e:`. A condition with a `=` of its own, outside any brackets, binds; `let` may be written before the pattern. In these and in `let ... else`, a plain name or a tuple stands for what an option holds: `if v = m.get(k):` is `if Some(v) = m.get(k):`.
+  - `a ?: b`: what the option `a` holds, or `b`, evaluated only then (typed as a match in the checker).
+  - `try:` with `catch PATTERN:` blocks. What no catch names goes on to the caller; when the catches name every error nothing does, and the function need not list them.
+  - `V(from T)` in a data type: the variant, and the `impl From[T]` that makes an error of type `T` into it. Not in a type with type parameters.
 - **Four things that cost time or memory for nothing.** Found by profiling a program that builds a tree of small maps and prints it; none is about that program.
   - A variable of a data type kept in line (an `Option`, a small tagged value) never moved at its last use: only strings, arrays, maps, structs and boxed values did. It was copied, and released at the end of its scope, so whatever it held had two holders meanwhile: a map inside one was copied before every write. Such a variable is now left with a tag no variant has, which its release passes over. `tests/copies/inline_moves.stn` copied its map 299 times and now never does.
   - The shortest text of a `Float` was searched from one digit up, printing and reading back as many as seventeen times. It starts at fifteen digits (six for an `F32`), which always hold a shorter decimal exactly, and drops trailing zeros; below the smallest normal number the full search is kept. The text is the same: 5.5 million values were compared with the old search.
