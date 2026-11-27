@@ -109,7 +109,7 @@ Not done yet:
   - `enumerate(xs)` pairs each element with its position, for `for (i, x) in enumerate(xs):`. It builds an array of the pairs, until iterators exist (milestone 3).
 - **Shorter forms (section 2.2).** Other ways to write a `match` or an impl, each defined by what it stands for. All are read by the parser as that, except the two marked.
   - `type T = struct:` with a field to a line.
-  - Array patterns, `[a, b]` for exactly two elements and `[a, b, ..]` for two or more, in any pattern (a pattern of their own in the checker, the interpreter and the C backend). A match on an array needs a `_` or `[..]` arm: the check does not yet see that `[]`, `[x]` and `[x, y, ..]` cover every array.
+  - Array patterns, `[a, b]` for exactly two elements and `[a, b, ..]` for two or more, in any pattern (a pattern of their own in the checker, the interpreter and the C backend). The arms of a match on an array are checked by length: `[]`, `[x]` and `[x, y, ..]` cover every array and need no `_` arm, a length that is left out is named in the error (`[_] is not matched`), and an arm that earlier ones already cover is refused (E0206).
   - `let PATTERN = e else ...`: the rest of the block is where the pattern matched; the else must leave (E0207).
   - `if PATTERN = e:` with an optional `else:`, and `while PATTERN = e:`. A condition with a `=` of its own, outside any brackets, binds; `let` may be written before the pattern. In these and in `let ... else`, a plain name or a tuple stands for what an option holds: `if v = m.get(k):` is `if Some(v) = m.get(k):`.
   - `a ?: b`: what the option `a` holds, or `b`, evaluated only then (typed as a match in the checker).

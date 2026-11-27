@@ -36,7 +36,6 @@ fn describe(xs: Array[Int]) -> Str:
         [0, ..] -> "starts with zero"
         [a, b] -> f"two: {a} {b}"
         [first, _, third, ..] -> f"long: {first} .. {third}"
-        _ -> "other"
 
 fn second(text: Str) -> Str:
     let [_, part, ..] = split(text, ",") else return "none"

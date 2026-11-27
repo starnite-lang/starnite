@@ -3,4 +3,4 @@ fn main() ! io:
     match [1, 2]:
         [] -> print("none")
         [x] -> print(f"{x}")
-        [x, y, ..] -> print(f"{x} {y}")
+        [x, y] -> print(f"{x} {y}")
