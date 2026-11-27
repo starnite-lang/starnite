@@ -1,0 +1,82 @@
+# A map or a set of up to eight entries has no index and hashes nothing: its entries are searched
+# in order. This crosses that size in both directions, with each kind of key, and checks what a
+# program can see of it: lookups, order, removal, equality, the set operators and copies.
+type Point = struct(x: Int, y: Int)
+
+fn show_ints(m: Map[Int, Int]) -> Str:
+    var parts: Array[Str] = []
+    for (k, v) in m:
+        parts.push(f"{k}:{v}")
+    join(parts, " ")
+
+fn main() ! io:
+    # Int keys: grow past eight, remove back below, grow again
+    var m: Map[Int, Int] = {}
+    for n in 0..20:
+        m[n * 7 % 23] = n
+        if n == 3 or n == 8 or n == 9 or n == 19:
+            print(f"{len(m)} | {show_ints(m)}")
+    for n in 0..20:
+        if n % 3 != 0:
+            let gone = m.remove(n * 7 % 23)
+            if n < 3:
+                print(f"removed {gone}")
+    print(f"{len(m)} | {show_ints(m)} | {m.get(0)} {m.get(7)} {m.contains(21)}")
+    for n in 30..36:
+        m[n] = n
+    print(f"{len(m)} | {show_ints(m)}")
+    # removal inside eight keeps the order of the rest; an update keeps the place
+    var small: Map[Str, Int] = {"a": 1, "b": 2, "c": 3, "d": 4}
+    let gone = small.remove("b")
+    small["a"] += 10
+    small["e"] = 5
+    small["b"] = 6
+    var order: Array[Str] = []
+    for (k, v) in small:
+        order.push(f"{k}{v}")
+    print(f"{gone} {join(order, " ")} {small.get("zz")} {small["c"]}")
+    # Str keys, long and short, past eight
+    var words: Map[Str, Int] = {}
+    for w in split("the quick brown fox jumps over the lazy dog and the quick cat naps a_longer_word_than_fifteen_bytes twice a_longer_word_than_fifteen_bytes", " "):
+        words[w] += 1
+    print(f"{len(words)} {words["the"]} {words["quick"]} {words["a_longer_word_than_fifteen_bytes"]} {words.get("none")}")
+    # struct keys, and sets on both sides of eight
+    var seen: Set[Point] = {}
+    for i in 0..12:
+        seen.add(Point(i % 5, i % 3))
+        seen.add(Point(i % 5, i % 3))
+    print(f"{len(seen)} {seen.contains(Point(4, 2))} {seen.contains(Point(9, 9))}")
+    let a: Set[Int] = {1, 2, 3}
+    var b: Set[Int] = {3, 4}
+    for i in 10..22:
+        b.add(i)
+    print(f"{len(a | b)} {len(a & b)} {len(a - b)} {len(b - a)} {len(b & a)} {(a | b) == (b | a)}")
+    let c: Set[Int] = {3, 2, 1}
+    print(f"{a == c} {a == b} {a | b == b | a} {len(a | c)} {len(a & c)} {len(a - c)}")
+    # equality whatever the sizes and the order of building
+    var p: Map[Int, Str] = {}
+    var q: Map[Int, Str] = {}
+    for i in 0..12:
+        p[i] = f"v{i}"
+        q[11 - i] = f"v{11 - i}"
+        if i == 5 or i == 11:
+            print(f"{p == q}")
+    for i in 4..12:
+        let x = p.remove(i)
+        let y = q.remove(i)
+    print(f"{p == q} {len(p)} {len(q)}")
+    # a copy is its own table, small or not
+    var first = {1: [1], 2: [2]}
+    var second = first
+    second[3] = [3]
+    first[1].push(9)
+    print(f"{len(first)} {len(second)} {first[1]} {second[1]}")
+    var big: Map[Int, Int] = {}
+    for i in 0..9:
+        big[i] = i
+    var other = big
+    let dropped = other.remove(4)
+    print(f"{len(big)} {len(other)} {big.get(4)} {other.get(4)}")
+    other.clear()
+    other[1] = 1
+    print(f"{len(other)} {other.get(1)} {len(big)}")

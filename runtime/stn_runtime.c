@@ -1311,8 +1311,9 @@ StnMap* stn_map_new(const StnMapOps* ops) {
 
 /* the hash word of an entry, stored or worked out again from its key */
 static inline uint64_t stn_entry_word(const StnMap* m, const char* e) {
-    if (m->koff) return *(const uint64_t*)e;
-    return stn_key_word(m->ops, e);
+    /* a small table (see STN_MAP_SMALL) has hashed nothing: its word is a mark, not a hash */
+    if (m->koff && m->ilog) return *(const uint64_t*)e;
+    return stn_key_word(m->ops, e + m->koff);
 }
 
 _Noreturn static void stn_map_oom(void) { fputs("trap: out of memory\n", stderr); exit(2); }
@@ -1376,9 +1377,14 @@ static uint32_t stn_map_ilog_for(int64_t n) {
 
 StnMap* stn_map_with_capacity(const StnMapOps* ops, int64_t n) {
     StnMap* m = stn_map_new(ops);
-    if (n > 0) {
+    if (n > STN_MAP_SMALL) {
         if (n > STN_MAX_ALLOC) stn_too_large("<runtime>", 0, 0);
         stn_map_rebuild(m, stn_map_ilog_for(n), n);
+    } else if (n > 0) {
+        /* small: entries only */
+        m->entries = (char*)malloc((size_t)n * m->stride);
+        if (!m->entries) stn_map_oom();
+        m->eroom = n;
     }
     return m;
 }
@@ -1410,13 +1416,17 @@ static void stn_map_copy_for_write(StnMap** pm) {
     StnMap* m = *pm;
     const StnMapOps* ops = m->ops;
     StnMap* c = stn_map_new(ops);
-    if (m->ilog) {
-        size_t ibytes = stn_index_bytes(m->ilog, stn_place_width(m->cap)), ebytes = (size_t)m->eroom * m->stride;
-        c->index = (uint8_t*)malloc(ibytes);
+    if (m->eroom) {
+        size_t ebytes = (size_t)m->eroom * m->stride;
         c->entries = (char*)malloc(ebytes);
-        if (!c->index || !c->entries) stn_map_oom();
-        memcpy(c->index, m->index, ibytes);
-        c->places = c->index + ((size_t)1 << m->ilog) + STN_GROUP;
+        if (!c->entries) stn_map_oom();
+        if (m->ilog) {
+            size_t ibytes = stn_index_bytes(m->ilog, stn_place_width(m->cap));
+            c->index = (uint8_t*)malloc(ibytes);
+            if (!c->index) stn_map_oom();
+            memcpy(c->index, m->index, ibytes);
+            c->places = c->index + ((size_t)1 << m->ilog) + STN_GROUP;
+        }
         memcpy(c->entries, m->entries, (size_t)m->used * m->stride);
         c->ilog = m->ilog; c->cap = m->cap; c->used = m->used; c->len = m->len; c->eroom = m->eroom;
         if (m->dead) {
@@ -1441,10 +1451,32 @@ static inline void stn_map_make_unique(StnMap** pm) {
 }
 void stn_map_make_unique_for_write(StnMap** pm) { stn_map_make_unique(pm); }
 
+/* A table of up to STN_MAP_SMALL entries has no index and has hashed nothing (ilog is 0). Its
+   entries are searched in order, which for so few is quicker than hashing the key, and a table
+   of a handful of entries is the buffer of them and no more. It has no removed entries: one that
+   is removed is closed up at once. The word where a larger table keeps the hash of an entry
+   holds 1, which only says the entry is there. The index is made, and every key hashed, when the
+   table outgrows this. */
+static inline char* stn_map_small_lookup(const StnMap* m, const void* key) {
+    const StnMapOps* ops = m->ops;
+    char* e = m->entries + m->koff;
+    for (int64_t i = 0; i < m->used; i++, e += m->stride)
+        if (stn_key_eq(ops, e, key)) return e - m->koff;
+    return NULL;
+}
+static inline char* stn_map_lookup(const StnMap* m, const void* key, uint64_t w, uint64_t* slot);
+/* the entry of the key, or NULL, hashing the key only for a table that has an index; *w is its
+   word then, for the append that may follow */
+static inline char* stn_map_seek(const StnMap* m, const void* key, uint64_t* w, uint64_t* slot) {
+    if (!m->ilog) return stn_map_small_lookup(m, key);
+    *w = stn_key_word(m->ops, key);
+    return stn_map_lookup(m, key, *w, slot);
+}
+
 /* The entry of the key, or NULL. When it is there and slot is given, *slot is the slot of the
    index that names it. */
 static inline char* stn_map_lookup(const StnMap* m, const void* key, uint64_t w, uint64_t* slot) {
-    if (__builtin_expect(!m->ilog, 0)) return NULL;
+    if (__builtin_expect(!m->ilog, 0)) return stn_map_small_lookup(m, key);
     const StnMapOps* ops = m->ops;
     const uint8_t* ctrl = m->index;
     unsigned width = stn_place_width(m->cap);
@@ -1469,16 +1501,42 @@ static inline char* stn_map_lookup(const StnMap* m, const void* key, uint64_t w,
 }
 
 void* stn_map_find(const StnMap* m, const void* key) {
-    char* e = stn_map_lookup(m, key, stn_key_word(m->ops, key), NULL);
+    uint64_t w = 0;
+    char* e = stn_map_seek(m, key, &w, NULL);
     return e ? e + m->voff : NULL;
 }
 
 /* Appends an entry for a key that is known to be absent, and returns it. */
 static inline char* stn_map_append(StnMap* m, uint64_t w, const void* key) {
+    if (!m->ilog) {
+        if (m->used < STN_MAP_SMALL) {
+            /* small: the next place in the buffer, and no index to tell */
+            if (m->used == m->eroom) {
+                int64_t eroom = m->eroom ? m->eroom * 2 : 4;
+                if (eroom > STN_MAP_SMALL) eroom = STN_MAP_SMALL;
+                char* entries = (char*)realloc(m->entries, (size_t)eroom * m->stride);
+                if (!entries) stn_map_oom();
+                m->entries = entries; m->eroom = eroom;
+            }
+            char* e = m->entries + (size_t)m->used * m->stride;
+            if (m->koff) *(uint64_t*)e = 1;
+            if (m->ops->ksize == 8) memcpy(e + m->koff, key, 8); else memcpy(e + m->koff, key, m->ops->ksize);
+            m->used++; m->len++;
+            return e;
+        }
+        /* outgrown: every key is hashed now, and the index made from the hashes */
+        if (m->koff)
+            for (int64_t i = 0; i < m->used; i++) {
+                char* e = m->entries + (size_t)i * m->stride;
+                *(uint64_t*)e = stn_key_word(m->ops, e + m->koff);
+            }
+        stn_map_rebuild(m, 4, 0);
+        w = stn_key_word(m->ops, key);
+    }
     if (__builtin_expect(m->used == m->cap, 0)) {
         if (m->len >= STN_MAX_ALLOC) stn_too_large("<runtime>", 0, 0);
         /* mostly tombstones: the same index, emptied of them; otherwise twice the index */
-        uint32_t ilog = !m->ilog ? 4 : (m->len * 2 <= m->cap ? m->ilog : m->ilog + 1);
+        uint32_t ilog = m->len * 2 <= m->cap ? m->ilog : m->ilog + 1;
         stn_map_rebuild(m, ilog, 0);
     }
     if (__builtin_expect(m->used == m->eroom, 0)) {
@@ -1503,8 +1561,8 @@ void* stn_map_slot(StnMap** pm, const void* key, int* fresh) {
     stn_map_make_unique(pm);
     StnMap* m = *pm;
     const StnMapOps* ops = m->ops;
-    uint64_t w = stn_key_word(ops, key);
-    char* e = stn_map_lookup(m, key, w, NULL);
+    uint64_t w = 0;
+    char* e = stn_map_seek(m, key, &w, NULL);
     if (e) {
         /* the key that is there stays; the one given is let go */
         if (ops->kdrop) ops->kdrop((void*)key);
@@ -1519,8 +1577,8 @@ void* stn_map_slot_ref(StnMap** pm, const void* key, int* fresh) {
     stn_map_make_unique(pm);
     StnMap* m = *pm;
     const StnMapOps* ops = m->ops;
-    uint64_t w = stn_key_word(ops, key);
-    char* e = stn_map_lookup(m, key, w, NULL);
+    uint64_t w = 0;
+    char* e = stn_map_seek(m, key, &w, NULL);
     if (e) { *fresh = 0; return e + m->voff; }
     *fresh = 1;
     e = stn_map_append(m, w, key);
@@ -1540,8 +1598,8 @@ void stn_map_put(StnMap** pm, const void* key, const void* value) {
 int stn_map_remove(StnMap** pm, const void* key, void* out) {
     StnMap* m = *pm;
     const StnMapOps* ops = m->ops;
-    uint64_t w = stn_key_word(ops, key), s = 0;
-    char* e = stn_map_lookup(m, key, w, &s);
+    uint64_t w = 0, s = 0;
+    char* e = stn_map_seek(m, key, &w, &s);
     if (!e) return 0;
     if (!stn_unique(m)) {
         stn_map_copy_for_write(pm);
@@ -1551,6 +1609,13 @@ int stn_map_remove(StnMap** pm, const void* key, void* out) {
     if (ops->kdrop) ops->kdrop(e + m->koff);
     if (out) { if (ops->vsize) memcpy(out, e + m->voff, ops->vsize); }
     else if (ops->vdrop) ops->vdrop(e + m->voff);
+    if (!m->ilog) {
+        /* small: the entries after it close up, in their order */
+        char* end = m->entries + (size_t)m->used * m->stride;
+        memmove(e, e + m->stride, (size_t)(end - (e + m->stride)));
+        m->used--; m->len--;
+        return 1;
+    }
     uint64_t mask = ((uint64_t)1 << m->ilog) - 1;
     if (m->koff) *(uint64_t*)e = 0;
     else {
@@ -1596,7 +1661,7 @@ int stn_map_eq(const StnMap* a, const StnMap* b) {
     const StnMapOps* ops = a->ops;
     int64_t pos = 0;
     for (const char* e; (e = stn_map_next(a, &pos)); ) {
-        const char* f = stn_map_lookup(b, e + a->koff, stn_entry_word(a, e), NULL);
+        const char* f = stn_map_lookup(b, e + a->koff, b->ilog ? stn_entry_word(a, e) : 0, NULL);
         if (!f) return 0;
         if (ops->vsize && !ops->veq(e + a->voff, f + b->voff)) return 0;
     }
@@ -1604,9 +1669,10 @@ int stn_map_eq(const StnMap* a, const StnMap* b) {
 }
 
 /* Adds the key of an entry of another set, which brings its hash with it. r is not shared. */
-static inline void stn_set_take(StnMap* r, const char* e) {
+static inline void stn_set_take(StnMap* r, const StnMap* from, const char* e) {
     const StnMapOps* ops = r->ops;
-    uint64_t w = stn_entry_word(r, e);
+    /* the hash the entry was stored with, where both tables have one; none where r is small */
+    uint64_t w = r->ilog ? stn_entry_word(from, e) : 0;
     if (stn_map_lookup(r, e + r->koff, w, NULL)) return;
     char* n = stn_map_append(r, w, e + r->koff);
     if (ops->kdup) ops->kdup(n + r->koff);
@@ -1615,9 +1681,9 @@ static inline void stn_set_take(StnMap* r, const char* e) {
 StnMap* stn_set_union(const StnMap* a, const StnMap* b) {
     StnMap* r = stn_map_with_capacity(a->ops, a->len > b->len ? a->len : b->len);
     int64_t pos = 0;
-    for (const char* e; (e = stn_map_next(a, &pos)); ) stn_set_take(r, e);
+    for (const char* e; (e = stn_map_next(a, &pos)); ) stn_set_take(r, a, e);
     pos = 0;
-    for (const char* e; (e = stn_map_next(b, &pos)); ) stn_set_take(r, e);
+    for (const char* e; (e = stn_map_next(b, &pos)); ) stn_set_take(r, b, e);
     return r;
 }
 
@@ -1625,7 +1691,7 @@ StnMap* stn_set_intersection(const StnMap* a, const StnMap* b) {
     StnMap* r = stn_map_new(a->ops);
     int64_t pos = 0;
     for (const char* e; (e = stn_map_next(a, &pos)); )
-        if (stn_map_lookup(b, e + a->koff, stn_entry_word(a, e), NULL)) stn_set_take(r, e);
+        if (stn_map_lookup(b, e + a->koff, b->ilog ? stn_entry_word(a, e) : 0, NULL)) stn_set_take(r, a, e);
     return r;
 }
 
@@ -1633,7 +1699,7 @@ StnMap* stn_set_difference(const StnMap* a, const StnMap* b) {
     StnMap* r = stn_map_new(a->ops);
     int64_t pos = 0;
     for (const char* e; (e = stn_map_next(a, &pos)); )
-        if (!stn_map_lookup(b, e + a->koff, stn_entry_word(a, e), NULL)) stn_set_take(r, e);
+        if (!stn_map_lookup(b, e + a->koff, b->ilog ? stn_entry_word(a, e) : 0, NULL)) stn_set_take(r, a, e);
     return r;
 }
 

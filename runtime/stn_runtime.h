@@ -641,6 +641,9 @@ typedef struct StnMapOps {
 #define STN_KEY_I64 1
 #define STN_KEY_STR 2
 
+/* a table of this many entries or fewer has no index and hashes nothing: see stn_runtime.c */
+#define STN_MAP_SMALL 8
+
 typedef struct StnMap {
     stn_header h;
     int64_t len;          /* live entries */
@@ -754,7 +757,12 @@ static inline uint64_t stn_hash_combine(uint64_t h, uint64_t x) { return stn_has
 /* stn_map_find for a table whose keys are 64-bit integers (STN_KEY_I64), inline: the layout of
    the index is the one stn_runtime.c describes. */
 static inline void* stn_map_find_i64(const StnMap* m, uint64_t key) {
-    if (__builtin_expect(!m->ilog, 0)) return NULL;
+    if (!m->ilog) {
+        /* small: the few entries there are, in order */
+        char* e = m->entries;
+        for (int64_t i = 0; i < m->used; i++, e += m->stride) { uint64_t k; memcpy(&k, e, 8); if (k == key) return e + m->voff; }
+        return NULL;
+    }
     uint64_t h = stn_hash_u64(key);
     uint64_t w = h | (uint64_t)(h == 0);
     uint64_t mask = ((uint64_t)1 << m->ilog) - 1, pos = (w >> 7) & mask, step = 0;
@@ -796,7 +804,12 @@ static inline void* stn_map_find_i64(const StnMap* m, uint64_t key) {
 /* stn_map_find for a table whose keys are Str (STN_KEY_STR), inline. An inline key, or the very
    string the table holds, is compared as two words. */
 static inline void* stn_map_find_str(const StnMap* m, StnStr key) {
-    if (__builtin_expect(!m->ilog, 0)) return NULL;
+    if (!m->ilog) {
+        /* small: the few entries there are, in order */
+        char* e = m->entries;
+        for (int64_t i = 0; i < m->used; i++, e += m->stride) if (stn_str_eq(*(const StnStr*)(e + 8), key)) return e + m->voff;
+        return NULL;
+    }
     uint64_t h = stn_str_hash(key);
     uint64_t w = h | (uint64_t)(h == 0);
     uint64_t mask = ((uint64_t)1 << m->ilog) - 1, pos = (w >> 7) & mask, step = 0;
