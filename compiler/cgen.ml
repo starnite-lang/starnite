@@ -681,9 +681,27 @@ let u_ahead : (int, unit) Hashtbl.t = Hashtbl.create 8
    how many it was declared inside *)
 let u_depth = ref 0
 let u_decl_depth : (int, int) Hashtbl.t = Hashtbl.create 32
+(* Results that are unique without being declared so (section 6.2). A function that is not
+   exported is taken to return a unique value when every value it returns has no other holder,
+   given the same of the functions it calls. That is found before any code is kept: the program
+   is generated with every candidate assumed unique, the ones that return something that may be
+   shared are struck out, and it is generated again, until a whole pass strikes out none. *)
+let u_inferred : (string, unit) Hashtbl.t = Hashtbl.create 32
+let u_inferring = ref false                       (* a pass that only finds which candidates fail *)
+let u_failed : (string, unit) Hashtbl.t = Hashtbl.create 32
+let u_cur_fn = ref ""                             (* the function being generated *)
+let u_declared = ref false                        (* and whether it is declared -> unique *)
+(* The same for take parameters: one of a function that is not exported, not a method and never
+   used as a value is taken to be unique when every call hands it a value with no other holder.
+   A call that does not strikes the parameter out; it is never copied for. *)
+let u_inferred_params : (string * int, unit) Hashtbl.t = Hashtbl.create 32
+let u_failed_params : (string * int, unit) Hashtbl.t = Hashtbl.create 32
+let u_dps_soft : (int, string * int) Hashtbl.t = Hashtbl.create 4   (* such parameters of the function being generated *)
+let u_ret_unique (uname : string) (sg : fsig) =
+  sg.slend = None && (sg.sruniq || Hashtbl.mem u_inferred uname)
 let u_reset () =
   Hashtbl.reset u_ahead; Hashtbl.reset u_decl_depth; u_depth := 0;
-  Hashtbl.reset u_vars; Hashtbl.reset u_views; Hashtbl.reset u_home; Hashtbl.reset u_must; Hashtbl.reset u_dps_needs; u_fresh := []; u_returns := false
+  Hashtbl.reset u_vars; Hashtbl.reset u_views; Hashtbl.reset u_home; Hashtbl.reset u_must; Hashtbl.reset u_dps_needs; Hashtbl.reset u_dps_soft; u_fresh := []; u_returns := false
 
 let line fc fmt =
   Printf.ksprintf (fun s ->
@@ -1080,7 +1098,7 @@ let rec expr fc (e : texpr) : r =
       | XTuple es | XArray es | XStruct (_, _, es) | XVariant (_, _, _, es) -> List.for_all (u_is_fresh fc) es
       | XCall (CBuiltin ("copy@T", _), _, _) -> true
       | XCall (CBuiltin (("filled@Int" | "repeat@Array" | "chars@Str" | "split@Str"), _), _, _) -> flat fc.st (ts fc e.ty)
-      | XCall (CFn (u, _), _, _) -> let sg = (Hashtbl.find fc.st.prog.fns u).fsig in sg.sruniq && sg.slend = None
+      | XCall (CFn (u, _), _, _) -> u_ret_unique u (Hashtbl.find fc.st.prog.fns u).fsig
       | XIf (_, a, b) -> u_is_fresh fc a && u_is_fresh fc b
       | XBlock (_, v) -> u_is_fresh fc v
       | XMatch (_, arms) -> List.for_all (fun (a : tarm) -> u_is_fresh fc a.body) arms
@@ -1464,15 +1482,27 @@ and u_result fc (e : texpr) =
     | XIf (_, a, b) -> first (List.filter (fun y -> not (u_is_fresh fc y)) [ a; b ])
     | XMatch (_, arms) -> first (List.filter (fun y -> not (u_is_fresh fc y)) (List.map (fun (a : tarm) -> a.body) arms))
     | _ -> x.l in
+  if !u_returns && not (u_is_fresh fc e) && not !u_declared then begin
+    (* a result that was only taken to be unique: the function is struck out, and the pass goes on *)
+    if !u_inferring then Hashtbl.replace u_failed !u_cur_fn ()
+    else failwith (Printf.sprintf "uniqueness: the result of '%s' was inferred to be unique and is not (%s:%d:%d)" !u_cur_fn e.l.file e.l.line e.l.col)
+  end else
   if !u_returns && not (u_is_fresh fc e) then
     raise (Syntax.Error ("E0606", blame e,
       "the function is declared to return a unique value, and this one may be shared, or the compiler cannot tell that it is not; build it here, or return copy(...) of it"))
 
-and u_argument fc (a : texpr) (what : string) : string =
+and u_argument ?soft fc (a : texpr) (what : string) : string =
   (* the argument of a parameter that must be unique: handed over as it is when it has no other
      holder, and copied first when it may have one (section 6.2) *)
   let st = fc.st in
   let x = expr fc a in
+  if soft <> None && not (u_is_fresh fc a) then begin
+    (* the parameter was only taken to be unique: this call strikes it out, and nothing is copied *)
+    let key = Option.get soft in
+    if !u_inferring then Hashtbl.replace u_failed_params key ()
+    else failwith (Printf.sprintf "uniqueness: a parameter of '%s' was inferred to be unique and is handed a value that may be shared (%s:%d:%d)" (fst key) a.l.file a.l.line a.l.col);
+    tmp fc a.ty (own fc x a.ty)
+  end else
   if u_is_fresh fc a then begin
     let v = tmp fc a.ty (own fc x a.ty) in
     if is_box st (ts fc a.ty) then line fc "STN_ASSUME_UNIQUE(%s);" v;
@@ -1489,7 +1519,7 @@ and u_argument fc (a : texpr) (what : string) : string =
     c
   end
 
-and args_c ?(needs : bool list = []) ?(callee = "the function") fc (params : (mode * ty) list) (targs : targ list) : string list =
+and args_c ?(needs : bool list = []) ?(soft : (string * int) option list = []) ?(callee = "the function") fc (params : (mode * ty) list) (targs : targ list) : string list =
   (* Arguments are evaluated left to right (section 4.4). A read-only argument is a C expression
      that is read when the call is made, after the arguments that follow it have run; when it
      names something they can change, a variable declared with var or a place inside one, and
@@ -1507,14 +1537,15 @@ and args_c ?(needs : bool list = []) ?(callee = "the function") fc (params : (mo
     | x :: rest -> (x, rest) :: with_later rest in
   let needs = if List.length needs = List.length params then needs else List.map (fun _ -> false) params in
   let what = Printf.sprintf "a unique parameter of %s" callee in
+  let soft = if List.length soft = List.length params then soft else List.map (fun _ -> None) params in
   arg_strings fc
     (List.map2
-       (fun need (((m, pt), ta), later) ->
+       (fun (need, soft) (((m, pt), ta), later) ->
          match m with
          | MMut when need && not (match u_base ta.a with Some r -> Hashtbl.mem u_vars r.vid | None -> false) ->
              raise (Syntax.Error ("E0607", ta.a.l, Printf.sprintf
                "%s is 'mut ...: unique', and this may be shared: it must be a variable, or a place in one, whose value nothing else holds" what))
-         | MTake when need -> `Arg (u_argument fc ta.a what)
+         | MTake when need -> `Arg (u_argument ?soft fc ta.a what)
          | MMut ->
              let finish = place_deferred_of_expr fc ta.a in
              hold_busy fc ta.a;
@@ -1530,7 +1561,7 @@ and args_c ?(needs : bool list = []) ?(callee = "the function") fc (params : (mo
                  `Arg held
                end else `Arg (tmp fc ta.a.ty x.c)
              end else `Arg (borrow fc x ta.a.ty))
-       needs
+       (List.combine needs soft)
        (with_later (List.combine params targs)))
 
 and call fc (e : texpr) (cl : callee) (targs : targ list) convs : r =
@@ -1719,7 +1750,7 @@ and call_instance fc (e : texpr) uname tys (sg : fsig) targs convs : r =
     line fc "%s* %s = %s(%s);" (ct fc t) p name (String.concat ", " avs);
     { c = "(*" ^ p ^ ")"; owned = false }
   end else
-  let avs = args_c ~needs:(u_needs fc uname sg tys) ~callee:(Printf.sprintf "'%s'" (if sg.sdisplay = "" then sg.sname else sg.sdisplay)) fc ps targs in
+  let avs = args_c ~needs:(u_needs fc uname sg tys) ~soft:(u_soft uname sg) ~callee:(Printf.sprintf "'%s'" (if sg.sdisplay = "" then sg.sname else sg.sdisplay)) fc ps targs in
   if sig_can_fail sg then begin
     let res = fresh st "_r" and ev = fresh st "_e" in
     line fc "%s %s; StnError %s;" (ct fc t) res ev;
@@ -2238,7 +2269,8 @@ and dps_next fc (params : (var * mode * ty) list) (call : texpr) : (string * str
       List.concat
         (List.map2 (fun ((v : var), m, pt) (a : targ) ->
              match m with
-             | MTake when Hashtbl.mem u_dps_needs v.vid -> [ (var_name v, u_argument fc a.a "a unique parameter of this function") ]
+             | MTake when Hashtbl.mem u_dps_needs v.vid ->
+                 [ (var_name v, u_argument ?soft:(Hashtbl.find_opt u_dps_soft v.vid) fc a.a "a unique parameter of this function") ]
              | MTake -> [ (var_name v, tmp fc pt (own fc (expr fc a.a) a.a.ty)) ]
              | MBorrow when not (needs_rc st pt) -> [ (var_name v, tmp fc pt (expr fc a.a).c) ]
              | _ -> [])
@@ -3460,7 +3492,7 @@ and u_gives fc (e : texpr) : bool =
       | XVar v -> u_known v && Hashtbl.mem u_vars v.vid && (moves fc e v || u_will_move fc e v)
       | XTuple es | XArray es | XStruct (_, _, es) | XVariant (_, _, _, es) -> List.for_all (u_gives fc) es
       | XCall (CBuiltin ("copy@T", _), _, _) -> true
-      | XCall (CFn (u, _), _, _) -> let sg = (Hashtbl.find fc.st.prog.fns u).fsig in sg.sruniq && sg.slend = None
+      | XCall (CFn (u, _), _, _) -> u_ret_unique u (Hashtbl.find fc.st.prog.fns u).fsig
       | _ -> false)
 
 (* For a variable that the body of a loop declares, read before the body's code is written: whether
@@ -3481,7 +3513,16 @@ and u_needs fc (uname : string) (sg : fsig) (tys : ty list) : bool list =
   List.mapi (fun i (m, _, pt, _) ->
       not (Hashtbl.mem st.demoted (uname, i))
       && boxy st (subst s pt)
-      && ((try List.nth sg.suniq i with _ -> false) || (m = MTake && List.mem "inplace" sg.smods)))
+      && ((try List.nth sg.suniq i with _ -> false) || (m = MTake && List.mem "inplace" sg.smods)
+          || (m = MTake && Hashtbl.mem u_inferred_params (uname, i))))
+    sg.sparams
+
+(* the parameters among those that are unique only by inference, as (function, position) *)
+and u_soft (uname : string) (sg : fsig) : (string * int) option list =
+  List.mapi (fun i (m, _, _, _) ->
+      if m = MTake && Hashtbl.mem u_inferred_params (uname, i)
+         && not ((try List.nth sg.suniq i with _ -> false) || List.mem "inplace" sg.smods)
+      then Some (uname, i) else None)
     sg.sparams
 
 (* Reads a statement or an expression before its code is written, and ends the uniqueness of every
@@ -3605,7 +3646,7 @@ and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr o
       let mode i m = if Hashtbl.mem st.demoted (uname, i) then MBorrow else m in
       let uniq i = try List.nth sg.suniq i with _ -> false in
       (* a result that holds a closure or an `any` value can hold whatever the function was given *)
-      let safe = (not (sig_can_fail sg)) && (not code) && sg.slend = None && ((not result_boxy) || sg.sruniq)
+      let safe = (not (sig_can_fail sg)) && (not code) && sg.slend = None && ((not result_boxy) || u_ret_unique uname sg)
                  && not (has_code st (ts fc e.ty)) in
       let modes = List.mapi (fun i (m, _, _, _) -> mode i m) sg.sparams in
       let all_mut_unique = List.for_all2 (fun i m -> m <> MMut || uniq i) (List.init (List.length modes) Fun.id) modes in
@@ -4649,7 +4690,8 @@ let compile_instance st cname uname tys =
     st.names := (cname, (if sg.sdisplay = "" then sg.sname else sg.sdisplay)) :: !(st.names);
     st.marking := false in
   u_reset ();
-  u_returns := sg.sruniq && sg.slend = None && boxy st ret;
+  u_returns := u_ret_unique uname sg && boxy st ret;
+  u_cur_fn := uname; u_declared := sg.sruniq;
   note_self_sliced st tf.fbody;
   st.movable := [];
   note_moves st (List.filter_map (fun (v, m, _) -> if m = MTake then Some v else None) params) tf.fbody;
@@ -4695,10 +4737,11 @@ let compile_instance st cname uname tys =
     params;
   (* the parameters that are handed a value with no other holder (section 6.2) *)
   if not lend then
-    List.iter2 (fun ((v : var), m, _) need ->
+    List.iteri (fun i (((v : var), m, _), need) ->
         u_declare fc v;
         if need then begin
           u_add fc v;
+          (match List.nth (u_soft uname sg) i with Some key -> Hashtbl.replace u_dps_soft v.vid key | None -> ());
           if Hashtbl.mem u_vars v.vid then begin
             if m = MMut then Hashtbl.replace u_must v.vid v.vname else Hashtbl.replace u_dps_needs v.vid ()
           end else if m = MMut then
@@ -4706,7 +4749,7 @@ let compile_instance st cname uname tys =
             raise (Syntax.Error ("E0608", sg.sloc, Printf.sprintf
               "'%s' is declared 'mut %s: unique', and a function inside this one captures it, so the compiler cannot tell that it stays unique" v.vname v.vname))
         end)
-      params (u_needs fc uname sg tys);
+      (List.combine params (u_needs fc uname sg tys));
   if lend then begin
     (* every path ends in a lend statement, which returns; the checker proved it *)
     discard fc tf.fbody;
@@ -4927,6 +4970,43 @@ let verify_text st =
   ^ String.concat "" (Hashtbl.fold (fun name _ acc -> match Hashtbl.find_opt st.entry_defs name with Some (_, def) -> def :: acc | None -> acc) st.entries [])
 
 let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~debug : string =
+  if not !u_inferring then begin
+    (* which results are unique without being declared so: see u_inferred *)
+    Hashtbl.reset u_inferred;
+    let main_u = match prog.main with Some m -> m | None -> "" in
+    Hashtbl.iter (fun u (f : tfn) ->
+        let sg = f.fsig in
+        if (not sg.sexport) && sg.slend = None && (not sg.sruniq) && u <> main_u
+           && (match repr sg.sret with TUnit | TNever | TInt _ | TFloat | TF32 | TBool | TChar | TStr | TDur | TBytes -> false | _ -> true)
+        then Hashtbl.replace u_inferred u ()) prog.fns;
+    Hashtbl.reset u_inferred_params;
+    let methods = Hashtbl.create 32 and valued = Hashtbl.create 32 in
+    List.iter (fun (im : impl_info) -> List.iter (fun (_, g) -> Hashtbl.replace methods g ()) im.imethods_) prog.impls;
+    List.iter (walk_texpr (fun (x : texpr) -> match x.e with XFnRef (u, _) -> Hashtbl.replace valued u () | _ -> ()) (fun _ -> ()))
+      (Hashtbl.fold (fun _ (f : tfn) acc -> f.fbody :: acc) prog.fns []
+       @ List.map (fun (_, b, _, _, _) -> b) prog.tests @ List.map (fun (l : lambda) -> l.lbody) prog.lambdas);
+    Hashtbl.iter (fun u (f : tfn) ->
+        let sg = f.fsig in
+        if (not sg.sexport) && sg.slend = None && u <> main_u && not (Hashtbl.mem methods u) && not (Hashtbl.mem valued u) then
+          List.iteri (fun i ((v : var), (m, _, _, _)) ->
+              if m = MTake && not v.vcell && not v.vcaptured then Hashtbl.replace u_inferred_params (u, i) ())
+            (List.combine f.fparams sg.sparams)) prog.fns;
+    u_inferring := true;
+    let rec pass n =
+      if Hashtbl.length u_inferred + Hashtbl.length u_inferred_params > 0 then begin
+        Hashtbl.reset u_failed; Hashtbl.reset u_failed_params;
+        (* an error of the program ends the search: nothing is inferred, and the error is
+           reported by the generation that follows *)
+        let ok = (try ignore (emit ~check_only ~profile prog ~debug); true with Exit -> true | _ -> false) in
+        if not ok || n = 0 then (Hashtbl.reset u_inferred; Hashtbl.reset u_inferred_params)
+        else if Hashtbl.length u_failed + Hashtbl.length u_failed_params > 0 then begin
+          Hashtbl.iter (fun u () -> Hashtbl.remove u_inferred u) u_failed;
+          Hashtbl.iter (fun k () -> Hashtbl.remove u_inferred_params k) u_failed_params;
+          pass (n - 1)
+        end
+      end in
+    Fun.protect ~finally:(fun () -> u_inferring := false) (fun () -> pass 12)
+  end;
   let st = {
     prog; fwd = Buffer.create 1024; typedefs = Buffer.create 4096; boxed_bodies = Buffer.create 1024;
     protos = Buffer.create 4096; helpers = Buffer.create 4096; funcs = Buffer.create 16384;
@@ -4953,7 +5033,7 @@ let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~d
         drain ()
       end in
     drain ();
-    Verify.run ~records:!(st.records) ~names:!(st.names) ~text:(verify_text st);
+    if not !u_inferring then Verify.run ~records:!(st.records) ~names:!(st.names) ~text:(verify_text st);
     Option.iter (fun out -> out := Verify.explain ~records:!(st.records) ~helpers:(Buffer.contents st.helpers) ~copies:!u_copies) explain;
     raise Exit
   end;
@@ -4978,7 +5058,7 @@ let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~d
   drain ();
   flush_boxed st;
   ignore show_err;
-  Verify.run ~records:!(st.records) ~names:!(st.names) ~text:(verify_text st);
+  if not !u_inferring then Verify.run ~records:!(st.records) ~names:!(st.names) ~text:(verify_text st);
   Option.iter (fun out -> out := Verify.explain ~records:!(st.records) ~helpers:(Buffer.contents st.helpers) ~copies:!u_copies) explain;
   let out = Buffer.create 65536 in
   pr out "/* Generated by the Starnite compiler. */\n";

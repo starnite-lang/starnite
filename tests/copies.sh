@@ -32,6 +32,15 @@ check "take demotion" "$here/copies/take_demotion.profile"
 check "explain unique" "$here/copies/unique.explain"
 "$starnite" check --no-implicit-copies tests/copies/unique.stn > "$tmp/out" 2>&1; echo "exit $?" >> "$tmp/out"
 check "no implicit copies" "$here/copies/unique.refused"
+# uniqueness that is inferred (section 6.2): in tests/run/unique_inferred.stn, which never says
+# `unique`, the functions whose every call hands over a unique value make no test, and the one
+# that a call hands a shared value keeps its test
+"$starnite" emit-c --release tests/run/unique_inferred.stn > "$tmp/inferred.c" 2>&1
+for f in double negate grown; do
+    body=$(awk "/^STN_HOT static inline .* [a-z_0-9]*${f}[a-z_0-9]*\\(/,/^}/" "$tmp/inferred.c")
+    echo "$f: $(printf '%s\n' "$body" | grep -c 'stn_unique(\|stn_array_make_unique') tested, $(printf '%s\n' "$body" | grep -c 'STN_ASSUME_UNIQUE') left out"
+done > "$tmp/out"
+check "inferred" "$here/copies/inferred.expected"
 # a program that copies nothing says so, and the flags change nothing else it prints
 "$starnite" run --profile-copies tests/run/basics.stn < /dev/null > "$tmp/out" 2>/dev/null; echo "exit $?" >> "$tmp/out"
 check "output unchanged" "$here/run/basics.out"
