@@ -655,7 +655,8 @@ typedef struct StnMap {
                              whose hash is worked out again when it is needed */
     uint32_t voff;        /* offset of the value in an entry */
     const StnMapOps* ops;
-    uint8_t* index;       /* the control bytes of the slots, then the places they name */
+    uint8_t* index;       /* the control bytes of the slots, then the places they name; NULL while the table is small.
+                             A modest index is the front of one block with the entries: see stn_runtime.c */
     uint8_t* places;
     char* entries;
     uint64_t* dead;       /* with no hash word: a bit for each removed entry, or NULL when there is none */
