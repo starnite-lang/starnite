@@ -1,0 +1,149 @@
+# CSV to JSON. A header names where each column goes: `address.geo.lat` nests objects,
+# and a name that ends in `[]` holds a list, its cell split on `;`. Each cell becomes null, a
+# Bool, an Int, a Float or a string, whichever it reads as. Reads standard input, or the sample
+# below when there is none.
+type Json =
+    JNull
+  | JBool(value: Bool)
+  | JInt(value: Int)
+  | JNum(value: Float)
+  | JText(value: Str)
+  | JList(items: Array[Json])
+  | JObject(fields: Map[Str, Json])
+
+type Column = struct:
+    path: Array[Str]
+    is_list: Bool
+
+type CsvError = Ragged(line: Int, found: Int, wanted: Int) | NoHeader
+
+let sample = "id,name,active,score,address.city,address.geo.lat,address.geo.lon,tags[],limits.daily[]\n1,Ada,true,9.5,London,51.5,-0.12,math;engines,10;20;30\n2,\"Hopper, Grace\",false,,Arlington,38.88,-77.1,navy;\"compilers\",\n3,Linus,true,7,Helsinki,60.17,24.94,,5\n"
+
+# ---- reading cells ----
+
+# the fields of one line: split on every comma, or read character by character when a
+# field is quoted, since a quoted field may hold commas and doubled quotes
+fn fields_of(line: Str) -> Array[Str]:
+    if not contains(line, "\""):
+        return split(line, ",")
+    var out: Array[Str] = []
+    var cur = ""
+    var quoted = false
+    let cs = chars(line)
+    var i = 0
+    while i < len(cs):
+        let c = cs[i]
+        if quoted:
+            if c != '"':
+                cur += c
+            elif i + 1 < len(cs) and cs[i + 1] == '"':
+                cur += c
+                i += 1
+            else:
+                quoted = false
+        elif c == '"':
+            quoted = true
+        elif c == ',':
+            out.push(cur)
+            cur = ""
+        else:
+            cur += c
+        i += 1
+    out.push(cur)
+    out
+
+# what a cell is, from how it reads
+fn value_of(cell: Str) -> Json:
+    let text = trim(cell)
+    if text == "":
+        return JNull
+    if text == "true" or text == "false":
+        return JBool(text == "true")
+    if n = to_int(text):
+        return JInt(n)
+    if x = to_float(text):
+        return JNum(x)
+    JText(text)
+
+fn column_of(name: Str) -> Column:
+    let text = trim(name)
+    if ends_with(text, "[]"):
+        return Column(split(text[0..len(text) - 2], "."), true)
+    Column(split(text, "."), false)
+
+# ---- building the tree ----
+
+# node with value put at path[at..], making the objects on the way
+fn placed(take node: Json, path: Array[Str], at: Int, take value: Json) -> Json:
+    if at == len(path):
+        return value
+    var fields: Map[Str, Json] = {}
+    if JObject(existing) = node:
+        fields = existing
+    let key = path[at]
+    let child = fields.remove(key) ?: JNull
+    fields[key] = placed(take child, path, at + 1, take value)
+    JObject(fields)
+
+fn record_of(columns: Array[Column], cells: Array[Str]) -> Json:
+    var record = JObject({})
+    for (i, column) in enumerate(columns):
+        var value = value_of(cells[i])
+        if column.is_list:
+            value = JList([value_of(part) for part in fields_of(join(split(cells[i], ";"), ",")) if trim(part) != ""])
+        record = placed(take record, column.path, 0, take value)
+    record
+
+fn parse(text: Str) -> Json ! CsvError:
+    let [header, ..] = lines(text) else fail(NoHeader)
+    let columns = [column_of(name) for name in fields_of(header)]
+    var records: Array[Json] = []
+    for (i, line) in enumerate(lines(text)):
+        if i == 0 or trim(line) == "":
+            continue
+        let cells = fields_of(line)
+        if len(cells) != len(columns):
+            fail(Ragged(i + 1, len(cells), len(columns)))
+        records.push(record_of(columns, cells))
+    JList(records)
+
+# ---- writing JSON ----
+
+fn quoted(text: Str) -> Str:
+    var out = "\""
+    for c in chars(text):
+        if c == '"':
+            out = out + "\\\""
+        elif c == '\\':
+            out = out + "\\\\"
+        else:
+            out += c
+    out + '"'
+
+fn render(json: Json, depth: Int) -> Str:
+    let pad = repeat("  ", depth + 1)
+    let close = repeat("  ", depth)
+    match json:
+        JNull -> "null"
+        JBool(b) -> if b: "true" else: "false"
+        JInt(n) -> f"{n}"
+        JNum(x) -> f"{x}"
+        JText(s) -> quoted(s)
+        JList([]) -> "[]"
+        JList(items) ->
+            let parts = [pad + render(item, depth + 1) for item in items]
+            "[\n" + join(parts, ",\n") + "\n" + close + "]"
+        JObject(fields) ->
+            if len(fields) == 0:
+                return "{}"
+            let parts = [pad + quoted(key) + ": " + render(value, depth + 1) for (key, value) in fields]
+            "{\n" + join(parts, ",\n") + "\n" + close + "}"
+
+fn main() ! io:
+    let input = read_all()
+    try:
+        print(render(parse(if trim(input) == "": sample else: input), 0))
+    catch Ragged(line, found, wanted):
+        print(f"line {line}: {found} fields, the header has {wanted}")
+    catch NoHeader:
+        print("no header line")
