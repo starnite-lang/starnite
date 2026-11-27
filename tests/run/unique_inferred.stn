@@ -1,0 +1,74 @@
+# Uniqueness that is not written (section 6.2). A function that is not exported is taken to return
+# a unique value when everything it returns has no other holder, and its take parameters are
+# taken to be unique when every call hands them such a value. Nothing here says `unique`: the
+# inplace functions below still pass their check when one is handed the other's result, and a
+# parameter that one call hands a shared value is an ordinary parameter again.
+type List = Nil | Cons(head: Int, tail: List)
+
+fn range_list(n: Int) -> List:
+    var out = Nil
+    var i = n
+    while i > 0:
+        out = Cons(i, take out)
+        i -= 1
+    out
+
+inplace fn bump(take xs: List, by: Int) -> List:
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) -> Cons(x + by, bump(take rest, by))
+
+inplace fn keep_even(take xs: List) -> List:
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) ->
+            if x % 2 == 0:
+                Cons(x, keep_even(take rest))
+            else:
+                keep_even(take rest)
+
+inplace fn bump_evens(take xs: List, by: Int) -> List:
+    bump(keep_even(take xs), by)
+
+# every call hands this a list nothing else holds: it is taken apart with no test
+fn double(take xs: List) -> List:
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) -> Cons(x * 2, double(take rest))
+
+# one call hands this a list that is still used: it tests, and copies the cells it must
+fn negate(take xs: List) -> List:
+    match xs:
+        Nil -> Nil
+        Cons(x, rest) -> Cons(0 - x, negate(take rest))
+
+fn sum(xs: List) -> Int:
+    match xs:
+        Nil -> 0
+        Cons(x, rest) -> x + sum(rest)
+
+fn build(n: Int) -> Array[Int]:
+    var out = []
+    for i in 0..n:
+        out.push(i)
+    out
+
+fn grown(take xs: Array[Int]) -> Array[Int]:
+    var ys = xs
+    ys[0] = 100
+    ys.push(7)
+    ys
+
+fn same(xs: Array[Int]) -> Array[Int]:
+    xs
+
+fn main() ! io:
+    print(f"{sum(bump_evens(range_list(6), 10))} {sum(double(double(range_list(4))))}")
+    let kept = range_list(3)
+    let other = negate(kept)
+    print(f"{sum(kept)} {sum(other)} {sum(negate(range_list(3)))}")
+    var a = grown(build(3))
+    a[1] = 50
+    let b = same(a)
+    a[2] = 60
+    print(f"{a} {b}")
