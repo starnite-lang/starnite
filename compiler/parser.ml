@@ -175,6 +175,19 @@ let rec parse_pattern st : pattern =
        | INT s -> advance st; mk (PNeg (LInt s))
        | FLOAT f -> advance st; mk (PNeg (LFloat f))
        | _ -> unexpected st "a number")
+  | OP "[" ->
+      (* [a, b]: an array of exactly these elements; [a, b, ..]: one that starts with them *)
+      advance st;
+      let rec items acc =
+        if is_op st "]" then (List.rev acc, false)
+        else if is_op st ".." then (advance st; (List.rev acc, true))
+        else begin
+          let p = parse_pattern st in
+          if accept_op st "," then items (p :: acc) else (List.rev (p :: acc), false)
+        end in
+      let ps, rest = items [] in
+      expect_op st "]";
+      mk (PArray (ps, rest))
   | OP "(" ->
       advance st;
       let ps = comma_list st ")" parse_pattern in
@@ -227,7 +240,10 @@ and parse_param ?(lambda = false) st =
 and parse_or st =
   let l = loc st in
   let rec go lhs =
-    if is_kw st "or" then (advance st; go (mk (Binop ("or", lhs, parse_and st)) l)) else lhs
+    if is_kw st "or" then (advance st; go (mk (Binop ("or", lhs, parse_and st)) l))
+    (* a ?: b, right to left: what the option holds, or b, which is evaluated only then *)
+    else if is_op st "?" && peek_at st 1 = OP ":" then (advance st; advance st; mk (Elvis (lhs, parse_expr st)) l)
+    else lhs
   in
   go (parse_and st)
 
@@ -465,6 +481,19 @@ let rec parse_block st : block =
         | DEDENT -> advance st; List.rev acc
         | NEWLINE -> advance st; go acc
         | EOF -> List.rev acc
+        | KW "let" ->
+            (* `let PATTERN = e else ...`: what follows in the block is where the pattern matched *)
+            let l = loc st in
+            let s = parse_simple st in
+            (match s.s with
+             | Let (p, None, e) when is_kw st "else" ->
+                 advance st;
+                 let els = if accept_op st ":" then parse_block st else (let x = parse_simple st in expect_newline st; [ x ]) in
+                 let rest = go [] in
+                 let wild = { p = PWild; ploc_ = l } in
+                 List.rev ({ s = Match (e, [ { apat = p; aguard = None; abody = rest; arm_loc = l; amust_leave = false };
+                                             { apat = wild; aguard = None; abody = els; arm_loc = l; amust_leave = true } ]); sloc = l } :: acc)
+             | _ -> expect_newline st; go (s :: acc))
         | _ -> go (parse_stmt st :: acc)
       in
       go []
@@ -479,6 +508,44 @@ and parse_stmt st : stmt =
   let l = loc st in
   let mks s = { s; sloc = l } in
   match peek st with
+  | KW "if" when peek_at st 1 = KW "let" ->
+      (* `if let PATTERN = e:` runs its block where the pattern matches, and the else where it does not *)
+      advance st; advance st;
+      let p = parse_pattern st in
+      expect_op st "=";
+      let e = parse_expr st in
+      expect_op st ":";
+      let b = parse_block st in
+      let els = if accept_kw st "else" then (expect_op st ":"; parse_block st) else [] in
+      mks (Match (e, [ { apat = p; aguard = None; abody = b; arm_loc = l; amust_leave = false };
+                       { apat = { p = PWild; ploc_ = l }; aguard = None; abody = els; arm_loc = l; amust_leave = false } ]))
+  | KW "try" when peek_at st 1 = OP ":" ->
+      (* try: block, then `catch PATTERN:` blocks for its errors. An error no catch names goes on
+         to the caller, as it would with no try. *)
+      advance st; advance st;
+      let body = parse_block st in
+      let pat p = { p; ploc_ = l } in
+      let rec catches acc =
+        if is_ident st "catch" then begin
+          let cl = loc st in
+          advance st;
+          let p = parse_pattern st in
+          expect_op st ":";
+          let b = parse_block st in
+          catches ((p, b, cl) :: acc)
+        end else List.rev acc in
+      let cs = catches [] in
+      if cs = [] then unexpected st "'catch' after the block of a try";
+      let all = List.exists (fun ((p : pattern), _, _) -> match p.p with PVar _ | PWild -> true | _ -> false) cs in
+      let arms =
+        (* the value of the block is the value of the try, where one is wanted *)
+        { apat = pat (PCtor ([ "Ok" ], Some [ pat (PVar "__value") ])); aguard = None; arm_loc = l; amust_leave = false;
+          abody = [ { s = Expr (mk (Name "__value") l); sloc = l } ] }
+        :: List.map (fun (p, b, cl) -> { apat = { p = PCtor ([ "Err" ], Some [ p ]); ploc_ = cl }; aguard = None; abody = b; arm_loc = cl; amust_leave = false }) cs
+        @ (if all then []
+           else [ { apat = pat (PCtor ([ "Err" ], Some [ pat (PVar "__uncaught") ])); aguard = None; arm_loc = l; amust_leave = false;
+                    abody = [ { s = Expr (mk (Call (mk (Name "fail") l, [ { aname = None; amode = None; aexpr = mk (Name "__uncaught") l; aloc = l } ])) l); sloc = l } ] } ]) in
+      mks (Match (mk (Unop ("try", mk (BlockE body) l)) l, arms))
   | KW "if" when not (is_inline_if st) ->
       advance st;
       let c = parse_expr st in
@@ -513,7 +580,7 @@ and parse_stmt st : stmt =
             let g = if accept_kw st "if" then Some (parse_expr st) else None in
             expect_op st "->";
             let b = parse_block st in
-            arms ({ apat = p; aguard = g; abody = b; arm_loc = al } :: acc)
+            arms ({ apat = p; aguard = g; abody = b; arm_loc = al; amust_leave = false } :: acc)
       in
       mks (Match (e, arms []))
   | KW "par" when (match peek_at st 1 with KW "for" -> true | _ -> false) ->
@@ -662,12 +729,19 @@ and parse_fn_def st mods =
 
 let fn_mods = [ "inplace"; "total"; "noalloc"; "strict"; "trusted" ]
 
+(* the struct just read was written as a block, which ends its own line *)
+let block_struct = ref false
+(* the field of a variant written `from T`: an error of type T becomes that variant where it is
+   propagated, as if `impl From[T]` had been written *)
+let from_marker = "__from"
+
 let parse_fields st =
   comma_list st ")" (fun st ->
       let l = loc st in
       let name =
         match (peek st, peek_at st 1) with
         | IDENT s, OP ":" when not (is_upper s) -> advance st; advance st; Some s
+        | IDENT "from", (IDENT _ | OP "(" | OP "[") -> advance st; Some from_marker
         | _ -> None
       in
       let t = parse_type st in
@@ -676,6 +750,26 @@ let parse_fields st =
 
 let parse_type_body st =
   match peek st with
+  | KW "struct" when peek_at st 1 = OP ":" ->
+      (* a field to a line: struct: then `name: Type` lines, each with an optional default *)
+      advance st; advance st;
+      expect_newline st;
+      if not (is_indent st) then unexpected st "indented fields";
+      advance st;
+      let rec fields acc =
+        match peek st with
+        | DEDENT -> advance st; List.rev acc
+        | NEWLINE -> advance st; fields acc
+        | _ ->
+            let l = loc st in
+            let n = ident st in
+            expect_op st ":";
+            let t = parse_type st in
+            let d = if accept_op st "=" then Some (parse_expr st) else None in
+            expect_newline st;
+            fields ({ fdname = Some n; fdty = t; fddefault = d; fdloc = l } :: acc) in
+      block_struct := true;
+      BStruct (fields [])
   | KW "struct" ->
       advance st;
       expect_op st "(";
@@ -816,7 +910,11 @@ let parse_item st : item =
                 (match peek st with DEDENT -> advance st | _ -> unexpected st "end of type definition");
                 ended := true;
                 b
-            | _ -> parse_type_body st
+            | _ ->
+                block_struct := false;
+                let b = parse_type_body st in
+                if !block_struct then ended := true;
+                b
           end else BNone
         in
         let wh = if accept_kw st "where" then Some (parse_expr st) else None in
@@ -832,7 +930,29 @@ let parse_tokens file toks =
     match peek st with
     | EOF -> List.rev acc
     | NEWLINE -> advance st; go acc
-    | _ -> go (parse_item st :: acc)
+    | _ ->
+        let item = parse_item st in
+        (* `V(from T)` in a data type: the variant holds a T, and an error of type T becomes it *)
+        (match item with
+         | IType ({ tbody = BData vs; _ } as td) when List.exists (fun (v : variant) -> match v.vfields with Some fs -> List.exists (fun f -> f.fdname = Some from_marker) fs | None -> false) vs ->
+             let impls = ref [] in
+             let vs = List.map (fun (v : variant) ->
+                 match v.vfields with
+                 | Some [ ({ fdname = Some m; _ } as f) ] when m = from_marker ->
+                     if td.tgenerics <> [] then raise (Error ("E0100", v.vloc, "'from' in a variant is not available in a type with type parameters; write the impl of From"));
+                     let l = v.vloc in
+                     let self = TyPath ([ td.tname ], [], l) in
+                     let body = [ { s = Expr (mk (Call (mk (Name v.vname) l, [ { aname = None; amode = None; aexpr = mk (Name "x") l; aloc = l } ])) l); sloc = l } ] in
+                     let fd = { fname = "from"; fexport = false; fmods = []; fgenerics = [];
+                                fparams = [ { pmode = MBorrow; pname = "x"; pty = Some f.fdty; pdefault = None; ploc = l } ];
+                                fret = Some self; fret_lend = None; feffects = None; fwhere = None; fensures = None; fbody = Some body; floc = l } in
+                     impls := IImpl { igenerics = []; itrait = [ "From" ]; itargs = [ f.fdty ]; ifor = self; imethods = [ fd ]; iloc = l } :: !impls;
+                     { v with vfields = Some [ { f with fdname = None } ] }
+                 | Some fs when List.exists (fun f -> f.fdname = Some from_marker) fs ->
+                     raise (Error ("E0100", v.vloc, "a variant written with 'from' holds that one value and nothing else"))
+                 | _ -> v) vs in
+             go (!impls @ (IType { td with tbody = BData vs } :: acc))
+         | _ -> go (item :: acc))
   in
   { items = go []; path = file }
 

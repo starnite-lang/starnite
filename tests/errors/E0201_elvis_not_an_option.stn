@@ -1,0 +1,4 @@
+# expect: E0201 3:13
+fn main() ! io:
+    let n = 5 ?: 6
+    print(f"{n}")

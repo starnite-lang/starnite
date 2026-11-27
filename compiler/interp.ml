@@ -657,6 +657,10 @@ and match_pat env (p : tpat) (v : value) : bool =
   | TPVariant (_, _, i, ps), _ -> false
   | TPStruct (_, _, ps), VStruct vs | TPTuple ps, VTuple vs -> List.for_all2 (fun p v -> match_pat env p v) ps (Array.to_list vs)
   | TPTuple [], VUnit -> true
+  | TPArray (ps, rest), VArr a ->
+      let n = List.length ps in
+      (if rest then Array.length a >= n else Array.length a = n)
+      && List.for_all2 (fun p v -> match_pat env p v) ps (Array.to_list (Array.sub a 0 n))
   | TPErrType (t, p), VErr (t', x) -> ty_equal (tsub env t) t' && match_pat env p x
   | TPErrType (_, p), _ -> match_pat env p v
   | _ -> false

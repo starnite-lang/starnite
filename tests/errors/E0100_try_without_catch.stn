@@ -1,0 +1,5 @@
+# expect: E0100 5:5
+fn main() ! io:
+    try:
+        print("x")
+    print("y")

@@ -58,6 +58,8 @@ and expr_d =
   | Binop of string * expr * expr
   | Unop of string * expr                        (* "-", "not", "try", "iso", "spawn" *)
   | Range of expr * expr
+  | Elvis of expr * expr                         (* a ?: b: what an option holds, or b *)
+  | BlockE of block                              (* the block of a try statement *)
 
 and fpart = FLit of string | FExpr of expr
 
@@ -86,8 +88,9 @@ and pattern_d =
   | PNeg of lit                                   (* -1 in a pattern *)
   | PCtor of string list * pattern list option   (* None = no parentheses *)
   | PTuple of pattern list
+  | PArray of pattern list * bool                (* [a, b] and [a, b, ..]: an array of that length, or at least it *)
 
-type stmt = { s : stmt_d; sloc : loc }
+and stmt = { s : stmt_d; sloc : loc }
 
 and stmt_d =
   | Let of pattern * ty option * expr
@@ -111,7 +114,8 @@ and stmt_d =
 
 and block = stmt list
 
-and arm = { apat : pattern; aguard : expr option; abody : block; arm_loc : loc }
+(* amust_leave: the else of a `let ... else`, which may not run on into what follows *)
+and arm = { apat : pattern; aguard : expr option; abody : block; arm_loc : loc; amust_leave : bool }
 
 and fn_def = {
   fname : string;

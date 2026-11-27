@@ -1208,6 +1208,21 @@ and check_or_infer c (e : Syntax.expr) (expected : ty option) : texpr =
   | Unop (op, _) -> err "E0201" l "'%s' arrives in a later milestone" op
   | Binop (op, a, b) -> infer_binop c l op a b exp
   | Range _ -> err "E0201" l "a range is only valid in a for loop or a slice"
+  (* the block of a try: its value is that of its last expression, if it ends in one *)
+  | BlockE b -> check_block c b (Some (match exp with Some t -> t | None -> fresh ())) l
+  | Elvis (a, b) ->
+      (* a ?: b is a match on the option: what Some holds, or b, which runs only for None *)
+      let ta = infer c a in
+      let inner = match repr ta.ty with
+        | TNamed ("Option", [ t ]) -> t
+        | TVar _ -> let t = fresh () in unify_at a.loc ta.ty (opt t); t
+        | t -> err "E0201" a.loc "the left of ?: is an option, and this is %s" (show_ty t) in
+      let before = c.moved in
+      let tb = check c b inner in
+      c.moved <- union_moved before c.moved;
+      let v = new_var "__held" inner false VLocal in
+      mk (XMatch (ta, [ { pat = TPVariant ("Option", [ inner ], 1, [ TPVar v ]); guard = None; body = mk (XVar v) inner l };
+                        { pat = TPVariant ("Option", [ inner ], 0, []); guard = None; body = tb } ])) inner l
 
 and show_expr c (te : texpr) : texpr =
   match repr te.ty with
@@ -2478,6 +2493,12 @@ and check_pat c (p : Syntax.pattern) (t : ty) (refutable : bool) : tpat =
           unify_at l t (TTuple ts);
           TPTuple (List.map2 (fun p t -> check_pat c p t refutable) ps ts)
       | _ -> err "E0201" l "this tuple pattern does not match %s" (show_ty t))
+  | PArray (ps, rest) ->
+      let et = match repr t with
+        | TArray et -> et
+        | TVar _ -> let et = fresh () in unify_at l t (TArray et); et
+        | _ -> err "E0201" l "this array pattern does not match %s" (show_ty t) in
+      TPArray (List.map (fun p -> check_pat c p et refutable) ps, rest)
   | PCtor (path, args) -> (
       let name = List.nth path (List.length path - 1) in
       let args = match args with Some a -> a | None -> [] in
@@ -2584,7 +2605,25 @@ and check_stmt_expr c (s : Syntax.stmt) (want : ty option) : texpr =
             push_frame c ();
             let p = check_pat c a.apat ts.ty true in
             let g = Option.map (fun g -> check c g TBool) a.aguard in
-            let body = check_block c a.abody want a.arm_loc in
+            let body =
+              if not a.amust_leave then check_block c a.abody want a.arm_loc
+              else begin
+                (* the else of a let: a block that must leave, so it has no value of its own *)
+                let b = check_block c a.abody None a.arm_loc in
+                let leaves = match b.e with
+                  | XBlock (ss, _) ->
+                      (match List.rev ss with
+                       | { st = SReturn _ | SBreak | SContinue; _ } :: _ -> true
+                       | { st = SExpr x; _ } :: _ -> repr x.ty = TNever
+                       | _ -> false)
+                  | _ -> false in
+                if not leaves then
+                  err "E0207" a.arm_loc "the else of a let must leave: end it with return, break, continue or fail, since what follows needs what the pattern binds";
+                let t = match want with Some t -> t | None -> TUnit in
+                match b.e with
+                | XBlock (ss, v) -> { b with e = XBlock (ss, { v with e = XLit LUnit; ty = t }); ty = t }
+                | _ -> b
+              end in
             pop_frame c;
             after := union_moved !after c.moved;
             { pat = p; guard = g; body })
@@ -2614,6 +2653,8 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
        | _ -> ());
       (match p.p with
        | PVar _ | PWild | PTuple _ -> ()
+       | PArray (ps, rest) when not (ps = [] && rest) ->
+           err "E0202" l "an array can have another length than this pattern: say what happens then with `let ... = ... else ...`"
        | _ -> Exhaust.check c.tb.decls (zonk te.ty) [ (tp, false) ] l [ l ]);
       mks (SLet (tp, te))
   | Var (_, n, t, e) ->
@@ -2805,6 +2846,7 @@ and zonk_p = function
   | TPVariant (n, ts, i, ps) -> TPVariant (n, List.map zonk ts, i, List.map zonk_p ps)
   | TPStruct (n, ts, ps) -> TPStruct (n, List.map zonk ts, List.map zonk_p ps)
   | TPTuple ps -> TPTuple (List.map zonk_p ps)
+  | TPArray (ps, rest) -> TPArray (List.map zonk_p ps, rest)
   | TPErrType (t, p) -> TPErrType (zonk t, zonk_p p)
   | TPWild -> TPWild
 
