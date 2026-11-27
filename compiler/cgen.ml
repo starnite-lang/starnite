@@ -2227,6 +2227,12 @@ and pat_test fc (t : ty) (p : tpat) (v : string) : string list * (string * var *
           let sub = List.mapi (fun i (p, ft) -> pat_test fc ft p (Printf.sprintf "(%s).f%d" v i)) (List.combine ps ts_) in
           (List.concat_map fst sub, List.concat_map snd sub)
       | _ -> ([], []))
+  | TPArray (ps, rest) ->
+      (* the length is tested first, and && goes no further when it fails; elements are read where they are *)
+      let et = match repr t with TArray et -> et | _ -> TUnit in
+      let n = List.length ps in
+      let sub = List.mapi (fun i p -> pat_test fc et p (Printf.sprintf "((%s*)(%s)->data)[%d]" (cty st et) v i)) ps in
+      (Printf.sprintf "stn_len(%s) %s %d" v (if rest then ">=" else "==") n :: List.concat_map fst sub, List.concat_map snd sub)
   | TPErrType (et, p) ->
       let et = ts fc et in
       let id = err_id st et in
@@ -3473,7 +3479,7 @@ and u_is_fresh fc (e : texpr) =
 and u_pat_vars (p : tpat) : var list =
   match p with
   | TPVar v -> [ v ]
-  | TPVariant (_, _, _, ps) | TPStruct (_, _, ps) | TPTuple ps -> List.concat_map u_pat_vars ps
+  | TPVariant (_, _, _, ps) | TPStruct (_, _, ps) | TPTuple ps | TPArray (ps, _) -> List.concat_map u_pat_vars ps
   | TPErrType (_, p) -> u_pat_vars p
   | TPWild | TPLit _ -> []
 
@@ -3801,7 +3807,7 @@ and note_moves st (owned_params : var list) (body : texpr) =
         w s;
         let rec bound = function
           | TPVar v -> Hashtbl.replace decl v.vid ctx
-          | TPVariant (_, _, _, ps) | TPStruct (_, _, ps) | TPTuple ps -> List.iter bound ps
+          | TPVariant (_, _, _, ps) | TPStruct (_, _, ps) | TPTuple ps | TPArray (ps, _) -> List.iter bound ps
           | TPErrType (_, p) -> bound p
           | TPWild | TPLit _ -> () in
         let id = fresh () in
@@ -4903,7 +4909,7 @@ let note_demotions st =
       | _ -> false in
     let rec bound = function
       | TPVar w -> Hashtbl.replace derived w.vid ()
-      | TPVariant (_, _, _, ps) | TPStruct (_, _, ps) | TPTuple ps -> List.iter bound ps
+      | TPVariant (_, _, _, ps) | TPStruct (_, _, ps) | TPTuple ps | TPArray (ps, _) -> List.iter bound ps
       | TPErrType (_, p) -> bound p
       | TPWild | TPLit _ -> () in
     let captures (lam : lambda) = if List.exists (fun (w : var) -> Hashtbl.mem derived w.vid) lam.lcaps then ok := false in

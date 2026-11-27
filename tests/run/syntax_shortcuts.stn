@@ -1,0 +1,112 @@
+# Shorter ways to write common things: a struct with a field to a line, array patterns,
+# `let ... else`, `if let`, `?:`, try with catch blocks, and `from` on a variant.
+type Response = struct:
+    status: Int
+    headers: Map[Str, Str]
+    body: Str = ""
+
+type HttpError =
+    BadUrl(url: Str)
+  | Status(code: Int)
+  | Parse(from ParseError)
+
+type Url = struct(host: Str, port: Int, path: Str)
+
+fn number(text: Str) -> Int ! ParseError:
+    parse_int(text)
+
+fn port_of(ports: Map[Str, Int], name: Str) -> Int ! HttpError:
+    ports.get(name) ?: fail(BadUrl(name))
+
+fn parse_url(url: Str) -> Url ! HttpError:
+    let [scheme, rest] = split(url, "://") else fail(BadUrl(url))
+    if scheme != "http":
+        fail(BadUrl(url))
+    # a name or a tuple here is what the option holds
+    let (authority, path) = split_once(rest, "/") else return Url(rest, 80, "/")
+    let [host, port] = split(authority, ":") else:
+        return Url(authority, 80, "/" + path)
+    # an error of number is a ParseError, which becomes Parse(...) here
+    Url(host, number(port), "/" + path)
+
+fn describe(xs: Array[Int]) -> Str:
+    match xs:
+        [] -> "empty"
+        [x] -> f"one: {x}"
+        [0, ..] -> "starts with zero"
+        [a, b] -> f"two: {a} {b}"
+        [first, _, third, ..] -> f"long: {first} .. {third}"
+        _ -> "other"
+
+fn second(text: Str) -> Str:
+    let [_, part, ..] = split(text, ",") else return "none"
+    part
+
+fn ensure_ok(code: Int) ! HttpError:
+    if code >= 400:
+        fail(Status(code))
+
+fn show_url(url: Str) ! io:
+    try:
+        let u = parse_url(url)
+        print(f"{u.host} {u.port} {u.path}")
+    catch BadUrl(text):
+        print(f"bad url: {text}")
+    catch Parse(_):
+        print("bad port")
+    catch e:
+        print("other error")
+
+fn guarded(code: Int) -> Str ! HttpError, ParseError:
+    # only Status is caught here: a ParseError goes on to the caller
+    try:
+        ensure_ok(code)
+        let n = number(if code == 0: "zero" else: "7")
+        return f"ok {n}"
+    catch Status(c):
+        return f"status {c}"
+
+fn main() ! io:
+    let r = Response(200, {"a": "b"})
+    print(f"{r.status} {len(r.headers)} [{r.body}]")
+    show_url("http://example.com:8080/files/data.zip")
+    show_url("http://example.com/x")
+    show_url("http://example.com")
+    show_url("ftp://example.com")
+    show_url("example.com")
+    show_url("http://example.com:eighty/x")
+    print(f"{describe([])} | {describe([5])} | {describe([0, 1, 2])} | {describe([1, 2])} | {describe([1, 2, 3, 4])} | {describe([1, 2, 0])}")
+    print(f"{second("a,b,c")} {second("a")}")
+    let m: Map[Str, Int] = {"x": 1}
+    if let v = m.get("x"):
+        print(f"x is {v}")
+    else:
+        print("no x")
+    if let Some(v) = m.get("y"):
+        print(f"y is {v}")
+    if let None = m.get("y"):
+        print("no y")
+    print(f"{m.get("y") ?: 0} {m.get("x") ?: 0} {m.get("q") ?: m.get("x") ?: 9}")
+    # no let: a condition with a = of its own binds
+    if v = m.get("x"):
+        print(f"x again: {v}")
+    if [a, b] = split("k=v", "="):
+        print(f"{a} is {b}")
+    var stack = [1, 2, 3]
+    var sum = 0
+    while top = stack.pop():
+        sum += top
+    print(f"{sum}")
+    try:
+        print(f"{port_of(m, "x")}")
+        print(f"{port_of(m, "nope")}")
+    catch BadUrl(name):
+        print(f"no port named {name}")
+    catch e:
+        print("other")
+    try:
+        print(guarded(200))
+        print(guarded(404))
+        print(guarded(0))
+    catch e:
+        print("guarded failed with a parse error")
