@@ -106,10 +106,12 @@ Not done yet:
   - `type T = struct:` with a field to a line.
   - Array patterns, `[a, b]` for exactly two elements and `[a, b, ..]` for two or more, in any pattern (in the checker, the interpreter and the C backend). A match on an array needs a `_` or `[..]` arm.
   - `let PATTERN = e else ...`: the rest of the block is where the pattern matched; the else must leave (E0207).
-  - `if let PATTERN = e:` with an optional `else:`.
+  - `if let PATTERN = e:` with an optional `else:`. In it and in `let ... else`, a plain name or a tuple stands for what an option holds: `if let v = m.get(k):` is `if let Some(v) = m.get(k):`.
   - `a ?: b`: what the option `a` holds, or `b`, evaluated only then (in the checker).
   - `try:` with `catch PATTERN:` blocks. What no catch names goes on to the caller.
   - `V(from T)` in a data type: the variant, and the `impl From[T]` that makes an error of type `T` into it.
+  - A try whose catch blocks name every error passes nothing on, so the function around it need not list them.
+  - Fixed on the way: a data type that holds itself only through an array, a tuple or a map (a JSON value, say) sent the check for a derived `Eq` or `Hash` round for ever, and the compiler stopped with "nested too deeply". `tests/run/csv_to_json.stn` is a CSV to JSON converter written with these forms.
 
 - **`Map` and `Set` (section 3.6).** Literals (`{"a": 1}`, `{1, 2}`, `{}` where the expected type says which, `Map()`, `Set()`), `m[k]` (which traps on a missing key), `m[k] = v`, `m[k] += v` from `Default.default()`, `get`, `contains`, `remove`, `clear`, `len`, `add`, `==` in any order, `Show`, the set operators `|`, `&` and `-`, `for (k, v) in m` and `for x in s` in insertion order, `{k: v for ...}` and `{x for ...}`, and an entry as a place: `m[k].x = v`, `m[k].push(x)`, `f(mut m[k])`, `for x in mut m[k]`. Keys are anything with `Hash` and `Eq`, derived for numbers, strings, tuples, structs, data types and arrays, or written by the program. The interpreter keeps a Map as an ordered array of pairs; the C runtime as a compact insertion-ordered table with an index of control bytes searched sixteen at a time, SipHash-1-3 under a key drawn per process, and no stored hash for 64-bit integer keys. Int and Str keys are looked up inline in the generated code.
 

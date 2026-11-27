@@ -469,6 +469,13 @@ and parse_primary st =
 
 (* ---------- statements ---------- *)
 
+(* In `if let` and `let ... else`, a pattern that is a plain name or a tuple would match anything,
+   so the form would have no point: there it stands for what an option holds, `x` for `Some(x)`. *)
+let present (p : pattern) : pattern =
+  match p.p with
+  | PVar _ | PTuple _ -> { p with p = PCtor ([ "Some" ], Some [ p ]) }
+  | _ -> p
+
 let rec parse_block st : block =
   (* the ':' or '->' before the block has been consumed *)
   match peek st with
@@ -491,7 +498,7 @@ let rec parse_block st : block =
                  let els = if accept_op st ":" then parse_block st else (let x = parse_simple st in expect_newline st; [ x ]) in
                  let rest = go [] in
                  let wild = { p = PWild; ploc_ = l } in
-                 List.rev ({ s = Match (e, [ { apat = p; aguard = None; abody = rest; arm_loc = l; amust_leave = false };
+                 List.rev ({ s = Match (e, [ { apat = present p; aguard = None; abody = rest; arm_loc = l; amust_leave = false };
                                              { apat = wild; aguard = None; abody = els; arm_loc = l; amust_leave = true } ]); sloc = l } :: acc)
              | _ -> expect_newline st; go (s :: acc))
         | _ -> go (parse_stmt st :: acc)
@@ -517,7 +524,7 @@ and parse_stmt st : stmt =
       expect_op st ":";
       let b = parse_block st in
       let els = if accept_kw st "else" then (expect_op st ":"; parse_block st) else [] in
-      mks (Match (e, [ { apat = p; aguard = None; abody = b; arm_loc = l; amust_leave = false };
+      mks (Match (e, [ { apat = present p; aguard = None; abody = b; arm_loc = l; amust_leave = false };
                        { apat = { p = PWild; ploc_ = l }; aguard = None; abody = els; arm_loc = l; amust_leave = false } ]))
   | KW "try" when peek_at st 1 = OP ":" ->
       (* try: block, then `catch PATTERN:` blocks for its errors. An error no catch names goes on

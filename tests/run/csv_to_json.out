@@ -1,0 +1,66 @@
+[
+  {
+    "id": 1,
+    "name": "Ada",
+    "active": true,
+    "score": 9.5,
+    "address": {
+      "city": "London",
+      "geo": {
+        "lat": 51.5,
+        "lon": -0.12
+      }
+    },
+    "tags": [
+      "math",
+      "engines"
+    ],
+    "limits": {
+      "daily": [
+        10,
+        20,
+        30
+      ]
+    }
+  },
+  {
+    "id": 2,
+    "name": "Hopper, Grace",
+    "active": false,
+    "score": null,
+    "address": {
+      "city": "Arlington",
+      "geo": {
+        "lat": 38.88,
+        "lon": -77.1
+      }
+    },
+    "tags": [
+      "navy",
+      "compilers"
+    ],
+    "limits": {
+      "daily": []
+    }
+  },
+  {
+    "id": 3,
+    "name": "Linus",
+    "active": true,
+    "score": 7,
+    "address": {
+      "city": "Helsinki",
+      "geo": {
+        "lat": 60.17,
+        "lon": 24.94
+      }
+    },
+    "tags": [],
+    "limits": {
+      "daily": [
+        5
+      ]
+    }
+  }
+]
+exit 0

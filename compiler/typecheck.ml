@@ -398,7 +398,21 @@ let rec find_impl (tb : rtab) ?(bounds = []) trait (targs : ty list) self : reso
         | [] -> derive tb ~bounds trait self
       end
 
+(* The types whose derived Eq or Hash is being worked out. A type that holds itself, directly or
+   through an array, a tuple or another type, meets itself here: it has the trait if the rest of
+   it does, so the question is answered yes for the type already being asked about. *)
+and deriving : (string * string) list ref = ref []
+
 and derive tb ~bounds trait self =
+  let me = (trait, show_ty self) in
+  if (trait = "Eq" || trait = "Hash") && List.mem me !deriving then Some RDerived
+  else begin
+    let saved = !deriving in
+    deriving := me :: saved;
+    Fun.protect ~finally:(fun () -> deriving := saved) (fun () -> derive_in tb ~bounds trait self)
+  end
+
+and derive_in tb ~bounds trait self =
   let all_fields f =
     match repr self with
     | TArray t -> f t
@@ -2598,6 +2612,30 @@ and check_stmt_expr c (s : Syntax.stmt) (want : ty option) : texpr =
       let ts = infer c scrut in
       let before = c.moved in
       let after = ref before in
+      (* The last arm of a try with catch blocks passes on what no catch named. When the catches
+         name every error there is nothing to pass on: the arm is left out, and the function does
+         not have to list those errors. *)
+      let passes_on (a : Syntax.arm) = match a.apat.p with
+        | PCtor ([ "Err" ], Some [ { p = PVar "__uncaught"; _ } ]) -> true
+        | _ -> false in
+      let arms =
+        match List.rev arms with
+        | last :: rest when passes_on last ->
+            let named = List.rev rest in
+            let saved_moved = c.moved and saved_errs = c.errs in
+            let covered =
+              (try
+                 let pats = List.map (fun (a : Syntax.arm) ->
+                     push_frame c ();
+                     let p = check_pat c a.apat ts.ty true in
+                     pop_frame c;
+                     (p, a.aguard <> None)) named in
+                 Exhaust.check c.tb.decls (zonk ts.ty) pats l (List.map (fun (a : Syntax.arm) -> a.arm_loc) named);
+                 true
+               with Syntax.Error ("E0202", _, _) -> false) in
+            c.moved <- saved_moved; c.errs <- saved_errs;
+            if covered then named else arms
+        | _ -> arms in
       let tarms =
         List.map
           (fun (a : Syntax.arm) ->

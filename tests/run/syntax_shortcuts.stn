@@ -22,7 +22,8 @@ fn parse_url(url: Str) -> Url ! HttpError:
     let [scheme, rest] = split(url, "://") else fail(BadUrl(url))
     if scheme != "http":
         fail(BadUrl(url))
-    let Some((authority, path)) = split_once(rest, "/") else return Url(rest, 80, "/")
+    # a name or a tuple here is what the option holds
+    let (authority, path) = split_once(rest, "/") else return Url(rest, 80, "/")
     let [host, port] = split(authority, ":") else:
         return Url(authority, 80, "/" + path)
     # an error of number is a ParseError, which becomes Parse(...) here
@@ -77,12 +78,14 @@ fn main() ! io:
     print(f"{describe([])} | {describe([5])} | {describe([0, 1, 2])} | {describe([1, 2])} | {describe([1, 2, 3, 4])} | {describe([1, 2, 0])}")
     print(f"{second("a,b,c")} {second("a")}")
     let m: Map[Str, Int] = {"x": 1}
-    if let Some(v) = m.get("x"):
+    if let v = m.get("x"):
         print(f"x is {v}")
     else:
         print("no x")
     if let Some(v) = m.get("y"):
         print(f"y is {v}")
+    if let None = m.get("y"):
+        print("no y")
     print(f"{m.get("y") ?: 0} {m.get("x") ?: 0} {m.get("q") ?: m.get("x") ?: 9}")
     try:
         print(f"{port_of(m, "x")}")
