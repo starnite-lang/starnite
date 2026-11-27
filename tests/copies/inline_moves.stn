@@ -1,0 +1,31 @@
+# A variable of a data type kept in line (an Option, a small tagged value) moves at its last use,
+# as arrays, structs and boxed values do. Here that is what keeps the map with one holder: with a
+# copy made where `bag` is handed on, every insert copied the whole map first.
+type Bag = Empty | Full(items: Map[Str, Int])
+
+fn items_of(take bag: Bag) -> Map[Str, Int]:
+    match bag:
+        Full(existing) -> existing
+        Empty -> {}
+
+fn added(take bag: Bag, key: Str) -> Bag:
+    var items = items_of(take bag)
+    items[key] = items.get(key).or(0) + 1
+    Full(items)
+
+fn total(bag: Bag) -> Int:
+    match bag:
+        Empty -> 0
+        Full(items) ->
+            var t = 0
+            for (_, v) in items:
+                t += v
+            t
+
+fn main() ! io:
+    var bag = Empty
+    for i in 0..300:
+        bag = added(take bag, f"k{i % 11}")
+    let held: Bag? = Some(bag)
+    let again = held.or(Empty)
+    print(f"{total(again)}")

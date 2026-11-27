@@ -2990,6 +2990,28 @@ and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) ?pop_array ?i
           line fc "}";
           pop fc
       | _ -> unsupported a.l "for ... in mut with a pattern")
+  | IArray ({ e = XCall (CBuiltin ("chars@Str", _), [ src ], _); _ }, MBorrow) ->
+      (* the characters of a string are read off its bytes one at a time: no array of them is
+         made. The loop holds the string, so what the body does to the variable it came from
+         does not reach the bytes being read. *)
+      let sv = tmp fc TStr (own fc (expr fc src.a) TStr) in
+      own_in fc sv TStr;
+      let n = fresh st "_n" and bytes = fresh st "_p" and i = fresh st "_i" in
+      line fc "int64_t %s;" n;
+      line fc "const unsigned char* %s = (const unsigned char*)stn_str_span(&%s, &%s);" bytes sv n;
+      before ();
+      line fc "for (int64_t %s = 0; %s < %s; ) {" i i n;
+      fc.ind <- fc.ind + 1;
+      push fc FLoop;
+      let x = tmp fc TChar (Printf.sprintf "stn_str_next_char(%s, %s, &%s)" bytes n i) in
+      let _, binds = pat_test fc TChar p x in
+      bind_pattern fc binds;
+      push fc FScope;
+      body ();
+      pop fc;
+      pop fc;
+      fc.ind <- fc.ind - 1;
+      line fc "}"
   | IArray ({ e = XCall (CBuiltin (("entries@Map" | "items@Set" as source), tys), [ src ], _); _ }, _) ->
       (* a Map or a Set is walked where it is, entry by entry in insertion order, with no array of
          its entries made first. The loop holds a reference of its own, so a write in the body makes
@@ -3448,7 +3470,10 @@ and movable_type st (t : ty) : bool =
     | TStr | TArray _ | TNamed (("Map" | "Set"), _) -> true
     | TTuple ts -> List.for_all part ts
     | TNamed _ as t when is_struct st t -> List.for_all (fun (_, ft) -> part ft) (struct_fields st t)
-    | TNamed _ as t when is_data st t -> layout st t = LBoxed || not (needs_rc st t)
+    | TNamed _ as t when is_data st t ->
+        (* a value of a data type kept in line is left with a tag that no variant has, which its
+           release passes over: see moved_out *)
+        layout st t = LBoxed || not (needs_rc st t) || List.length (variants st t) < 255
     | t -> not (needs_rc st t) in
   needs_rc st t && part t
 
@@ -3794,6 +3819,8 @@ and moved_out st t n =
       String.concat " " (List.mapi (fun i ft -> if needs_rc st ft then moved_out st ft (Printf.sprintf "%s.f%d" n i) else "") ts)
   | TNamed _ as t when is_struct st t ->
       String.concat " " (List.map (fun (f, ft) -> if needs_rc st ft then moved_out st ft (Printf.sprintf "%s.%s" n (fname f)) else "") (struct_fields st t))
+  (* a data type kept in line: no variant has this tag, so the switch that releases it does nothing *)
+  | TNamed _ as t when is_data st t && layout st t = LInline -> Printf.sprintf "%s.tag = 255;" n
   | _ -> Printf.sprintf "%s = (%s)(void*)1;" n (cty st t)
 
 (* Finds the occurrences that may move a variable (section 9.2). An occurrence qualifies when it
