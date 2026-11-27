@@ -2196,6 +2196,7 @@ and infer_binop c l op a b exp : texpr =
           let ta = match exp with Some t when is_numeric t && List.mem op [ "+"; "-"; "*"; "/"; "%"; "+%"; "-%"; "*%" ] -> check c a t | _ -> infer c a in
           let tb =
             match repr ta.ty with
+            | TStr when op = "+" -> str_operand c b
             | TInt _ | TFloat | TF32 | TBool | TChar | TStr | TDur | TBytes when op <> "*" || not (ta.ty = TDur) -> check c b ta.ty
             | TNamed ("Option", _) when (match b.d with Name "None" -> true | _ -> false) -> check c b ta.ty
             | TNamed ("Set", _) when List.mem op [ "|"; "&"; "-" ] -> check c b ta.ty
@@ -2409,11 +2410,20 @@ and map_assign c l (mp : place) (key : Syntax.expr) op (rhs : Syntax.expr) : tst
   in
   { st = SExpr (mk (XBlock (body, unit_e l)) TUnit l); sl = l }
 
+(* what is added to a Str: another Str, or a Char, which is added as the text it shows as *)
+and str_operand c (b : Syntax.expr) : texpr =
+  match b.d with
+  | Lit (LChar _) -> show_expr c (infer c b)
+  | Lit _ | FStr _ -> check c b TStr
+  | _ ->
+      let tb = infer c b in
+      if repr tb.ty = TChar then show_expr c tb else (unify_at tb.l TStr tb.ty; tb)
+
 and infer_binop_typed c l op (ta : texpr) (b : Syntax.expr) : texpr =
   let t = repr ta.ty in
   match t with
   | TInt _ | TFloat | TF32 | TDur | TBytes | TStr ->
-      let tb = check c b ta.ty in
+      let tb = if t = TStr && op = "+" then str_operand c b else check c b ta.ty in
       let bop = match op with "+" -> Add | "-" -> Sub | "*" -> Mul | "/" -> Div | "%" -> Mod | _ -> assert false in
       if t = TStr && bop <> Add then err "E0201" l "'%s=' is not defined on Str" op;
       mk (XBin (bop, ta, tb)) t l
