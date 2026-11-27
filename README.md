@@ -107,6 +107,9 @@ Not done yet:
   - Array patterns, `[a, b]` for exactly two elements and `[a, b, ..]` for two or more, in any pattern (in the checker, the interpreter and the C backend). A match on an array needs a `_` or `[..]` arm.
   - `let PATTERN = e else ...`: the rest of the block is where the pattern matched; the else must leave (E0207).
   - `if let PATTERN = e:` with an optional `else:`. In it and in `let ... else`, a plain name or a tuple stands for what an option holds: `if let v = m.get(k):` is `if let Some(v) = m.get(k):`.
+  - The `let` may be left out of `if let`: a condition with a `=` of its own binds, so `if v = m.get(k):` and `if [a, b] = split(s, "="):`. `while x = stack.pop():` goes round for as long as the pattern matches.
+  - `text + c` and `text += c` add a `Char` to a `Str`.
+  - In the prelude: `to_int` and `to_float`, which give an option where `parse_int` and `parse_float` fail with a reason; `split_n(s, sep, limit)`; and `enumerate(xs)` for `for (i, x) in enumerate(xs):`, which builds an array of pairs until iterators exist (milestone 3).
   - `a ?: b`: what the option `a` holds, or `b`, evaluated only then (in the checker).
   - `try:` with `catch PATTERN:` blocks. What no catch names goes on to the caller.
   - `V(from T)` in a data type: the variant, and the `impl From[T]` that makes an error of type `T` into it.

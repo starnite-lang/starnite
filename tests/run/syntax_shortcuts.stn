@@ -87,6 +87,21 @@ fn main() ! io:
     if let None = m.get("y"):
         print("no y")
     print(f"{m.get("y") ?: 0} {m.get("x") ?: 0} {m.get("q") ?: m.get("x") ?: 9}")
+    # no let: a condition with a = of its own binds
+    if v = m.get("x"):
+        print(f"x again: {v}")
+    if [a, b] = split("k=v", "="):
+        print(f"{a} is {b}")
+    var stack = [1, 2, 3]
+    var sum = 0
+    while top = stack.pop():
+        sum += top
+    var text = "ab"
+    text += 'c'
+    text = text + '!' + "?"
+    print(f"{sum} {text} {split_n("a:b:c:d", ":", 2)} {split_n("a", ":", 3)} {to_int("42") ?: -1} {to_int("x") ?: -1} {to_float("2.5") ?: 0.0}")
+    for (i, word) in enumerate(["x", "y"]):
+        print(f"{i} {word}")
     try:
         print(f"{port_of(m, "x")}")
         print(f"{port_of(m, "nope")}")

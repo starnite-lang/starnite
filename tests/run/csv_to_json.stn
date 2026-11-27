@@ -35,9 +35,9 @@ fn fields_of(line: Str) -> Array[Str]:
         let c = cs[i]
         if quoted:
             if c != '"':
-                cur = cur + f"{c}"
+                cur += c
             elif i + 1 < len(cs) and cs[i + 1] == '"':
-                cur = cur + "\""
+                cur += c
                 i += 1
             else:
                 quoted = false
@@ -47,22 +47,10 @@ fn fields_of(line: Str) -> Array[Str]:
             out.push(cur)
             cur = ""
         else:
-            cur = cur + f"{c}"
+            cur += c
         i += 1
     out.push(cur)
     out
-
-fn as_int(text: Str) -> Int?:
-    try:
-        Some(parse_int(text))
-    catch _:
-        None
-
-fn as_float(text: Str) -> Float?:
-    try:
-        Some(parse_float(text))
-    catch _:
-        None
 
 # what a cell is, from how it reads
 fn value_of(cell: Str) -> Json:
@@ -71,9 +59,9 @@ fn value_of(cell: Str) -> Json:
         return JNull
     if text == "true" or text == "false":
         return JBool(text == "true")
-    if let n = as_int(text):
+    if n = to_int(text):
         return JInt(n)
-    if let x = as_float(text):
+    if x = to_float(text):
         return JNum(x)
     JText(text)
 
@@ -90,7 +78,7 @@ fn placed(take node: Json, path: Array[Str], at: Int, take value: Json) -> Json:
     if at == len(path):
         return value
     var fields: Map[Str, Json] = {}
-    if let JObject(existing) = node:
+    if JObject(existing) = node:
         fields = existing
     let key = path[at]
     let child = fields.remove(key) ?: JNull
@@ -99,8 +87,7 @@ fn placed(take node: Json, path: Array[Str], at: Int, take value: Json) -> Json:
 
 fn record_of(columns: Array[Column], cells: Array[Str]) -> Json:
     var record = JObject({})
-    for i in 0..len(columns):
-        let column = columns[i]
+    for (i, column) in enumerate(columns):
         var value = value_of(cells[i])
         if column.is_list:
             value = JList([value_of(part) for part in fields_of(join(split(cells[i], ";"), ",")) if trim(part) != ""])
@@ -111,14 +98,12 @@ fn parse(text: Str) -> Json ! CsvError:
     let [header, ..] = lines(text) else fail(NoHeader)
     let columns = [column_of(name) for name in fields_of(header)]
     var records: Array[Json] = []
-    var number = 1
-    for line in lines(text):
-        number += 1
-        if number == 2 or trim(line) == "":
+    for (i, line) in enumerate(lines(text)):
+        if i == 0 or trim(line) == "":
             continue
         let cells = fields_of(line)
         if len(cells) != len(columns):
-            fail(Ragged(number - 1, len(cells), len(columns)))
+            fail(Ragged(i + 1, len(cells), len(columns)))
         records.push(record_of(columns, cells))
     JList(records)
 
@@ -132,8 +117,8 @@ fn quoted(text: Str) -> Str:
         elif c == '\\':
             out = out + "\\\\"
         else:
-            out = out + f"{c}"
-    out + "\""
+            out += c
+    out + '"'
 
 fn render(json: Json, depth: Int) -> Str:
     let pad = repeat("  ", depth + 1)

@@ -515,9 +515,12 @@ and parse_stmt st : stmt =
   let l = loc st in
   let mks s = { s; sloc = l } in
   match peek st with
-  | KW "if" when peek_at st 1 = KW "let" ->
-      (* `if let PATTERN = e:` runs its block where the pattern matches, and the else where it does not *)
-      advance st; advance st;
+  | KW "if" when peek_at st 1 = KW "let" || binds_in_condition st ->
+      (* `if PATTERN = e:` runs its block where the pattern matches, and the else where it does not.
+         `if v = m.get(k):` is the commonest: v is what the option holds. `let` may be written
+         before the pattern. *)
+      advance st;
+      ignore (accept_kw st "let");
       let p = parse_pattern st in
       expect_op st "=";
       let e = parse_expr st in
@@ -593,6 +596,18 @@ and parse_stmt st : stmt =
   | KW "par" when (match peek_at st 1 with KW "for" -> true | _ -> false) ->
       advance st; parse_for st true l
   | KW "for" -> parse_for st false l
+  | KW "while" when peek_at st 1 = KW "let" || binds_in_condition st ->
+      (* `while PATTERN = e:` goes round for as long as the pattern matches *)
+      advance st;
+      ignore (accept_kw st "let");
+      let p = parse_pattern st in
+      expect_op st "=";
+      let e = parse_expr st in
+      expect_op st ":";
+      let b = parse_block st in
+      mks (While (mk (Lit (LBool true)) l,
+                  [ mks (Match (e, [ { apat = present p; aguard = None; abody = b; arm_loc = l; amust_leave = false };
+                                     { apat = { p = PWild; ploc_ = l }; aguard = None; abody = [ mks Break ]; arm_loc = l; amust_leave = false } ])) ]))
   | KW "while" ->
       advance st;
       let c = parse_expr st in
@@ -604,6 +619,20 @@ and parse_stmt st : stmt =
       let s = parse_simple st in
       expect_newline st;
       s
+
+(* whether the condition of an if or a while has a `=` of its own, outside any brackets: it then
+   binds a pattern, since a condition that is an expression has none *)
+and binds_in_condition st =
+  let rec scan k depth =
+    match peek_at st k with
+    | NEWLINE | INDENT | DEDENT | EOF -> false
+    | OP ("(" | "[" | "{") -> scan (k + 1) (depth + 1)
+    | OP (")" | "]" | "}") -> scan (k + 1) (depth - 1)
+    | OP "=" when depth = 0 -> true
+    | OP ":" when depth = 0 -> false
+    | _ -> scan (k + 1) depth
+  in
+  scan 1 0
 
 (* "if c: a else: b" on one line in statement position is an if statement whose
    blocks are simple statements; both parse the same way. *)
