@@ -67,8 +67,10 @@ param      = [ "mut" | "take" ] IDENT [ ":" [ "local" ] type ] [ "=" expr ] ;
 
 type_def   = [ "repr" "(" IDENT ")" NEWLINE ] [ "resource" ] [ "open" ] "type" IDENT [ "*" ] [ generics ]
              [ "=" type_body ] [ "where" expr ] NEWLINE ;            (* open: 5.5 *)
-type_body  = "struct" "(" fields ")" | variant { "|" variant } | type ;
-variant    = IDENT [ "(" fields ")" ] ;
+type_body  = "struct" "(" fields ")"
+           | "struct" ":" NEWLINE INDENT { IDENT ":" type [ "=" expr ] NEWLINE } DEDENT
+           | variant { "|" variant } | type ;
+variant    = IDENT [ "(" fields ")" ] | IDENT "(" "from" type ")" ;
 fields     = field { "," field } ;
 field      = [ IDENT ":" ] type [ "=" expr ] ;
 trait_def  = "trait" IDENT [ "*" ] [ generics ] ":" NEWLINE INDENT { fn_sig NEWLINE } DEDENT ;
@@ -87,8 +89,8 @@ ptype      = [ "mut" | "take" ] [ "local" ] type ;               (* fn(mut Stats
 path       = IDENT { "." IDENT } ;
 
 block      = NEWLINE INDENT stmt { stmt } DEDENT | simple NEWLINE ;
-stmt       = simple NEWLINE | if_stmt | match_stmt | for_stmt | while_stmt | par_stmt
-           | with_stmt | handle ;                                 (* 6.5, 7.3 *)
+stmt       = simple NEWLINE | if_stmt | if_let | let_else | try_stmt | match_stmt | for_stmt
+           | while_stmt | par_stmt | with_stmt | handle ;         (* 6.5, 7.3 *)
 simple     = "let" pattern [ ":" type ] "=" expr
            | [ "shared" ] "var" IDENT [ ":" type ] "=" expr
            | place assign_op expr
@@ -100,15 +102,19 @@ simple     = "let" pattern [ ":" type ] "=" expr
 assert_stmt = "assert" expr | "assert_fails" targs expr | "assert_snapshot" expr ;
 assign_op  = "=" | "+=" | "-=" | "*=" | "/=" | "%=" ;
 if_stmt    = "if" expr ":" block { "elif" expr ":" block } [ "else" ":" block ] ;
+if_let     = "if" "let" pattern "=" expr ":" block [ "else" ":" block ] ;
+let_else   = "let" pattern "=" expr "else" ( simple NEWLINE | ":" block ) ;
+try_stmt   = "try" ":" block "catch" pattern ":" block { "catch" pattern ":" block } ;
 match_stmt = "match" expr ":" NEWLINE INDENT { pattern [ "if" expr ] "->" block } DEDENT ;
 for_stmt   = [ "par" ] "for" pattern "in" [ "mut" | "take" ] ( range | expr ) ":" block ;
 while_stmt = "while" expr ":" block ;
 par_stmt   = "par" ":" NEWLINE INDENT stmt stmt { stmt } DEDENT ;
 
 pattern    = "_" | IDENT | literal | path [ "(" pattern { "," pattern } ")" ]
-           | "(" pattern { "," pattern } ")" ;
+           | "(" pattern { "," pattern } ")"
+           | "[" [ pattern { "," pattern } ] [ "," ".." | ".." ] "]" ;
 
-expr       = lambda | or_expr ;
+expr       = lambda | or_expr [ "?:" expr ] ;
 lambda     = "fn" "(" [ params ] ")" ":" ( expr | place assign_op expr ) ;
 or_expr    = and_expr { "or" and_expr } ;
 and_expr   = not_expr { "and" not_expr } ;
@@ -146,6 +152,14 @@ Notes:
 - **Parameter types.** A parameter's type may be omitted only in a lambda or a handler arm, where it is inferred from the expected function type (`fn(a, b): max(a, b)`, `yield(v, k) ->`). Everywhere else it is required (E0104).
 - **Bodies.** A function without a body appears only inside `trait_def` and `extern_block`. Every foreign function is declared in an `extern_block` (section 18.1).
 - **Tail statements.** A block's value is its last statement. An `if`, `match`, `with` or `handle` statement in last position is an expression whose value is that of the branch taken, so `match try f(): ...` can end a function.
+- **Shorter forms.** Five forms are other ways to write a `match`, and mean exactly what the match does.
+  - `if let PATTERN = e: A else: B` is `match e:` with the arms `PATTERN -> A` and `_ -> B`.
+  - `let PATTERN = e else S`, followed by the rest of its block R, is `match e:` with the arms `PATTERN -> R` and `_ -> S`. S must leave: it ends in `return`, `break`, `continue` or a call that never returns, such as `fail` (E0207), since R needs what the pattern binds.
+  - `a ?: b` is `match a:` with the arms `Some(v) -> v` and `None -> b`. `a` is an option, `b` runs only when it is `None`, and `b` may be a call of `fail`. It binds more loosely than `or`, and to the right.
+  - `try: B`, then `catch P1: C1`, and so on, is `match try B:` with the arms `Ok(v) -> v`, then `Err(P1) -> C1` and so on. When no catch is a name or `_`, a last arm `Err(e) -> fail(e)` passes on what was not caught, so the function still lists those errors. The value of B is the value of the statement where one is wanted.
+  - A variant written `V(from T)` holds one value of type T, and stands also for `impl From[T]` for its type, with `from(x)` giving `V(x)`. An error of type T raised inside a function that lists the variant's type then becomes `V(...)` on the way out (section 5.4). It is not available in a type with type parameters.
+- **Array patterns.** `[p1, p2]` matches an array of exactly two elements, and `[p1, p2, ..]` one of two or more; `[]` matches the empty array and `[..]` any. Elements are read where they are. An array has no end of lengths, so a match on one needs a `_` or `[..]` arm, as a match on an integer does, and a `let` with an array pattern needs an `else` (E0202). The check does not yet see that `[]`, `[x]` and `[x, y, ..]` together cover every array.
+- **Struct blocks.** `struct:` followed by an indented line for each field is the same type as `struct(...)` with the fields in one line.
 - **Contextual words.** The full list of contextual keywords, which are keywords only in certain positions, is in section 2.1.
 - **`any`.** `any` is a keyword only at the start of a type (`Array[any Figure]`, `x: any Figure`). Everywhere else it is an ordinary name, so the iterator function `any(xs, pred)` in section 20.1 keeps its name.
 
