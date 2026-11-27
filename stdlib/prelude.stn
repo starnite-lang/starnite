@@ -279,13 +279,18 @@ fn split_once*(s: Str, sep: Str) -> (Str, Str)?:
         Some((s[0..at], s[at + len(sep)..len(s)]))
 
 # The pieces of `s` between its first `limit - 1` separators, and what is left after them as the
-# last piece: at most `limit` pieces, where split gives as many as there are.
+# last piece: at most `limit` pieces, where split gives as many as there are. A limit of zero or
+# less gives no pieces. An empty separator traps, as it does in split.
 fn split_n*(s: Str, sep: Str, limit: Int) -> Array[Str]:
+    if len(sep) == 0:
+        return split(s, sep)
     var out: Array[Str] = []
+    if limit <= 0:
+        return out
     var start = 0
     while len(out) + 1 < limit:
         let at = find_or_end(s, sep, start)
-        if at < 0 or len(sep) == 0:
+        if at < 0:
             break
         out.push(s[start..at])
         start = at + len(sep)

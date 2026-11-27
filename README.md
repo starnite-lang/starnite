@@ -105,7 +105,7 @@ Not done yet:
 - **Small things the prelude was missing.**
   - `text + c` and `text += c` add a `Char` to a `Str`, as the text it shows as. This is in the checker; the rest are functions written in Starnite in `stdlib/prelude.stn`.
   - `to_int(s)` and `to_float(s)` give an option, where `parse_int` and `parse_float` fail with a reason.
-  - `split_n(s, sep, limit)` gives at most `limit` pieces, the last holding what is left.
+  - `split_n(s, sep, limit)` gives at most `limit` pieces, the last holding what is left: none for a limit of zero or less. An empty separator traps, as in `split`.
   - `enumerate(xs)` pairs each element with its position, for `for (i, x) in enumerate(xs):`. It builds an array of the pairs, until iterators exist (milestone 3).
 
 - **`Map` and `Set` (section 3.6).** Literals (`{"a": 1}`, `{1, 2}`, `{}` where the expected type says which, `Map()`, `Set()`), `m[k]` (which traps on a missing key), `m[k] = v`, `m[k] += v` from `Default.default()`, `get`, `contains`, `remove`, `clear`, `len`, `add`, `==` in any order, `Show`, the set operators `|`, `&` and `-`, `for (k, v) in m` and `for x in s` in insertion order, `{k: v for ...}` and `{x for ...}`, and an entry as a place: `m[k].x = v`, `m[k].push(x)`, `f(mut m[k])`, `for x in mut m[k]`. Keys are anything with `Hash` and `Eq`, derived for numbers, strings, tuples, structs, data types and arrays, or written by the program. The interpreter keeps a Map as an ordered array of pairs; the C runtime as a compact insertion-ordered table with an index of control bytes searched sixteen at a time, SipHash-1-3 under a key drawn per process, and no stored hash for 64-bit integer keys. Int and Str keys are looked up inline in the generated code.
