@@ -77,6 +77,12 @@ fn main() ! io:
     show_url("http://example.com:eighty/x")
     print(f"{describe([])} | {describe([5])} | {describe([0, 1, 2])} | {describe([1, 2])} | {describe([1, 2, 3, 4])} | {describe([1, 2, 0])}")
     print(f"{second("a,b,c")} {second("a")}")
+    # [..] matches any array, so it may stand where a pattern must always match
+    let ([..], count) = ([1, 2, 3], 3)
+    var rows = 0
+    for [..] in [[1], [], [2, 3]]:
+        rows += 1
+    print(f"{count} {rows} {len([0 for [..] in [[1], []]])}")
     let m: Map[Str, Int] = {"x": 1}
     if let v = m.get("x"):
         print(f"x is {v}")

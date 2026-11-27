@@ -2498,6 +2498,11 @@ and check_pat c (p : Syntax.pattern) (t : ty) (refutable : bool) : tpat =
         | TArray et -> et
         | TVar _ -> let et = fresh () in unify_at l t (TArray et); et
         | _ -> err "E0201" l "this array pattern does not match %s" (show_ty t) in
+      (* Where a pattern must always match (a plain let, the variable of a for or of a
+         comprehension, and anything inside those) only [..] will do: no test is made there, and
+         the elements of a shorter array would be read past its end. *)
+      if not refutable && not (ps = [] && rest) then
+        err "E0202" l "an array can have another length than this pattern, and nothing here says what happens then: use `let ... = ... else ...`, `if ... = ...:` or a match";
       TPArray (List.map (fun p -> check_pat c p et refutable) ps, rest)
   | PCtor (path, args) -> (
       let name = List.nth path (List.length path - 1) in
@@ -2677,8 +2682,6 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
        | _ -> ());
       (match p.p with
        | PVar _ | PWild | PTuple _ -> ()
-       | PArray (ps, rest) when not (ps = [] && rest) ->
-           err "E0202" l "an array can have another length than this pattern: say what happens then with `let ... = ... else ...`"
        | _ -> Exhaust.check c.tb.decls (zonk te.ty) [ (tp, false) ] l [ l ]);
       mks (SLet (tp, te))
   | Var (_, n, t, e) ->

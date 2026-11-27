@@ -1,0 +1,5 @@
+# expect: E0202 4:25
+fn main() ! io:
+    let rows: Array[Array[Int]] = [[1, 2], []]
+    let firsts = [a for [a, ..] in rows]
+    print(f"{firsts}")

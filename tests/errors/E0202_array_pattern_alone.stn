@@ -1,4 +1,4 @@
-# expect: E0202 3:5
+# expect: E0202 3:9
 fn main() ! io:
     let [a, b] = split("x:y", ":")
     print(f"{a} {b}")
