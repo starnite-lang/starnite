@@ -238,9 +238,10 @@ and lend_target env (cl : callee) : (tfn * (string * ty) list) option =
   in
   match found with Some (tf, _) when tf.fsig.slend <> None -> found | _ -> None
 
-(* Run a lend function up to its lend statement and return the lent place. Writing to
-   the place writes into the callee's copy of its mut parameters, which are then
-   copied back to the caller's places, as for any mut argument (section 4.2). *)
+(* Run a lend function up to its lend statement and return the lent place. What the function
+   did to its mut parameters on the way there is copied back to the caller's places as soon as
+   it lends, as for any mut argument (section 4.2), whether or not the lent place is then
+   written. Writing to the place writes into the callee's copy, which is copied back again. *)
 and lend_place env (tf, sub) (targs : targ list) : (unit -> value) * (value -> unit) =
   let places, vals = eval_args env ~hold:true targs in
   let env' = { env with vars = Hashtbl.create 16; sub } in
@@ -253,6 +254,7 @@ and lend_place env (tf, sub) (targs : targ list) : (unit -> value) * (value -> u
   let write_back () =
     List.iter2 (fun p (v : var) -> match p with Some (_, put) -> put !(get_var env' v) | None -> ()) places tf.fparams
   in
+  write_back ();
   (get, fun x -> set x; write_back ())
 
 (* Arguments are evaluated left to right. A mut argument is resolved to its place where it

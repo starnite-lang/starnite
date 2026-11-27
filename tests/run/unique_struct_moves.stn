@@ -1,0 +1,11 @@
+# A struct variable moves at its last use (section 9.2), so a unique struct can be handed on (section 6.2).
+type Node = struct(name: Str, kids: Array[Int])
+
+fn add(mut p: unique Array[Node], take k: unique Node):
+    p.push(k)
+    p.push(Node("x", []))
+
+fn main() ! io:
+    var q = [Node("a", [1])]
+    add(mut q, Node("b", [2]))
+    print(f"{len(q)}")

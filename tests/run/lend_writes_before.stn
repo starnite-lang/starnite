@@ -1,0 +1,31 @@
+# What a lend function does to its mut parameters before it lends reaches the caller (sections 4.2
+# and 4.6), whether the lent place is then only read, or written.
+fn stash(mut grid: Array[Array[Int]], mut saved: Array[Array[Int]]) -> lend Int:
+    saved.push(grid[0])
+    lend grid[0][0]
+
+fn grown(mut xs: Array[Int], v: Int) -> lend mut Int:
+    xs.push(v)
+    lend mut xs[len(xs) - 1]
+
+fn counted(mut xs: Array[Int], mut calls: Int) -> lend mut Int:
+    calls += 1
+    lend mut xs[0]
+
+fn main() ! io:
+    var grid = [[1]]
+    var saved: Array[Array[Int]] = []
+    let n = stash(mut grid, mut saved)
+    grid[0][0] = 9
+    print(f"{n} {saved} {grid}")
+    var xs = [1, 2]
+    let last = grown(mut xs, 3)
+    print(f"{last} {xs}")
+    grown(mut xs, 4) = 40
+    print(f"{xs}")
+    grown(mut xs, 5) += 1
+    print(f"{xs}")
+    var calls = 0
+    let first = counted(mut xs, mut calls)
+    counted(mut xs, mut calls) = 7
+    print(f"{first} {calls} {xs}")

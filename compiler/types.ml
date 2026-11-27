@@ -380,6 +380,8 @@ type fsig = {
   sexport : bool;
   smods : string list;         (* inplace, noalloc and the other words before fn (section 9.6) *)
   slend : bool option;         (* Some false: -> lend T; Some true: -> lend mut T (4.6) *)
+  suniq : bool list;           (* which parameters are declared unique (section 6.2) *)
+  sruniq : bool;               (* the result is declared unique *)
   sloc : loc;
   smodule : string;
 }

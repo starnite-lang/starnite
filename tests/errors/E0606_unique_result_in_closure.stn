@@ -1,0 +1,24 @@
+# expect: E0606 10:5
+type S = struct(items: Array[Int], f: fn() -> Int)
+
+fn mk(xs: Array[Int]) -> fn() -> Int:
+    fn(): xs[0]
+
+fn build() -> unique S:
+    let items = [1, 2]
+    let f = mk(items)
+    S(items, f)
+
+fn poke(take s: unique S) -> Int:
+    var t = s
+    t.items[0] = 99
+    let f = t.f
+    f()
+
+fn main() ! io:
+    var s = build()
+    let g = s.f
+    let n0 = g()
+    s.items[0] = 42
+    print(f"{n0} {g()} {s.items}")
+    print(f"{poke(take s)}")

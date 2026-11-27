@@ -1,0 +1,9 @@
+# expect: E0606 5:5
+fn build(mut log: Array[Array[Int]]) -> unique Array[Int]:
+    var out = [1, 2]
+    log.push(out)
+    out
+
+fn main() ! io:
+    var log: Array[Array[Int]] = []
+    print(f"{len(build(mut log))}")

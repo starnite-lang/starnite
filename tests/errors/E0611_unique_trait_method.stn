@@ -1,0 +1,6 @@
+# expect: E0611 3:5
+trait Sink:
+    fn eat(s: Self, take xs: unique Array[Int]) -> Int
+
+fn main() ! io:
+    print("x")

@@ -2022,3 +2022,10 @@ void stn_runtime_exit(int status) {
 #endif
     exit(status);
 }
+
+/* ---- copies that share nothing (section 6.2) ----
+   The first step of a deep copy: a block of its own with the same elements, each counted once
+   more. Generated code then replaces each element that holds a block with a copy of it. These are
+   at the end of the file so that adding them moved no other function. */
+StnArray* stn_array_clone(StnArray* a) { return stn_array_copy(a, a->len > 0 ? a->len : 1); }
+StnMap* stn_map_clone(StnMap* m) { stn_dup(m); stn_map_copy_for_write(&m); return m; }

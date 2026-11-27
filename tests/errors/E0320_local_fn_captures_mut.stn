@@ -1,0 +1,12 @@
+# expect: E0320 3:5
+fn bad(mut xs: unique Array[Int], mut keep: Array[Array[Int]]):
+    fn size() -> Int:
+        len(xs)
+    keep.push(xs)
+
+fn main() ! io:
+    var a = [1]
+    var keep: Array[Array[Int]] = []
+    bad(mut a, mut keep)
+    a[0] = 9
+    print(f"{a} {keep}")

@@ -1,0 +1,6 @@
+# expect: E0606 3:5
+fn pick(xs: Array[Int]) -> unique Array[Int]:
+    xs
+
+fn main() ! io:
+    print(f"{len(pick([1]))}")

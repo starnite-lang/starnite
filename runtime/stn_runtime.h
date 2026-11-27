@@ -128,8 +128,20 @@ static inline int stn_unique(void* p) {
 }
 
 /* ---- traps (section 11.5) ---- */
+/* Where the compiler knows a value has no other holder it leaves out the test (section 6.2). A
+   debug build, or one with STN_CHECK_UNIQUE, makes the test all the same, and stops if it fails: that is a fault
+   of the compiler, not of the program. */
+#if defined(STN_CHECK_UNIQUE) || defined(STN_DEBUG)
+#define STN_ASSUME_UNIQUE(p) stn_assume_unique((void*)(p), __FILE__, __LINE__)
+#else
+#define STN_ASSUME_UNIQUE(p) ((void)0)
+#endif
 typedef struct { const char* file; int32_t line, col; } StnLoc;
 _Noreturn void stn_trap(const char* kind, const char* file, int line, int col, const char* msg);
+static inline void stn_assume_unique(void* p, const char* file, int line) {
+    if (((uintptr_t)p & 1) || stn_unique(p)) return;
+    stn_trap("compiler fault", file, line, 0, "a value the compiler took to have no other holder is shared");
+}
 _Noreturn void stn_overflow(const char* file, int line, int col);
 _Noreturn void stn_div_zero(const char* file, int line, int col);
 
@@ -385,6 +397,8 @@ typedef struct StnArray {
 void      stn_array_release(void* p);
 StnArray* stn_array_new(const StnElemOps* ops, int64_t cap);
 void      stn_array_copy_for_write(StnArray** a);
+/* a new array with the same elements, each counted once more */
+StnArray* stn_array_clone(StnArray* a);
 /* A write needs the box unshared (section 4.5). */
 static inline void stn_array_make_unique(StnArray** a) {
     if (__builtin_expect(!stn_unique(*a), 0)) stn_array_copy_for_write(a);
@@ -633,6 +647,8 @@ typedef struct StnMap {
 void     stn_map_release(void* p);
 /* a write to an entry in place needs the table unshared (section 4.5) */
 void     stn_map_make_unique_for_write(StnMap** pm);
+/* a new table with the same entries, each key and value counted once more */
+StnMap*  stn_map_clone(StnMap* m);
 StnMap*  stn_map_new(const StnMapOps* ops);
 StnMap*  stn_map_with_capacity(const StnMapOps* ops, int64_t n);
 /* the value of the key (for a set, any address that is not NULL), or NULL */

@@ -279,6 +279,45 @@ fn two_mut(mut a: Array[Int], mut b: Array[Int]):
 
 fn with_cb(mut xs: Array[Int], f: fn() -> Int):
     xs.push(f())
+
+type UList = UNil | UCons(head: Int, tail: UList)
+
+fn u_same(xs: Array[Int]) -> Array[Int]:
+    xs
+
+fn u_fill(n: Int) -> unique Array[Int]:
+    var out: Array[Int] = []
+    for i in 0..n:
+        out.push(i)
+    out
+
+fn u_bump(take xs: unique Array[Int]) -> unique Array[Int]:
+    var ys = xs
+    if len(ys) > 0:
+        ys[0] = ys[0] +% 1
+    ys
+
+fn u_set(mut xs: unique Array[Int], v: Int):
+    if len(xs) > 0:
+        xs[0] = v
+
+fn u_list(n: Int) -> unique UList:
+    var out = UNil
+    var i = n
+    while i > 0:
+        out = UCons(i, take out)
+        i -= 1
+    out
+
+inplace fn u_inc(take xs: UList) -> unique UList:
+    match xs:
+        UNil -> UNil
+        UCons(x, rest) -> UCons(x +% 1, u_inc(take rest))
+
+fn u_sum(xs: UList) -> Int:
+    match xs:
+        UNil -> 0
+        UCons(x, rest) -> x +% u_sum(rest)
 |}
 
 (* The text of a program is one file, with a comment line between the prelude and what is generated.
@@ -497,7 +536,7 @@ let rec stmts g ind k d = List.concat (List.init k (fun _ -> stmt g ind d))
 
 and stmt g ind d =
   let p = String.make (4 * ind) ' ' in
-  let k = int g 18 in
+  let k = int g 20 in
   let fallback () = [ sprintf "%sprint(%s)" p (leaf g "Str") ] in
   if k <= 1 || d <= 0 then begin
     let t = choice g all_types in
@@ -702,6 +741,42 @@ and stmt g ind d =
                @ [ sprintf {|%sprint(f"{%s}")|} p snap ]
            | _ -> loop p (sprintf "%s.push(%s + %s)" a i i))
         @ show
+    | 18 | 19 ->
+        (* Uniqueness (section 6.2): a value the compiler can take to have no other holder is given one,
+           by a binding, a call that hands it back, a part read out of it, a collection it is put in, a
+           loop or a match that holds it, and is then written to. What held the old value must still
+           show it. A debug build checks every test the compiler left out. *)
+        let a = fresh g "u" and s = fresh g "s" and o = fresh g "o" in
+        let e () = expr g "Int" 1 in
+        let n = range g 1 4 in
+        let ln fmt = Printf.ksprintf (fun x -> p ^ x) fmt in
+        (match int g 14 with
+         | 0 -> [ ln "var %s: Array[Int] = [%s, %s]" a (e ()) (e ()); ln "let %s = %s" s a; ln "%s[0] = %s" a (e ());
+                  ln {|print(f"{%s} {%s}")|} a s ]
+         | 1 -> [ ln "var %s: Array[Int] = [%s]" a (e ()); ln "let %s = u_same(%s)" s a; ln "%s[0] = %s" a (e ());
+                  ln {|print(f"{%s} {%s}")|} a s ]
+         | 2 -> [ ln "var %s: Array[Array[Int]] = [[%s], [%s]]" a (e ()) (e ()); ln "let %s = %s[0]" s a; ln "%s[0][0] = %s" a (e ());
+                  ln {|print(f"{%s} {%s}")|} a s ]
+         | 3 -> [ ln "var %s: Array[Int] = [%s, %s]" a (e ()) (e ()); ln "var %s: Array[Array[Int]] = []" o; ln "%s.push(%s)" o a;
+                  ln "%s[0] = %s" a (e ()); ln "%s[0][1] = %s" o (e ()); ln {|print(f"{%s} {%s}")|} a o ]
+         | 4 -> [ ln "var %s = u_fill(%d)" a n; ln "let %s = u_bump(%s)" s a; ln "%s[0] = %s" a (e ()); ln {|print(f"{%s} {%s}")|} a s ]
+         | 5 -> [ ln "var %s = u_fill(%d)" a n; ln "%s[0] = %s" a (e ()); ln "let %s = u_bump(take %s)" s a; ln {|print(f"{%s}")|} s ]
+         | 6 -> [ ln "var %s: Array[Int] = [%s]" a (e ()); ln "u_set(mut %s, %s)" a (e ()); ln "let %s = %s" s a; ln "%s[0] = %s" a (e ());
+                  ln {|print(f"{%s} {%s}")|} a s ]
+         | 7 -> [ ln "let %s = u_list(%d)" a n; ln "let %s = u_inc(%s)" s a; ln {|print(f"{u_sum(%s)} {u_sum(%s)}")|} a s ]
+         | 8 -> [ ln "var %s = u_list(%d)" a n; ln "%s = u_inc(take %s)" a a; ln "let %s = %s" s a; ln "%s = u_inc(take %s)" a a;
+                  ln {|print(f"{u_sum(%s)} {u_sum(%s)}")|} s a ]
+         | 9 -> [ ln "var %s: Array[Int] = [%s, %s, %s]" a (e ()) (e ()) (e ()); ln "for %s in %s:" s a; ln "    %s[0] = %s[0] +%% %s" a a s;
+                  ln {|print(f"{%s}")|} a ]
+         | 10 -> [ ln "var %s: Array[Int] = [%s, %s]" a (e ()) (e ()); ln "var %s: Array[Int] = [0]" o; ln "for %s in 0..%d:" s n;
+                   ln "    %s[0] = %s" a s; ln "    %s = %s" o a; ln "%s[1] = %s" a (e ()); ln {|print(f"{%s} {%s}")|} a o ]
+         | 11 -> [ ln "var %s: Array[Int] = [%s]" a (e ()); ln "match Named(\"n\", %s):" a; ln "    Named(_, %s) ->" s; ln "        %s[0] = %s" a (e ());
+                   ln {|        print(f"{%s} {%s}")|} s a; (* every variant has an arm of its own: the mutation that leaves an arm out must leave a match that is not exhaustive *)
+                   ln "    Dot -> print(\"none\")"; ln "    Box(_, _) -> print(\"none\")" ]
+         | 12 -> [ ln "var %s: Array[Int] = [%s, %s]" a (e ()) (e ()); ln "let %s = copy(%s)" s a; ln "%s[0] = %s" a (e ());
+                   ln {|print(f"{%s} {%s}")|} a s ]
+         | _ -> [ ln "var %s: Array[Array[Int]] = [[%s], [%s]]" a (e ()) (e ()); ln "%s[0] = %s[1]" a a; ln "%s[0][0] = %s" a (e ());
+                  ln {|print(f"{%s}")|} a ])
     | _ -> [ sprintf "%sprint(%s)" p (if chance g 0.5 then sprintf "describe(%s)" (expr g "any Fig" 2) else expr g "Str" 3) ]
 
 let program seed =
@@ -812,7 +887,7 @@ let is_split text =
 
 (* a top-level function, type or trait, with a star after its name: the module exports it *)
 let export_decl l =
-  match List.find_opt (fun k -> is_prefix k l) [ "fn "; "type "; "trait " ] with
+  match List.find_opt (fun k -> is_prefix k l) [ "fn "; "inplace fn "; "type "; "trait " ] with
   | None -> l
   | Some k ->
       let j = ref (String.length k) in
@@ -845,7 +920,7 @@ let top_names lines =
                     (split_str " | " (String.sub l (p + 3) (String.length l - p - 3)))
               | None -> ()
           end)
-        [ "fn "; "type "; "trait " ])
+        [ "fn "; "inplace fn "; "type "; "trait " ])
     lines;
   !names
 

@@ -1,0 +1,77 @@
+# copy() shares no block with what it was made from (section 6.2): a write into the copy, at any
+# depth, leaves the original as it was, and the other way round.
+type Tree = Leaf | Node(left: Tree, items: Array[Int], right: Tree)
+type Shelf = struct(name: Str, rows: Array[Array[Int]], tags: Set[Int])
+type Slot = Empty | Full(xs: Array[Int])
+
+fn total(xs: Array[Int]) -> Int:
+    var t = 0
+    for x in xs:
+        t += x
+    t
+
+fn weigh(t: Tree) -> Int:
+    match t:
+        Leaf -> 0
+        Node(l, xs, r) -> weigh(l) + total(xs) + weigh(r)
+
+fn touch(mut t: Tree):
+    match t:
+        Leaf -> print("leaf")
+        Node(l, xs, r) ->
+            var ys = xs
+            ys[0] = 100
+            t = Node(l, ys, r)
+
+fn main() ! io:
+    var grid = [[1, 2], [3, 4]]
+    var g2 = copy(grid)
+    g2[0][0] = 50
+    grid[1][1] = 60
+    print(f"{grid} {g2}")
+    var m: Map[Str, Array[Int]] = {"a": [1], "b": [2, 3]}
+    var m2 = copy(m)
+    m2["a"].push(9)
+    m["b"][0] = 7
+    print(f"{m["a"]} {m["b"]} {m2["a"]} {m2["b"]}")
+    var keyed: Map[Array[Int], Int] = {[1, 2]: 1}
+    let k2 = copy(keyed)
+    keyed[[1, 2]] = 5
+    print(f"{keyed[[1, 2]]} {k2[[1, 2]]} {len(k2)}")
+    var shelf = Shelf("s", [[1], [2]], {1, 2})
+    var s2 = copy(shelf)
+    s2.rows[0][0] = 8
+    s2.tags.add(3)
+    shelf.rows[1].push(4)
+    print(f"{shelf.rows} {len(shelf.tags)} {s2.rows} {len(s2.tags)} {s2.name}")
+    var t = Node(Node(Leaf, [1], Leaf), [2, 3], Leaf)
+    var t2 = copy(t)
+    touch(mut t2)
+    print(f"{weigh(t)} {weigh(t2)}")
+    var slots = [Full([1]), Empty, Full([2, 3])]
+    var sl2 = copy(slots)
+    match sl2[0]:
+        Full(xs) ->
+            var ys = xs
+            ys.push(5)
+            sl2[0] = Full(ys)
+        Empty -> print("empty")
+    match (slots[0], sl2[0]):
+        (Full(a), Full(b)) -> print(f"{a} {b}")
+        _ -> print("other")
+    var pair = ([1], "x", [[2]])
+    var p2 = copy(pair)
+    p2.2[0][0] = 9
+    print(f"{pair.2} {p2.2} {p2.1}")
+    var maybe: Array[Int]? = Some([1, 2])
+    let mb2 = copy(maybe)
+    match maybe:
+        Some(xs) ->
+            var ys = xs
+            ys[0] = 4
+            maybe = Some(ys)
+        None -> print("none")
+    print(f"{maybe} {mb2}")
+    let words = ["a longer string that is not inline", "b"]
+    let w2 = copy(words)
+    print(f"{w2[0]} {len(w2)}")

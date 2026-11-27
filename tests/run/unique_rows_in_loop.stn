@@ -1,0 +1,27 @@
+# A loop that builds a value and puts it into a unique collection leaves the collection unique (section 6.2).
+fn mk(n: Int) -> unique Array[Array[Int]]:
+    var out: Array[Array[Int]] = []
+    for i in 0..n:
+        out.push([i, i * 2])
+    out
+
+fn tweak(take g: unique Array[Array[Int]]) -> unique Array[Array[Int]]:
+    var h = g
+    for i in 0..len(h):
+        h[i][0] += 100
+    h
+
+fn last_row(take g: unique Array[Array[Int]]) -> unique Array[Int]:
+    var h = g
+    match h.pop():
+        Some(r) -> copy(r)
+        None -> []
+
+fn main() ! io:
+    let a = mk(3)
+    let b = tweak(a)
+    let c = tweak(tweak(mk(2)))
+    var d = tweak(take b)
+    d[0][0] = -1
+    let e = last_row(d)
+    print(f"{a} {c} {d} {e} {last_row(take d)}")

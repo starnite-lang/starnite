@@ -9,6 +9,9 @@ starnite=${STARNITE:-"$root/_build/default/compiler/main.exe"}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail=0; pass=0
+# the compiler checks its own account of what is unique (section 6.2) while it runs here, and a
+# release build keeps the tests that account lets it leave out
+export STN_CHECK_UNIQUE=1
 check() { # name, expected file
     if cmp -s "$tmp/out" "$2"; then pass=$((pass + 1))
     else echo "FAIL copies/$1"; diff "$2" "$tmp/out" | head -10; fail=$((fail + 1)); fi
@@ -24,6 +27,11 @@ done
 # are left when tests/run/take_demotion.stn runs
 "$starnite" run --profile-copies tests/run/take_demotion.stn < /dev/null > "$tmp/out" 2>&1; echo "exit $?" >> "$tmp/out"
 check "take demotion" "$here/copies/take_demotion.profile"
+# an argument copied for a unique parameter is listed (section 6.2), and refused when asked
+"$starnite" check --explain-copies tests/copies/unique.stn > "$tmp/out" 2>&1; echo "exit $?" >> "$tmp/out"
+check "explain unique" "$here/copies/unique.explain"
+"$starnite" check --no-implicit-copies tests/copies/unique.stn > "$tmp/out" 2>&1; echo "exit $?" >> "$tmp/out"
+check "no implicit copies" "$here/copies/unique.refused"
 # a program that copies nothing says so, and the flags change nothing else it prints
 "$starnite" run --profile-copies tests/run/basics.stn < /dev/null > "$tmp/out" 2>/dev/null; echo "exit $?" >> "$tmp/out"
 check "output unchanged" "$here/run/basics.out"

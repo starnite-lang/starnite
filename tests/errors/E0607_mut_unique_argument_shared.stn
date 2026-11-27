@@ -1,0 +1,9 @@
+# expect: E0607 8:13
+fn set(mut xs: unique Array[Int], v: Int):
+    xs[0] = v
+
+fn main() ! io:
+    var a = [1, 2]
+    let b = a
+    set(mut a, 5)
+    print(f"{len(a)} {len(b)}")

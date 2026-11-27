@@ -1,0 +1,13 @@
+# An argument that may be shared is copied for a parameter that needs a unique value (section
+# 6.2). --explain-copies lists each such copy, and --no-implicit-copies refuses the first.
+fn bump(take xs: unique Array[Int]) -> unique Array[Int]:
+    var ys = xs
+    ys[0] += 1
+    ys
+
+fn main() ! io:
+    let a = [1, 2]
+    let b = bump(a)
+    let c = bump(take b)
+    let d = bump([7])
+    print(f"{a[0]} {c[0]} {d[0]}")

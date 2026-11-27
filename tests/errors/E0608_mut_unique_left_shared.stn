@@ -1,0 +1,9 @@
+# expect: E0608 3:14
+fn keep(mut xs: unique Array[Int], mut log: Array[Array[Int]]):
+    log.push(xs)
+
+fn main() ! io:
+    var a = [1]
+    var log: Array[Array[Int]] = []
+    keep(mut a, mut log)
+    print(f"{len(log)}")
