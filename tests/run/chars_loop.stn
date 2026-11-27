@@ -1,0 +1,21 @@
+# A loop over chars(s) reads the characters off the bytes of the string, with no array of them
+# made first. The loop holds the string it started with, whatever the body does to the variable.
+fn main() ! io:
+    var s = "héllo, wörld ✓ 𝄞 end"
+    var out = ""
+    var n = 0
+    for c in chars(s):
+        n += 1
+        out = out + f"{c}"
+        if c == 'w':
+            s = "changed"
+        if c == '✓':
+            continue
+        if c == 'n':
+            break
+    print(f"{n} {out} {s}")
+    for c in chars(""):
+        print("never")
+    for c in chars("ab"):
+        for d in chars("xy"):
+            print(f"{c}{d}")

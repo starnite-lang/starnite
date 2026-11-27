@@ -398,7 +398,21 @@ let rec find_impl (tb : rtab) ?(bounds = []) trait (targs : ty list) self : reso
         | [] -> derive tb ~bounds trait self
       end
 
+(* The types whose derived Eq or Hash is being worked out. A type that holds itself, directly or
+   through an array, a tuple or another type, meets itself here: it has the trait if the rest of
+   it does, so the question is answered yes for the type already being asked about. *)
+and deriving : (string * string) list ref = ref []
+
 and derive tb ~bounds trait self =
+  let me = (trait, show_ty self) in
+  if (trait = "Eq" || trait = "Hash") && List.mem me !deriving then Some RDerived
+  else begin
+    let saved = !deriving in
+    deriving := me :: saved;
+    Fun.protect ~finally:(fun () -> deriving := saved) (fun () -> derive_in tb ~bounds trait self)
+  end
+
+and derive_in tb ~bounds trait self =
   let all_fields f =
     match repr self with
     | TArray t -> f t
