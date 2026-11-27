@@ -771,7 +771,8 @@ and stmt g ind d =
          | 10 -> [ ln "var %s: Array[Int] = [%s, %s]" a (e ()) (e ()); ln "var %s: Array[Int] = [0]" o; ln "for %s in 0..%d:" s n;
                    ln "    %s[0] = %s" a s; ln "    %s = %s" o a; ln "%s[1] = %s" a (e ()); ln {|print(f"{%s} {%s}")|} a o ]
          | 11 -> [ ln "var %s: Array[Int] = [%s]" a (e ()); ln "match Named(\"n\", %s):" a; ln "    Named(_, %s) ->" s; ln "        %s[0] = %s" a (e ());
-                   ln {|        print(f"{%s} {%s}")|} s a; ln "    _ -> print(\"none\")" ]
+                   ln {|        print(f"{%s} {%s}")|} s a; (* every variant has an arm of its own: the mutation that leaves an arm out must leave a match that is not exhaustive *)
+                   ln "    Dot -> print(\"none\")"; ln "    Box(_, _) -> print(\"none\")" ]
          | 12 -> [ ln "var %s: Array[Int] = [%s, %s]" a (e ()) (e ()); ln "let %s = copy(%s)" s a; ln "%s[0] = %s" a (e ());
                    ln {|print(f"{%s} {%s}")|} a s ]
          | _ -> [ ln "var %s: Array[Array[Int]] = [[%s], [%s]]" a (e ()) (e ()); ln "%s[0] = %s[1]" a a; ln "%s[0][0] = %s" a (e ());
