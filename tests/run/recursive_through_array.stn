@@ -1,0 +1,28 @@
+# A data type that holds itself only through an array or a map. Working out whether it has Eq
+# went round for ever: the array asked the type, which asked the array. It is compared, and
+# counted, like any other.
+type Json = JNull | JInt(value: Int) | JList(items: Array[Json]) | JObject(fields: Map[Str, Json])
+type Tree = Leaf | Node(children: Array[Tree], pair: (Tree, Int))
+
+fn count(j: Json) -> Int:
+    match j:
+        JNull -> 0
+        JInt(_) -> 1
+        JList(items) ->
+            var t = 0
+            for i in items:
+                t += count(i)
+            t
+        JObject(fields) ->
+            var t = 0
+            for (_, v) in fields:
+                t += count(v)
+            t
+
+fn main() ! io:
+    let a = JList([JInt(1), JNull, JObject({"a": JInt(2), "b": JList([JInt(3)])})])
+    let b = JList([JInt(1), JNull, JObject({"a": JInt(2), "b": JList([JInt(3)])})])
+    let c = JList([JInt(1), JNull, JObject({"a": JInt(2), "b": JList([JInt(4)])})])
+    print(f"{count(a)} {a == b} {a == c} {a != c}")
+    let t = Node([Leaf, Node([], (Leaf, 1))], (Leaf, 2))
+    print(f"{t == Node([Leaf, Node([], (Leaf, 1))], (Leaf, 2))} {t == Leaf}")
