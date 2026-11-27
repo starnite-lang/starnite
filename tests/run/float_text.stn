@@ -1,0 +1,23 @@
+# The text of a Float is the shortest that reads back as the same number. The search for it
+# starts at fifteen digits (six for an F32) and drops trailing zeros, except below the smallest
+# normal number, where there are fewer digits than that to hold.
+fn main() ! io:
+    let xs = [0.1, 0.5, 1.0, 76.185, 58.67500000000001, 1.0e300, 5.0e-324, 123456789012345.6, 0.30000000000000004, 2.0 / 3.0, 1.0e21, 1.0e-7, 100.0, 9007199254740993.0, 1.7976931348623157e308, 0.000123]
+    for x in xs:
+        print(f"{x} {0.0 - x}")
+    let f: F32 = 0.1
+    let g: F32 = 16777217.0
+    let h: F32 = 3.4028235e38
+    print(f"{f} {g} {h}")
+    var x = 1.0e-320
+    var k = 0
+    while k < 40:
+        print(f"{x} {x * 3.7} {1.0 / (x * 1.0e300 + 0.3)}")
+        x = x * 1234.5678
+        k += 1
+    var y: F32 = 1.0e-44
+    k = 0
+    while k < 30:
+        print(f"{y}")
+        y = y * 37.7
+        k += 1

@@ -420,7 +420,13 @@ static StnStr stn_show_float_digits(double v, int maxp, int is_f32) {
     char b[64], out[96];
     if (isnan(v)) return stn_str_new("nan", 3);
     if (isinf(v)) return v > 0 ? stn_str_new("inf", 3) : stn_str_new("-inf", 4);
-    for (int p = 1; p <= maxp; p++) {
+    /* The shortest digits that read back as v. Fifteen digits (six for an F32) always hold a
+       decimal of that length or shorter exactly: rounding v to fifteen digits gives the shortest
+       text followed by zeros, which are dropped below. So the search starts there, where it
+       used to start at one digit and print and read back up to seventeen times. */
+    /* not below the smallest normal number, where there are fewer digits than that to hold */
+    int normal = is_f32 ? fabs(v) >= 1.17549435e-38 : fabs(v) >= 2.2250738585072014e-308;
+    for (int p = !normal ? 1 : is_f32 ? 6 : 15; p <= maxp; p++) {
         snprintf(b, sizeof b, "%.*e", p - 1, v);
         double back = strtod(b, NULL);
         if (p == maxp || (is_f32 ? (float)back == (float)v : back == v)) break;
@@ -1299,7 +1305,7 @@ StnMap* stn_map_new(const StnMapOps* ops) {
     m->koff = ops->kind == STN_KEY_I64 ? 0 : 8;
     m->voff = (uint32_t)(m->koff + ((ops->ksize + 7) & ~(size_t)7));
     m->stride = (uint32_t)(m->voff + ((ops->vsize + 7) & ~(size_t)7));
-    m->index = NULL; m->places = NULL; m->entries = NULL; m->dead = NULL;
+    m->index = NULL; m->places = NULL; m->entries = NULL; m->dead = NULL; m->eroom = 0;
     return m;
 }
 
@@ -1325,7 +1331,7 @@ static inline uint64_t stn_map_free_slot(const uint8_t* ctrl, uint64_t mask, uin
 /* Gives the table an index of 1 << ilog slots and room for the entries that go with it. The live
    entries close up over the tombstones, in their order and in the buffer they are in, which then
    grows or shrinks in place where the allocator can; the index is made anew from their hashes. */
-static void stn_map_rebuild(StnMap* m, uint32_t ilog) {
+static void stn_map_rebuild(StnMap* m, uint32_t ilog, int64_t need) {
     if (ilog > 40) stn_too_large("<runtime>", 0, 0);
     uint64_t slots = (uint64_t)1 << ilog, mask = slots - 1;
     int64_t cap = stn_map_room(ilog);
@@ -1341,7 +1347,13 @@ static void stn_map_rebuild(StnMap* m, uint32_t ilog) {
         m->used = n;
     }
     free(m->dead); m->dead = NULL;
-    char* entries = (char*)realloc(m->entries, (size_t)cap * m->stride);
+    /* Room for twice the entries there are, for those the caller says are coming, and for four at
+       least, up to what the index takes: a map of two entries does not hold room for fourteen. */
+    int64_t eroom = m->used * 2;
+    if (eroom < need) eroom = need;
+    if (eroom < 4) eroom = 4;
+    if (eroom > cap) eroom = cap;
+    char* entries = (char*)realloc(m->entries, (size_t)eroom * m->stride);
     uint8_t* index = (uint8_t*)malloc(stn_index_bytes(ilog, width));
     if (!index || !entries) stn_map_oom();
     memset(index, STN_FREE, slots + STN_GROUP);
@@ -1353,7 +1365,7 @@ static void stn_map_rebuild(StnMap* m, uint32_t ilog) {
         stn_place_set(places, width, s, (uint64_t)i);
     }
     free(m->index);
-    m->index = index; m->places = places; m->entries = entries; m->ilog = ilog; m->cap = cap;
+    m->index = index; m->places = places; m->entries = entries; m->ilog = ilog; m->cap = cap; m->eroom = eroom;
 }
 
 static uint32_t stn_map_ilog_for(int64_t n) {
@@ -1366,7 +1378,7 @@ StnMap* stn_map_with_capacity(const StnMapOps* ops, int64_t n) {
     StnMap* m = stn_map_new(ops);
     if (n > 0) {
         if (n > STN_MAX_ALLOC) stn_too_large("<runtime>", 0, 0);
-        stn_map_rebuild(m, stn_map_ilog_for(n));
+        stn_map_rebuild(m, stn_map_ilog_for(n), n);
     }
     return m;
 }
@@ -1399,14 +1411,14 @@ static void stn_map_copy_for_write(StnMap** pm) {
     const StnMapOps* ops = m->ops;
     StnMap* c = stn_map_new(ops);
     if (m->ilog) {
-        size_t ibytes = stn_index_bytes(m->ilog, stn_place_width(m->cap)), ebytes = (size_t)m->cap * m->stride;
+        size_t ibytes = stn_index_bytes(m->ilog, stn_place_width(m->cap)), ebytes = (size_t)m->eroom * m->stride;
         c->index = (uint8_t*)malloc(ibytes);
         c->entries = (char*)malloc(ebytes);
         if (!c->index || !c->entries) stn_map_oom();
         memcpy(c->index, m->index, ibytes);
         c->places = c->index + ((size_t)1 << m->ilog) + STN_GROUP;
         memcpy(c->entries, m->entries, (size_t)m->used * m->stride);
-        c->ilog = m->ilog; c->cap = m->cap; c->used = m->used; c->len = m->len;
+        c->ilog = m->ilog; c->cap = m->cap; c->used = m->used; c->len = m->len; c->eroom = m->eroom;
         if (m->dead) {
             size_t dbytes = (size_t)((m->cap + 63) / 64) * 8;
             c->dead = (uint64_t*)malloc(dbytes);
@@ -1467,7 +1479,14 @@ static inline char* stn_map_append(StnMap* m, uint64_t w, const void* key) {
         if (m->len >= STN_MAX_ALLOC) stn_too_large("<runtime>", 0, 0);
         /* mostly tombstones: the same index, emptied of them; otherwise twice the index */
         uint32_t ilog = !m->ilog ? 4 : (m->len * 2 <= m->cap ? m->ilog : m->ilog + 1);
-        stn_map_rebuild(m, ilog);
+        stn_map_rebuild(m, ilog, 0);
+    }
+    if (__builtin_expect(m->used == m->eroom, 0)) {
+        /* the index has room for more than the buffer holds yet */
+        int64_t eroom = m->eroom * 2 > m->cap ? m->cap : m->eroom * 2;
+        char* entries = (char*)realloc(m->entries, (size_t)eroom * m->stride);
+        if (!entries) stn_map_oom();
+        m->entries = entries; m->eroom = eroom;
     }
     uint64_t mask = ((uint64_t)1 << m->ilog) - 1;
     uint64_t s = stn_map_free_slot(m->index, mask, w);
@@ -1555,7 +1574,7 @@ int stn_map_remove(StnMap** pm, const void* key, void* out) {
         stn_ctrl_set(m->index, mask, s, STN_DEAD);
         if ((m->used - m->len) * 4 > m->used * 3 && m->used >= 16) {
             uint32_t ilog = stn_map_ilog_for(m->len);
-            stn_map_rebuild(m, ilog > m->ilog ? m->ilog : ilog);
+            stn_map_rebuild(m, ilog > m->ilog ? m->ilog : ilog, 0);
         }
     }
     return 1;
