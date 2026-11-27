@@ -1380,8 +1380,9 @@ static void stn_map_rebuild(StnMap* m, uint32_t ilog, int64_t need) {
         memcpy(entries, m->entries, (size_t)m->used * m->stride);
         free(m->index);
     } else {
-        index = (uint8_t*)malloc(ibytes);
+        /* the entries first: an index allocated behind them would stop them growing in place */
         entries = (char*)realloc(m->entries, ebytes);
+        index = (uint8_t*)malloc(ibytes);
         if (!index || !entries) stn_map_oom();
         free(m->index);
     }
