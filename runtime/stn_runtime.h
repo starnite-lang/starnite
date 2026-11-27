@@ -608,6 +608,20 @@ StnStr  stn_str_repeat(const StnStr* s, int64_t n, const char* file, int line, i
 int     stn_parse_int(const StnStr* s, int64_t* out);   /* 0 ok, 1 invalid, 2 out of range */
 int     stn_parse_float(const StnStr* s, double* out);  /* 0 ok, 1 invalid */
 void    stn_check_char(int64_t c, const char* file, int line, int col);
+/* The character that starts at byte *i of the n bytes at p, with *i moved past it: what
+   stn_str_chars puts in its array, one at a time, for a loop that needs no array. */
+static inline uint32_t stn_str_next_char(const unsigned char* p, int64_t n, int64_t* i) {
+    int64_t at = *i;
+    uint32_t c = p[at];
+    if (__builtin_expect(c < 0x80, 1)) { *i = at + 1; return c; }
+    /* strings are valid UTF-8; the bound keeps a decode inside the buffer regardless */
+    if ((c >= 0xF0 && at + 4 > n) || (c >= 0xE0 && at + 3 > n) || (c >= 0xC0 && at + 2 > n)) { *i = at + 1; return 0xFFFD; }
+    if (c >= 0xF0) { *i = at + 4; return ((c & 7) << 18) | ((uint32_t)(p[at+1] & 0x3F) << 12) | ((uint32_t)(p[at+2] & 0x3F) << 6) | (p[at+3] & 0x3F); }
+    if (c >= 0xE0) { *i = at + 3; return ((c & 15) << 12) | ((uint32_t)(p[at+1] & 0x3F) << 6) | (p[at+2] & 0x3F); }
+    if (c >= 0xC0) { *i = at + 2; return ((c & 31) << 6) | (p[at+1] & 0x3F); }
+    *i = at + 1;
+    return c;
+}
 
 /* ---- maps and sets (section 3.6) ---- */
 /* One table serves both: a set is a map whose values take no room. Entries sit in a dense array in
@@ -642,6 +656,7 @@ typedef struct StnMap {
     uint8_t* places;
     char* entries;
     uint64_t* dead;       /* with no hash word: a bit for each removed entry, or NULL when there is none */
+    int64_t eroom;        /* entries the buffer has room for now: it grows to cap by doubling, so a small map stays small */
 } StnMap;
 
 void     stn_map_release(void* p);

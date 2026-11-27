@@ -22,6 +22,8 @@ let lit_key (l : Syntax.lit) (t : ty) =
   | LChar c, _ -> "c" ^ string_of_int c
   | _ -> "?"
 
+let array_case = ref 0
+
 let rec of_tpat = function
   | TPWild | TPVar _ -> W
   | TPLit (LBool b, _) -> C (KVariant (if b then 1 else 0), [])
@@ -30,6 +32,13 @@ let rec of_tpat = function
   | TPVariant (_, _, i, ps) -> C (KVariant i, List.map of_tpat ps)
   | TPStruct (_, _, ps) | TPTuple ps -> C (KSingle, List.map of_tpat ps)
   | TPErrType (t, p) -> C (KErr (show_ty t), [ of_tpat p ])
+  (* An array has no end of lengths, so its patterns are like literals: only [..] covers every
+     array. Two patterns of one length are the same case only when neither tests its elements. *)
+  | TPArray ([], true) -> W
+  | TPArray (ps, rest) ->
+      let open_ = List.for_all (fun p -> of_tpat p = W) ps in
+      if open_ then C (KLit (Printf.sprintf "a%d%s" (List.length ps) (if rest then "+" else "")), [])
+      else (incr array_case; C (KLit (Printf.sprintf "a#%d" !array_case), []))
 
 (* All constructors of a type with their argument types; None when there are infinitely many. *)
 let ctors decls t : (ctor * ty list * string) list option =

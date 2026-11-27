@@ -1,0 +1,58 @@
+# A data type that holds itself only through an array or a map. Working out whether it has Eq
+# went round for ever: the array asked the type, which asked the array. It is compared, and
+# counted, like any other. So is hashing one, as a key of a map or an element of a set: the code
+# that hashes a data type is a function of its own, which a type that holds itself calls.
+type Json = JNull | JInt(value: Int) | JList(items: Array[Json]) | JObject(fields: Map[Str, Json])
+type Tree = Leaf | Node(children: Array[Tree], pair: (Tree, Int))
+type Bush = Twig | Fork(children: Array[Bush])
+type Chain = End | Link(n: Int, next: Chain)
+# structs alone: one that holds itself through an array, and two that hold each other
+type Folder = struct(inside: Array[Folder])
+type Shelf = struct(boxes: Array[Crate], n: Int)
+type Crate = struct(shelves: Array[Shelf])
+
+fn count(j: Json) -> Int:
+    match j:
+        JNull -> 0
+        JInt(_) -> 1
+        JList(items) ->
+            var t = 0
+            for i in items:
+                t += count(i)
+            t
+        JObject(fields) ->
+            var t = 0
+            for (_, v) in fields:
+                t += count(v)
+            t
+
+fn main() ! io:
+    let a = JList([JInt(1), JNull, JObject({"a": JInt(2), "b": JList([JInt(3)])})])
+    let b = JList([JInt(1), JNull, JObject({"a": JInt(2), "b": JList([JInt(3)])})])
+    let c = JList([JInt(1), JNull, JObject({"a": JInt(2), "b": JList([JInt(4)])})])
+    print(f"{count(a)} {a == b} {a == c} {a != c}")
+    let t = Node([Leaf, Node([], (Leaf, 1))], (Leaf, 2))
+    print(f"{t == Node([Leaf, Node([], (Leaf, 1))], (Leaf, 2))} {t == Leaf}")
+    # as keys: equal values built apart are the same key, and one that differs is not there
+    var seen: Set[Bush] = {}
+    seen.add(Fork([Twig]))
+    seen.add(Fork([Twig, Fork([])]))
+    seen.add(Fork([Twig]))
+    print(f"{seen.contains(Fork([Twig]))} {seen.contains(Fork([Twig, Fork([])]))} {seen.contains(Fork([Fork([])]))} {seen.contains(Twig)} {len(seen)}")
+    var lengths: Map[Chain, Int] = {}
+    lengths[Link(1, Link(2, End))] = 2
+    lengths[End] = 0
+    lengths[Link(1, Link(2, End))] += 10
+    print(f"{lengths.get(Link(1, Link(2, End))).or(-1)} {lengths.get(Link(1, End)).or(-1)} {lengths.get(End).or(-1)} {len(lengths)}")
+    var by_pair: Map[(Bush, Chain), Str] = {}
+    by_pair[(Fork([Twig]), Link(7, End))] = "both"
+    print(f"{by_pair.get((Fork([Twig]), Link(7, End))).or("none")} {by_pair.get((Fork([]), Link(7, End))).or("none")}")
+    print(f"{Folder([Folder([])]) == Folder([Folder([])])} {Folder([]) == Folder([Folder([])])}")
+    var folders: Set[Folder] = {}
+    folders.add(Folder([Folder([])]))
+    folders.add(Folder([Folder([])]))
+    folders.add(Folder([]))
+    print(f"{folders.contains(Folder([Folder([])]))} {folders.contains(Folder([Folder([]), Folder([])]))} {len(folders)}")
+    var shelves: Map[Shelf, Int] = {}
+    shelves[Shelf([Crate([Shelf([], 2)])], 1)] = 7
+    print(f"{shelves.get(Shelf([Crate([Shelf([], 2)])], 1)).or(0)} {shelves.get(Shelf([Crate([Shelf([], 3)])], 1)).or(0)} {len(shelves)}")

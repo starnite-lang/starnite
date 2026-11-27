@@ -1,0 +1,5 @@
+# expect: E0202 4:14
+type Wrap = struct(items: Array[Int], n: Int)
+fn main() ! io:
+    let Wrap([a, b], n) = Wrap([1], 2)
+    print(f"{a} {b} {n}")

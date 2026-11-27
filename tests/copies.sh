@@ -41,6 +41,10 @@ for f in double negate grown; do
     echo "$f: $(printf '%s\n' "$body" | grep -c 'stn_unique(\|stn_array_make_unique') tested, $(printf '%s\n' "$body" | grep -c 'STN_ASSUME_UNIQUE') left out"
 done > "$tmp/out"
 check "inferred" "$here/copies/inferred.expected"
+# a variable of a data type kept in line moves at its last use (section 9.2): the map it holds is
+# then never copied before a write, where each insert of tests/copies/inline_moves.stn copied it
+"$starnite" run --profile-copies tests/copies/inline_moves.stn < /dev/null > "$tmp/out" 2>&1; echo "exit $?" >> "$tmp/out"
+check "inline moves" "$here/copies/inline_moves.profile"
 # a program that copies nothing says so, and the flags change nothing else it prints
 "$starnite" run --profile-copies tests/run/basics.stn < /dev/null > "$tmp/out" 2>/dev/null; echo "exit $?" >> "$tmp/out"
 check "output unchanged" "$here/run/basics.out"

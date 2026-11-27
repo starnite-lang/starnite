@@ -1,0 +1,4 @@
+# expect: E0100 2:16
+type Wrapped = Bad(from ParseError, line: Int) | Fine
+fn main() ! io:
+    print("x")

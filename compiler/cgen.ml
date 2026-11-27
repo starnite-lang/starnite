@@ -1922,6 +1922,24 @@ and hash_call fc t a : string =
           end;
           Printf.sprintf "%s(%s)" n a)
 
+(* whether a value of type t can hold another value of type t: through its fields, the elements
+   of its arrays and tuples, and the fields of the structs and data types those are *)
+and holds_itself st (t : ty) : bool =
+  let me = mangle t in
+  let seen = Hashtbl.create 8 in
+  let rec reach (u : ty) =
+    let u = repr u in
+    let children = match u with
+      | TArray et -> [ et ]
+      | TTuple ts -> ts
+      | TNamed (("Map" | "Set"), args) -> args
+      | TNamed _ when is_struct st u || is_data st u -> by_value_children st u
+      | _ -> [] in
+    List.exists (fun c ->
+        let k = mangle c in
+        k = me || (if Hashtbl.mem seen k then false else (Hashtbl.replace seen k (); reach c))) children in
+  reach t
+
 (* statements that add the words of a value to the SipHash stream s *)
 and hash_feed fc t a : string =
   let st = fc.st in
@@ -1938,16 +1956,40 @@ and hash_feed fc t a : string =
       Printf.sprintf "stn_sip_word(&s, (uint64_t)(%s)->len); for (int64_t %s = 0; %s < (%s)->len; %s++) { %s %s = ((%s*)(%s)->data)[%s]; %s }"
         a i i a i (cty st et) x (cty st et) a i (hash_feed fc et x)
   | TTuple ts -> String.concat " " (List.mapi (fun i et -> hash_feed fc et (Printf.sprintf "(%s).f%d" a i)) ts)
+  | TNamed _ when is_struct st t && holds_itself st t ->
+      (* a struct that holds itself, through an array of itself or of another struct that holds
+         it: a function of its own, as for a data type below, and for the same reason *)
+      let n = "hfeed_" ^ mangle t in
+      if not (Hashtbl.mem st.defined n) then begin
+        Hashtbl.replace st.defined n ();
+        let c = cty st t in
+        pr st.protos "static void %s(StnSip* sp, %s x);\n" n c;
+        let body = String.concat " " (List.map (fun (fnm, et) -> hash_feed fc et (Printf.sprintf "(x).%s" (fname fnm))) (struct_fields st t)) in
+        pr st.helpers "static void %s(StnSip* sp, %s x) { StnSip s = *sp; %s *sp = s; }\n" n c body
+      end;
+      Printf.sprintf "%s(&s, %s);" n a
   | TNamed _ when is_struct st t -> String.concat " " (List.map (fun (fnm, et) -> hash_feed fc et (Printf.sprintf "(%s).%s" a (fname fnm))) (struct_fields st t))
   | TNamed _ when is_data st t ->
-      let arms =
-        List.map
-          (fun ((v : variant_info), fs) ->
-            Printf.sprintf "case %d: { %s break; }" v.vindex
-              (String.concat " " (List.mapi (fun i (_, et) -> hash_feed fc et (variant_field st t v i a)) fs)))
-          (variants st t)
-      in
-      Printf.sprintf "stn_sip_word(&s, (uint64_t)%s); switch (%s) { %s }" (tag_of st t a) (tag_of st t a) (String.concat " " arms)
+      (* A function of its own for each data type, named before its body is written: a type that
+         holds itself, directly or through an array or a tuple, then calls the function where
+         writing its fields out in place would never end. It adds to the same stream, so the
+         words hashed, and the hash, are what they were. *)
+      let n = "hfeed_" ^ mangle t in
+      if not (Hashtbl.mem st.defined n) then begin
+        Hashtbl.replace st.defined n ();
+        let c = cty st t in
+        pr st.protos "static void %s(StnSip* sp, %s x);\n" n c;
+        let arms =
+          List.map
+            (fun ((v : variant_info), fs) ->
+              Printf.sprintf "case %d: { %s break; }" v.vindex
+                (String.concat " " (List.mapi (fun i (_, et) -> hash_feed fc et (variant_field st t v i "x")) fs)))
+            (variants st t)
+        in
+        pr st.helpers "static void %s(StnSip* sp, %s x) { StnSip s = *sp; stn_sip_word(&s, (uint64_t)%s); switch (%s) { %s } *sp = s; }\n"
+          n c (tag_of st t "x") (tag_of st t "x") (String.concat " " arms)
+      end;
+      Printf.sprintf "%s(&s, %s);" n a
   | _ -> Printf.sprintf "stn_sip_word(&s, %s);" (hash_call fc t a)
 
 (* The table of a Map[K, V] or a Set[K]: how its keys are hashed, compared, counted, and its values. *)
@@ -2227,6 +2269,12 @@ and pat_test fc (t : ty) (p : tpat) (v : string) : string list * (string * var *
           let sub = List.mapi (fun i (p, ft) -> pat_test fc ft p (Printf.sprintf "(%s).f%d" v i)) (List.combine ps ts_) in
           (List.concat_map fst sub, List.concat_map snd sub)
       | _ -> ([], []))
+  | TPArray (ps, rest) ->
+      (* the length is tested first, and && goes no further when it fails; elements are read where they are *)
+      let et = match repr t with TArray et -> et | _ -> TUnit in
+      let n = List.length ps in
+      let sub = List.mapi (fun i p -> pat_test fc et p (Printf.sprintf "((%s*)(%s)->data)[%d]" (cty st et) v i)) ps in
+      (Printf.sprintf "stn_len(%s) %s %d" v (if rest then ">=" else "==") n :: List.concat_map fst sub, List.concat_map snd sub)
   | TPErrType (et, p) ->
       let et = ts fc et in
       let id = err_id st et in
@@ -2948,6 +2996,28 @@ and loop_over fc (src : titer) (p : tpat) ?(before = fun () -> ()) ?pop_array ?i
           line fc "}";
           pop fc
       | _ -> unsupported a.l "for ... in mut with a pattern")
+  | IArray ({ e = XCall (CBuiltin ("chars@Str", _), [ src ], _); _ }, MBorrow) ->
+      (* the characters of a string are read off its bytes one at a time: no array of them is
+         made. The loop holds the string, so what the body does to the variable it came from
+         does not reach the bytes being read. *)
+      let sv = tmp fc TStr (own fc (expr fc src.a) TStr) in
+      own_in fc sv TStr;
+      let n = fresh st "_n" and bytes = fresh st "_p" and i = fresh st "_i" in
+      line fc "int64_t %s;" n;
+      line fc "const unsigned char* %s = (const unsigned char*)stn_str_span(&%s, &%s);" bytes sv n;
+      before ();
+      line fc "for (int64_t %s = 0; %s < %s; ) {" i i n;
+      fc.ind <- fc.ind + 1;
+      push fc FLoop;
+      let x = tmp fc TChar (Printf.sprintf "stn_str_next_char(%s, %s, &%s)" bytes n i) in
+      let _, binds = pat_test fc TChar p x in
+      bind_pattern fc binds;
+      push fc FScope;
+      body ();
+      pop fc;
+      pop fc;
+      fc.ind <- fc.ind - 1;
+      line fc "}"
   | IArray ({ e = XCall (CBuiltin (("entries@Map" | "items@Set" as source), tys), [ src ], _); _ }, _) ->
       (* a Map or a Set is walked where it is, entry by entry in insertion order, with no array of
          its entries made first. The loop holds a reference of its own, so a write in the body makes
@@ -3406,7 +3476,10 @@ and movable_type st (t : ty) : bool =
     | TStr | TArray _ | TNamed (("Map" | "Set"), _) -> true
     | TTuple ts -> List.for_all part ts
     | TNamed _ as t when is_struct st t -> List.for_all (fun (_, ft) -> part ft) (struct_fields st t)
-    | TNamed _ as t when is_data st t -> layout st t = LBoxed || not (needs_rc st t)
+    | TNamed _ as t when is_data st t ->
+        (* a value of a data type kept in line is left with a tag that no variant has, which its
+           release passes over: see moved_out *)
+        layout st t = LBoxed || not (needs_rc st t) || List.length (variants st t) < 255
     | t -> not (needs_rc st t) in
   needs_rc st t && part t
 
@@ -3473,7 +3546,7 @@ and u_is_fresh fc (e : texpr) =
 and u_pat_vars (p : tpat) : var list =
   match p with
   | TPVar v -> [ v ]
-  | TPVariant (_, _, _, ps) | TPStruct (_, _, ps) | TPTuple ps -> List.concat_map u_pat_vars ps
+  | TPVariant (_, _, _, ps) | TPStruct (_, _, ps) | TPTuple ps | TPArray (ps, _) -> List.concat_map u_pat_vars ps
   | TPErrType (_, p) -> u_pat_vars p
   | TPWild | TPLit _ -> []
 
@@ -3752,6 +3825,8 @@ and moved_out st t n =
       String.concat " " (List.mapi (fun i ft -> if needs_rc st ft then moved_out st ft (Printf.sprintf "%s.f%d" n i) else "") ts)
   | TNamed _ as t when is_struct st t ->
       String.concat " " (List.map (fun (f, ft) -> if needs_rc st ft then moved_out st ft (Printf.sprintf "%s.%s" n (fname f)) else "") (struct_fields st t))
+  (* a data type kept in line: no variant has this tag, so the switch that releases it does nothing *)
+  | TNamed _ as t when is_data st t && layout st t = LInline -> Printf.sprintf "%s.tag = 255;" n
   | _ -> Printf.sprintf "%s = (%s)(void*)1;" n (cty st t)
 
 (* Finds the occurrences that may move a variable (section 9.2). An occurrence qualifies when it
@@ -3801,7 +3876,7 @@ and note_moves st (owned_params : var list) (body : texpr) =
         w s;
         let rec bound = function
           | TPVar v -> Hashtbl.replace decl v.vid ctx
-          | TPVariant (_, _, _, ps) | TPStruct (_, _, ps) | TPTuple ps -> List.iter bound ps
+          | TPVariant (_, _, _, ps) | TPStruct (_, _, ps) | TPTuple ps | TPArray (ps, _) -> List.iter bound ps
           | TPErrType (_, p) -> bound p
           | TPWild | TPLit _ -> () in
         let id = fresh () in
@@ -4903,7 +4978,7 @@ let note_demotions st =
       | _ -> false in
     let rec bound = function
       | TPVar w -> Hashtbl.replace derived w.vid ()
-      | TPVariant (_, _, _, ps) | TPStruct (_, _, ps) | TPTuple ps -> List.iter bound ps
+      | TPVariant (_, _, _, ps) | TPStruct (_, _, ps) | TPTuple ps | TPArray (ps, _) -> List.iter bound ps
       | TPErrType (_, p) -> bound p
       | TPWild | TPLit _ -> () in
     let captures (lam : lambda) = if List.exists (fun (w : var) -> Hashtbl.mem derived w.vid) lam.lcaps then ok := false in
