@@ -1922,6 +1922,24 @@ and hash_call fc t a : string =
           end;
           Printf.sprintf "%s(%s)" n a)
 
+(* whether a value of type t can hold another value of type t: through its fields, the elements
+   of its arrays and tuples, and the fields of the structs and data types those are *)
+and holds_itself st (t : ty) : bool =
+  let me = mangle t in
+  let seen = Hashtbl.create 8 in
+  let rec reach (u : ty) =
+    let u = repr u in
+    let children = match u with
+      | TArray et -> [ et ]
+      | TTuple ts -> ts
+      | TNamed (("Map" | "Set"), args) -> args
+      | TNamed _ when is_struct st u || is_data st u -> by_value_children st u
+      | _ -> [] in
+    List.exists (fun c ->
+        let k = mangle c in
+        k = me || (if Hashtbl.mem seen k then false else (Hashtbl.replace seen k (); reach c))) children in
+  reach t
+
 (* statements that add the words of a value to the SipHash stream s *)
 and hash_feed fc t a : string =
   let st = fc.st in
@@ -1938,6 +1956,18 @@ and hash_feed fc t a : string =
       Printf.sprintf "stn_sip_word(&s, (uint64_t)(%s)->len); for (int64_t %s = 0; %s < (%s)->len; %s++) { %s %s = ((%s*)(%s)->data)[%s]; %s }"
         a i i a i (cty st et) x (cty st et) a i (hash_feed fc et x)
   | TTuple ts -> String.concat " " (List.mapi (fun i et -> hash_feed fc et (Printf.sprintf "(%s).f%d" a i)) ts)
+  | TNamed _ when is_struct st t && holds_itself st t ->
+      (* a struct that holds itself, through an array of itself or of another struct that holds
+         it: a function of its own, as for a data type below, and for the same reason *)
+      let n = "hfeed_" ^ mangle t in
+      if not (Hashtbl.mem st.defined n) then begin
+        Hashtbl.replace st.defined n ();
+        let c = cty st t in
+        pr st.protos "static void %s(StnSip* sp, %s x);\n" n c;
+        let body = String.concat " " (List.map (fun (fnm, et) -> hash_feed fc et (Printf.sprintf "(x).%s" (fname fnm))) (struct_fields st t)) in
+        pr st.helpers "static void %s(StnSip* sp, %s x) { StnSip s = *sp; %s *sp = s; }\n" n c body
+      end;
+      Printf.sprintf "%s(&s, %s);" n a
   | TNamed _ when is_struct st t -> String.concat " " (List.map (fun (fnm, et) -> hash_feed fc et (Printf.sprintf "(%s).%s" a (fname fnm))) (struct_fields st t))
   | TNamed _ when is_data st t ->
       (* A function of its own for each data type, named before its body is written: a type that

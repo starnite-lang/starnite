@@ -3,4 +3,7 @@ true false
 true true false false 2
 12 -1 0 2
 both none
+true false
+true false 2
+7 0 1
 exit 0

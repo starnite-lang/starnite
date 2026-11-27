@@ -6,6 +6,10 @@ type Json = JNull | JInt(value: Int) | JList(items: Array[Json]) | JObject(field
 type Tree = Leaf | Node(children: Array[Tree], pair: (Tree, Int))
 type Bush = Twig | Fork(children: Array[Bush])
 type Chain = End | Link(n: Int, next: Chain)
+# structs alone: one that holds itself through an array, and two that hold each other
+type Folder = struct(inside: Array[Folder])
+type Shelf = struct(boxes: Array[Crate], n: Int)
+type Crate = struct(shelves: Array[Shelf])
 
 fn count(j: Json) -> Int:
     match j:
@@ -43,3 +47,12 @@ fn main() ! io:
     var by_pair: Map[(Bush, Chain), Str] = {}
     by_pair[(Fork([Twig]), Link(7, End))] = "both"
     print(f"{by_pair.get((Fork([Twig]), Link(7, End))).or("none")} {by_pair.get((Fork([]), Link(7, End))).or("none")}")
+    print(f"{Folder([Folder([])]) == Folder([Folder([])])} {Folder([]) == Folder([Folder([])])}")
+    var folders: Set[Folder] = {}
+    folders.add(Folder([Folder([])]))
+    folders.add(Folder([Folder([])]))
+    folders.add(Folder([]))
+    print(f"{folders.contains(Folder([Folder([])]))} {folders.contains(Folder([Folder([]), Folder([])]))} {len(folders)}")
+    var shelves: Map[Shelf, Int] = {}
+    shelves[Shelf([Crate([Shelf([], 2)])], 1)] = 7
+    print(f"{shelves.get(Shelf([Crate([Shelf([], 2)])], 1)).or(0)} {shelves.get(Shelf([Crate([Shelf([], 3)])], 1)).or(0)} {len(shelves)}")
