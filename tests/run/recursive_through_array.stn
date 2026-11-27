@@ -1,8 +1,11 @@
 # A data type that holds itself only through an array or a map. Working out whether it has Eq
 # went round for ever: the array asked the type, which asked the array. It is compared, and
-# counted, like any other.
+# counted, like any other. So is hashing one, as a key of a map or an element of a set: the code
+# that hashes a data type is a function of its own, which a type that holds itself calls.
 type Json = JNull | JInt(value: Int) | JList(items: Array[Json]) | JObject(fields: Map[Str, Json])
 type Tree = Leaf | Node(children: Array[Tree], pair: (Tree, Int))
+type Bush = Twig | Fork(children: Array[Bush])
+type Chain = End | Link(n: Int, next: Chain)
 
 fn count(j: Json) -> Int:
     match j:
@@ -26,3 +29,17 @@ fn main() ! io:
     print(f"{count(a)} {a == b} {a == c} {a != c}")
     let t = Node([Leaf, Node([], (Leaf, 1))], (Leaf, 2))
     print(f"{t == Node([Leaf, Node([], (Leaf, 1))], (Leaf, 2))} {t == Leaf}")
+    # as keys: equal values built apart are the same key, and one that differs is not there
+    var seen: Set[Bush] = {}
+    seen.add(Fork([Twig]))
+    seen.add(Fork([Twig, Fork([])]))
+    seen.add(Fork([Twig]))
+    print(f"{seen.contains(Fork([Twig]))} {seen.contains(Fork([Twig, Fork([])]))} {seen.contains(Fork([Fork([])]))} {seen.contains(Twig)} {len(seen)}")
+    var lengths: Map[Chain, Int] = {}
+    lengths[Link(1, Link(2, End))] = 2
+    lengths[End] = 0
+    lengths[Link(1, Link(2, End))] += 10
+    print(f"{lengths.get(Link(1, Link(2, End))).or(-1)} {lengths.get(Link(1, End)).or(-1)} {lengths.get(End).or(-1)} {len(lengths)}")
+    var by_pair: Map[(Bush, Chain), Str] = {}
+    by_pair[(Fork([Twig]), Link(7, End))] = "both"
+    print(f"{by_pair.get((Fork([Twig]), Link(7, End))).or("none")} {by_pair.get((Fork([]), Link(7, End))).or("none")}")

@@ -1,3 +1,6 @@
 3 true false true
 true false
+true true false false 2
+12 -1 0 2
+both none
 exit 0

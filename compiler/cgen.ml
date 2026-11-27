@@ -1940,14 +1940,26 @@ and hash_feed fc t a : string =
   | TTuple ts -> String.concat " " (List.mapi (fun i et -> hash_feed fc et (Printf.sprintf "(%s).f%d" a i)) ts)
   | TNamed _ when is_struct st t -> String.concat " " (List.map (fun (fnm, et) -> hash_feed fc et (Printf.sprintf "(%s).%s" a (fname fnm))) (struct_fields st t))
   | TNamed _ when is_data st t ->
-      let arms =
-        List.map
-          (fun ((v : variant_info), fs) ->
-            Printf.sprintf "case %d: { %s break; }" v.vindex
-              (String.concat " " (List.mapi (fun i (_, et) -> hash_feed fc et (variant_field st t v i a)) fs)))
-          (variants st t)
-      in
-      Printf.sprintf "stn_sip_word(&s, (uint64_t)%s); switch (%s) { %s }" (tag_of st t a) (tag_of st t a) (String.concat " " arms)
+      (* A function of its own for each data type, named before its body is written: a type that
+         holds itself, directly or through an array or a tuple, then calls the function where
+         writing its fields out in place would never end. It adds to the same stream, so the
+         words hashed, and the hash, are what they were. *)
+      let n = "hfeed_" ^ mangle t in
+      if not (Hashtbl.mem st.defined n) then begin
+        Hashtbl.replace st.defined n ();
+        let c = cty st t in
+        pr st.protos "static void %s(StnSip* sp, %s x);\n" n c;
+        let arms =
+          List.map
+            (fun ((v : variant_info), fs) ->
+              Printf.sprintf "case %d: { %s break; }" v.vindex
+                (String.concat " " (List.mapi (fun i (_, et) -> hash_feed fc et (variant_field st t v i "x")) fs)))
+            (variants st t)
+        in
+        pr st.helpers "static void %s(StnSip* sp, %s x) { StnSip s = *sp; stn_sip_word(&s, (uint64_t)%s); switch (%s) { %s } *sp = s; }\n"
+          n c (tag_of st t "x") (tag_of st t "x") (String.concat " " arms)
+      end;
+      Printf.sprintf "%s(&s, %s);" n a
   | _ -> Printf.sprintf "stn_sip_word(&s, %s);" (hash_call fc t a)
 
 (* The table of a Map[K, V] or a Set[K]: how its keys are hashed, compared, counted, and its values. *)
