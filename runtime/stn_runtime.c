@@ -1296,7 +1296,17 @@ static inline void stn_ctrl_set(uint8_t* ctrl, uint64_t mask, uint64_t i, uint8_
 static inline int64_t stn_map_room(uint32_t ilog) { return (int64_t)(((uint64_t)1 << ilog) / 8 * 7); }
 static inline size_t stn_index_bytes(uint32_t ilog, unsigned width) {
     size_t slots = (size_t)1 << ilog;
-    return slots + STN_GROUP + slots * width;
+    return (slots + STN_GROUP + slots * width + 7) & ~(size_t)7;
+}
+/* An index of up to 1 << STN_MAP_JOINED slots is in one block with the entries, in front of them:
+   a lookup goes from the control bytes to an entry, and in a table of a few dozen entries they
+   are then beside each other in memory whatever was allocated between the making of the table and
+   of its index. A larger index is a block of its own, so that the entries can grow in place. */
+#define STN_MAP_JOINED 6
+static inline int stn_map_joined(uint32_t ilog) { return ilog && ilog <= STN_MAP_JOINED; }
+static inline void stn_map_free_storage(StnMap* m) {
+    free(m->index);
+    if (!stn_map_joined(m->ilog)) free(m->entries);
 }
 
 StnMap* stn_map_new(const StnMapOps* ops) {
@@ -1354,9 +1364,27 @@ static void stn_map_rebuild(StnMap* m, uint32_t ilog, int64_t need) {
     if (eroom < need) eroom = need;
     if (eroom < 4) eroom = 4;
     if (eroom > cap) eroom = cap;
-    char* entries = (char*)realloc(m->entries, (size_t)eroom * m->stride);
-    uint8_t* index = (uint8_t*)malloc(stn_index_bytes(ilog, width));
-    if (!index || !entries) stn_map_oom();
+    size_t ibytes = stn_index_bytes(ilog, width), ebytes = (size_t)eroom * m->stride;
+    uint8_t* index;
+    char* entries;
+    if (stn_map_joined(ilog)) {
+        index = (uint8_t*)malloc(ibytes + ebytes);
+        if (!index) stn_map_oom();
+        entries = (char*)index + ibytes;
+        if (m->used) memcpy(entries, m->entries, (size_t)m->used * m->stride);
+        stn_map_free_storage(m);
+    } else if (stn_map_joined(m->ilog)) {
+        index = (uint8_t*)malloc(ibytes);
+        entries = (char*)malloc(ebytes);
+        if (!index || !entries) stn_map_oom();
+        memcpy(entries, m->entries, (size_t)m->used * m->stride);
+        free(m->index);
+    } else {
+        index = (uint8_t*)malloc(ibytes);
+        entries = (char*)realloc(m->entries, ebytes);
+        if (!index || !entries) stn_map_oom();
+        free(m->index);
+    }
     memset(index, STN_FREE, slots + STN_GROUP);
     uint8_t* places = index + slots + STN_GROUP;
     for (int64_t i = 0; i < m->used; i++) {
@@ -1365,7 +1393,6 @@ static void stn_map_rebuild(StnMap* m, uint32_t ilog, int64_t need) {
         stn_ctrl_set(index, mask, s, (uint8_t)(w & 0x7F));
         stn_place_set(places, width, s, (uint64_t)i);
     }
-    free(m->index);
     m->index = index; m->places = places; m->entries = entries; m->ilog = ilog; m->cap = cap; m->eroom = eroom;
 }
 
@@ -1402,7 +1429,7 @@ void stn_map_release(void* p) {
             if (ops->kdrop) ops->kdrop(e + m->koff);
             if (ops->vdrop) ops->vdrop(e + m->voff);
         }
-    free(m->index); free(m->entries); free(m->dead);
+    stn_map_free_storage(m); free(m->dead);
     stn_free(m);
     if (nests) stn_release_leave();
 }
@@ -1418,12 +1445,20 @@ static void stn_map_copy_for_write(StnMap** pm) {
     StnMap* c = stn_map_new(ops);
     if (m->eroom) {
         size_t ebytes = (size_t)m->eroom * m->stride;
-        c->entries = (char*)malloc(ebytes);
-        if (!c->entries) stn_map_oom();
-        if (m->ilog) {
-            size_t ibytes = stn_index_bytes(m->ilog, stn_place_width(m->cap));
-            c->index = (uint8_t*)malloc(ibytes);
+        size_t ibytes = m->ilog ? stn_index_bytes(m->ilog, stn_place_width(m->cap)) : 0;
+        if (stn_map_joined(m->ilog)) {
+            c->index = (uint8_t*)malloc(ibytes + ebytes);
             if (!c->index) stn_map_oom();
+            c->entries = (char*)c->index + ibytes;
+        } else {
+            c->entries = (char*)malloc(ebytes);
+            if (!c->entries) stn_map_oom();
+            if (m->ilog) {
+                c->index = (uint8_t*)malloc(ibytes);
+                if (!c->index) stn_map_oom();
+            }
+        }
+        if (m->ilog) {
             memcpy(c->index, m->index, ibytes);
             c->places = c->index + ((size_t)1 << m->ilog) + STN_GROUP;
         }
@@ -1459,9 +1494,11 @@ void stn_map_make_unique_for_write(StnMap** pm) { stn_map_make_unique(pm); }
    table outgrows this. */
 static inline char* stn_map_small_lookup(const StnMap* m, const void* key) {
     const StnMapOps* ops = m->ops;
+    if (ops->kind == STN_KEY_I64) return stn_map_small_i64(m, *(const uint64_t*)key);
+    if (ops->kind == STN_KEY_STR) return stn_map_small_str(m, *(const StnStr*)key);
     char* e = m->entries + m->koff;
     for (int64_t i = 0; i < m->used; i++, e += m->stride)
-        if (stn_key_eq(ops, e, key)) return e - m->koff;
+        if (ops->eq(e, key)) return e - m->koff;
     return NULL;
 }
 static inline char* stn_map_lookup(const StnMap* m, const void* key, uint64_t w, uint64_t* slot);
@@ -1542,9 +1579,18 @@ static inline char* stn_map_append(StnMap* m, uint64_t w, const void* key) {
     if (__builtin_expect(m->used == m->eroom, 0)) {
         /* the index has room for more than the buffer holds yet */
         int64_t eroom = m->eroom * 2 > m->cap ? m->cap : m->eroom * 2;
-        char* entries = (char*)realloc(m->entries, (size_t)eroom * m->stride);
-        if (!entries) stn_map_oom();
-        m->entries = entries; m->eroom = eroom;
+        if (stn_map_joined(m->ilog)) {
+            size_t ibytes = stn_index_bytes(m->ilog, stn_place_width(m->cap));
+            uint8_t* index = (uint8_t*)realloc(m->index, ibytes + (size_t)eroom * m->stride);
+            if (!index) stn_map_oom();
+            m->index = index; m->places = index + ((size_t)1 << m->ilog) + STN_GROUP;
+            m->entries = (char*)index + ibytes;
+        } else {
+            char* entries = (char*)realloc(m->entries, (size_t)eroom * m->stride);
+            if (!entries) stn_map_oom();
+            m->entries = entries;
+        }
+        m->eroom = eroom;
     }
     uint64_t mask = ((uint64_t)1 << m->ilog) - 1;
     uint64_t s = stn_map_free_slot(m->index, mask, w);
