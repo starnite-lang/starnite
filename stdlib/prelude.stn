@@ -278,6 +278,45 @@ fn split_once*(s: Str, sep: Str) -> (Str, Str)?:
     else:
         Some((s[0..at], s[at + len(sep)..len(s)]))
 
+# The pieces of `s` between its first `limit - 1` separators, and what is left after them as the
+# last piece: at most `limit` pieces, where split gives as many as there are. A limit of zero or
+# less gives no pieces. An empty separator traps, as it does in split.
+fn split_n*(s: Str, sep: Str, limit: Int) -> Array[Str]:
+    if len(sep) == 0:
+        return split(s, sep)
+    var out: Array[Str] = []
+    if limit <= 0:
+        return out
+    var start = 0
+    while len(out) + 1 < limit:
+        let at = find_or_end(s, sep, start)
+        if at < 0:
+            break
+        out.push(s[start..at])
+        start = at + len(sep)
+    out.push(s[start..len(s)])
+    out
+
+# the number `s` reads as, or None: parse_int for a caller that has no use for the reason
+fn to_int*(s: Str) -> Int?:
+    match try parse_int(s):
+        Ok(n) -> Some(n)
+        Err(_) -> None
+
+fn to_float*(s: Str) -> Float?:
+    match try parse_float(s):
+        Ok(x) -> Some(x)
+        Err(_) -> None
+
+# each element with its position, for `for (i, x) in enumerate(xs):`
+fn enumerate*[T](xs: Array[T]) -> Array[(Int, T)]:
+    var out: Array[(Int, T)] = []
+    var i = 0
+    for x in xs:
+        out.push((i, x))
+        i += 1
+    out
+
 # The lines of `s`. A line ends at a newline, which is not part of it, nor is a carriage return
 # just before it; text after the last newline is a line too, unless it is empty.
 fn lines*(s: Str) -> Array[Str]:

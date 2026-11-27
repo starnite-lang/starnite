@@ -1,0 +1,4 @@
+# split_n traps on an empty separator, as split does, whatever the limit
+fn main() ! io:
+    print(f"{split_n("abc", ":", 1)}")
+    print(f"{split_n("abc", "", 1)}")

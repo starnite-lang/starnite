@@ -1,0 +1,24 @@
+# Small things the prelude was missing: a Char added to a Str, numbers read as options, a split
+# that stops after a number of pieces, and elements with their positions.
+fn digits(text: Str) -> Str:
+    var out = ""
+    for c in chars(text):
+        if c >= '0' and c <= '9':
+            out += c
+    out
+
+fn main() ! io:
+    var text = "ab"
+    text += 'c'
+    text = text + '!' + "?"
+    let c = 'z'
+    print(f"{text} {"x" + c} {digits("a1b22c333")}")
+    print(f"{split_n("a:b:c:d", ":", 2)} {split_n("a:b:c:d", ":", 9)} {split_n("a", ":", 3)} {split_n("a:b", ":", 1)} {split_n("a::b", "::", 2)} {split_n("", ":", 2)}")
+    # no pieces for a limit of zero or less; the same pieces as split for a limit past the end
+    print(f"{len(split_n("a:b", ":", 0))} {len(split_n("a:b", ":", -3))} {len(split_n("", ":", 0))} {split_n("a:b:c", ":", 3) == split("a:b:c", ":")} {split_n(":a:", ":", 5) == split(":a:", ":")}")
+    print(f"{to_int("42").or(-1)} {to_int("-7").or(-1)} {to_int("x").or(-1)} {to_int("").or(-1)} {to_int("4.5").or(-1)}")
+    print(f"{to_float("2.5").or(0.0)} {to_float("1e3").or(0.0)} {to_float("nope").or(0.0)}")
+    for (i, word) in enumerate(["x", "y", "z"]):
+        print(f"{i} {word}")
+    let none: Array[Int] = []
+    print(f"{len(enumerate(none))} {enumerate([[1], [2, 3]])}")

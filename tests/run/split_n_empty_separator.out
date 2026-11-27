@@ -1,0 +1,4 @@
+[abc]
+trap: invalid argument at <prelude>:286:16
+split with an empty separator
+exit 2
