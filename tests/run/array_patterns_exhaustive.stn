@@ -1,0 +1,76 @@
+# Array patterns that cover every length need no `_` arm (section 5.5).
+type Shape = Dot | Line(points: Array[Int]) | Named(name: Str, parts: Array[Str])
+
+fn describe(xs: Array[Int]) -> Str:
+    match xs:
+        [] -> return "none"
+        [x] -> return f"one {x}"
+        [x, y, ..] -> return f"{x} then {y}"
+
+fn first_two(xs: Array[Int]) -> Int:
+    match xs:
+        [a, b, ..] -> return a + b
+        [a] -> return a
+        [] -> return 0
+
+fn zeros(xs: Array[Int]) -> Str:
+    match xs:
+        [0, ..] -> return "leading zero"
+        [_, 0, ..] -> return "second zero"
+        [_, _, ..] -> return "two or more"
+        [_] -> return "one"
+        [] -> return "empty"
+
+fn flags(xs: Array[Bool]) -> Str:
+    match xs:
+        [] -> return "none"
+        [true] -> return "yes"
+        [false] -> return "no"
+        [true, ..] -> return "yes and more"
+        [false, ..] -> return "no and more"
+
+fn shape(s: Shape) -> Str:
+    match s:
+        Dot -> return "dot"
+        Line([]) -> return "empty line"
+        Line([p]) -> return f"point {p}"
+        Line([p, q, ..]) -> return f"line from {p} to {q}"
+        Named(n, []) -> return n
+        Named(n, [first, ..]) -> return f"{n}: {first}"
+
+fn pairs(p: (Array[Int], Array[Int])) -> Str:
+    match p:
+        ([], []) -> return "both empty"
+        ([], [_, ..]) -> return "left empty"
+        ([_, ..], []) -> return "right empty"
+        ([a, ..], [b, ..]) -> return f"{a} and {b}"
+
+fn nested(xs: Array[Array[Int]]) -> Int:
+    match xs:
+        [] -> return 0
+        [[], ..] -> return 1
+        [[x, ..], ..] -> return x
+
+fn main() ! io:
+    print(describe([]))
+    print(describe([7]))
+    print(describe([7, 8]))
+    print(describe([7, 8, 9, 10]))
+    print(f"{first_two([])} {first_two([5])} {first_two([5, 6, 7])}")
+    print(zeros([0]))
+    print(zeros([4, 0, 1]))
+    print(zeros([4, 5, 6]))
+    print(zeros([4]))
+    print(zeros([]))
+    print(f"{flags([])} / {flags([true])} / {flags([false])} / {flags([true, false])} / {flags([false, false, true])}")
+    print(shape(Dot))
+    print(shape(Line([])))
+    print(shape(Line([3])))
+    print(shape(Line([3, 4, 5])))
+    print(shape(Named("solo", [])))
+    print(shape(Named("group", ["a", "b"])))
+    print(pairs(([], [])))
+    print(pairs(([], [1])))
+    print(pairs(([1, 2], [])))
+    print(pairs(([1, 2], [3])))
+    print(f"{nested([])} {nested([[], [1]])} {nested([[9, 8], []])}")

@@ -1,0 +1,5 @@
+# expect: E0206 5:9
+fn main() ! io:
+    match [1, 2]:
+        [..] -> print("any")
+        [] -> print("none")
