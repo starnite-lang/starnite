@@ -1,0 +1,27 @@
+# Many small maps: the shape of records, of the objects of a JSON document, of option tables.
+# Each of 200,000 maps gets a handful of entries, is read, updated, and has one removed.
+# usage: small_maps KEYS, where KEYS is how many entries each map gets (default 5)
+fn main() ! io:
+    let keys = to_int(trim(read_all())) ?: 5
+    let names = ["id", "name", "active", "score", "city", "lat", "lon", "tags", "limits", "a", "b", "c", "d", "e", "f", "g"]
+    var all: Array[Map[Str, Int]] = []
+    var by_number: Array[Map[Int, Int]] = []
+    for i in 0..200000:
+        var record: Map[Str, Int] = {}
+        var numbered: Map[Int, Int] = {}
+        for k in 0..keys:
+            record[names[k]] = i + k
+            numbered[k * 7 + i] = k
+        all.push(record)
+        by_number.push(numbered)
+    var total = 0
+    for round in 0..5:
+        for i in 0..len(all):
+            total += all[i]["id"] + (all[i].get(names[keys - 1]) ?: 0) + (all[i].get("missing") ?: 0)
+            total += by_number[i].get(i) ?: 0
+            all[i][names[round % keys]] += 1
+    var removed = 0
+    for i in 0..len(all):
+        if x = all[i].remove("id"):
+            removed += 1
+    print(f"{total} {removed} {len(all[0])}")
