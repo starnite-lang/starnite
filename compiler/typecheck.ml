@@ -1262,8 +1262,17 @@ and check_iter c (it : Syntax.expr) mode : titer * ty =
       let tb = check c b ta.ty in
       (IRange (ta, tb), ta.ty)
   | _ ->
+      let snap = snapshot c in
       let te = infer c it in
       (match repr te.ty with
+       (* a comprehension over an Iter runs over the array of its values (a for loop asks for them
+          one at a time instead: see the For statement) *)
+       | TNamed ("Iter", [ t ]) ->
+           if mode = MMut then err "E0201" it.loc "the values of an Iter cannot be visited with mut: each is handed over as it is made";
+           restore c snap;
+           let open Syntax in
+           let call = { d = Call ({ d = Name "collect"; loc = it.loc }, [ { aname = None; amode = None; aexpr = it; aloc = it.loc } ]); loc = it.loc } in
+           (IArray (infer c call, MBorrow), t)
        | TArray t -> (IArray ((if mode = MMut then as_mut_place te else te), mode), t)
        (* a Map is visited as its (key, value) pairs and a Set as its keys, both in insertion order
           (section 3.6): the loop runs over what the collection held when it started *)
