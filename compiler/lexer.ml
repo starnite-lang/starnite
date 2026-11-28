@@ -27,7 +27,7 @@ let keywords =
     "extern"; "false"; "fn"; "for"; "frozen"; "handle"; "if"; "impl"; "import"; "in";
     "iso"; "lend"; "let"; "level"; "local"; "match"; "mut"; "not"; "or"; "par"; "resource";
     "resume"; "return"; "shared"; "spawn"; "struct"; "take"; "trait"; "true"; "try";
-    "type"; "unique"; "var"; "where"; "while"; "with" ]
+    "type"; "unique"; "var"; "where"; "while"; "with"; "yield" ]
 
 let is_kw s = List.mem s keywords
 

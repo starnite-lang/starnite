@@ -343,6 +343,7 @@ and ts =
   | SAssertFails of ty * texpr
   | SCheck of texpr
   | SLocalFn of var * lambda
+  | SYield of texpr                      (* yield e, in a function declared -> yield T (section 10.6) *)
   | SLend of texpr                       (* lend [mut] place: the result of a lend function (4.6) *)
 
 (* A place starts at a variable, or at the result of a lend mut call ([via]), whose

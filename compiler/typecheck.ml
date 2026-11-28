@@ -426,7 +426,7 @@ and derive_in tb ~bounds trait self =
             | DData vs -> List.for_all (fun v -> List.for_all (fun fi -> f (subst s fi.fty)) v.vfields) vs
             | DAlias _ -> false
             (* a Map or a Set is equal to another when its keys and values are; neither is hashed *)
-            | DBuiltin -> trait = "Eq" && List.for_all f args)
+            | DBuiltin -> trait = "Eq" && n <> "Iter" && List.for_all f args)
         | None -> false)
     | _ -> false
   in
@@ -512,6 +512,7 @@ type fctx = {
   fname : string;
   mutable self_ty : ty option;
   lend_kind : bool option;          (* Some m inside a function declared -> lend [mut] T *)
+  yields : ty option;               (* Some t inside a function declared -> yield t *)
   retries : int ref;                (* retries left for the outermost call being checked; shared with closures *)
   hint_failed : (string, (string * var * string) list) Hashtbl.t;
       (* calls that did not check with the expected type, by place, callee and types, with the
@@ -920,7 +921,7 @@ let sub_exprs (e : texpr) : texpr list =
 
 let stmt_exprs (s : tstmt) : texpr list =
   match s.st with
-  | SLet (_, e) | SVar (_, e) | SExpr e | SReturn e | SAssert (e, _) | SAssertFails (_, e) | SCheck e | SLend e -> [ e ]
+  | SLet (_, e) | SVar (_, e) | SExpr e | SReturn e | SAssert (e, _) | SAssertFails (_, e) | SCheck e | SLend e | SYield e -> [ e ]
   | SAssign (p, e) -> Option.to_list p.via @ List.filter_map (function PIndex i -> Some i | _ -> None) p.path @ [ e ]
   | SBreak | SContinue -> []
   | SWhile (c, b) -> [ c; b ]
@@ -2189,7 +2190,7 @@ and infer_lambda c l ps body exp : texpr =
   let saved_errs = c.errs and saved_io = c.io and saved_try = c.in_try in
   c.errs <- []; c.io <- false; c.in_try <- 0;
   let saved_decl = c.declared in
-  let c' = { c with declared = None } in
+  let c' = { c with declared = None; yields = None } in
   let tbody =
     match body with
     | LExpr e -> (match expected_fn with Some f -> check c' e f.fret | None -> infer c' e)
@@ -2720,6 +2721,7 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
   | Assign (lhs, op, rhs) -> check_assign c l lhs op rhs
   | Return e ->
       if c.lend_kind <> None then err "E0322" l "a lend function ends each path with lend, not return";
+      if c.yields <> None && e <> None then err "E0330" l "a function declared -> yield gives its values with yield; return ends it and takes no value";
       let te = match e with Some e -> check c e c.ret | None -> unify_at l c.ret TUnit; unit_e l in
       if lend_of c.tb te <> None then err "E0320" l "a lent place cannot be returned; copy it with let first";
       mks (SReturn te)
@@ -2746,6 +2748,39 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
   | For (true, _, _, _, _) -> err "E0700" l "par for arrives in milestone 6"
   | For (false, p, m, it, body) ->
       if m = MMut && not (mutable_place c it) then err "E0303" it.loc "'for x in mut xs' needs a mutable place";
+      (* an Iter is asked for its next value until it has none: `for p in e: body` stands for
+           var it = e
+           while true:
+               match next(mut it):
+                   Some(p) -> body
+                   None -> break
+         The source is looked at once to see that it is one, and what that did is undone. *)
+      let is_iter =
+        match it.d with
+        | Range _ -> false
+        | _ ->
+            let snap = snapshot c in
+            let t = (try Some (infer c it).ty with Error _ -> None) in
+            restore c snap;
+            (match t with Some t -> (match repr t with TNamed ("Iter", [ _ ]) -> true | _ -> false) | None -> false) in
+      if is_iter then begin
+        if m = MMut then err "E0201" it.loc "the values of an Iter cannot be visited with mut: each is handed over as it is made";
+        let open Syntax in
+        let name = Printf.sprintf "__iter_%d_%d" l.line l.col in
+        let e d = { d; loc = it.loc } in
+        let arm apat abody amust_leave = { apat; aguard = None; abody; arm_loc = l; amust_leave } in
+        let step = e (Call (e (Name "next"), [ { aname = None; amode = Some MMut; aexpr = e (Name name); aloc = it.loc } ])) in
+        let loop =
+          { s = While (e (Lit (LBool true)),
+                       [ { s = Match (step, [ arm { p = PCtor ([ "Some" ], Some [ p ]); ploc_ = p.ploc_ } body false;
+                                              arm { p = PWild; ploc_ = l } [ { s = Break; sloc = l } ] false ]); sloc = l } ]);
+            sloc = l } in
+        push_frame c ();
+        let sv = check_stmt c { s = Var (false, name, None, it); sloc = l } in
+        let sw = check_stmt c loop in
+        pop_frame c;
+        mks (SExpr (mk (XBlock ([ sv; sw ], unit_e l)) TUnit l))
+      end else
       let src, elt = check_iter c it m in
       push_frame c ();
       let tp =
@@ -2800,7 +2835,7 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
           let t = conv_ty c.tb c.tnames c.self_ty (Option.get p.pty) in
           let v = new_var p.pname t (p.pmode = MMut) (VParam p.pmode) in
           bind c v p.ploc; v) ps in
-      let c' = { c with declared = None; errs = []; io = false; in_try = 0; loops = 0; ret; lend_kind = None } in
+      let c' = { c with declared = None; errs = []; io = false; in_try = 0; loops = 0; ret; lend_kind = None; yields = None } in
       let body = check_block c' (Option.get fd.fbody) (Some ret) l in
       pop_frame c;
       c.obligations <- c'.obligations @ c.obligations;
@@ -2838,6 +2873,12 @@ and check_stmt c (s : Syntax.stmt) : tstmt =
         err "E0320" e.loc (if m then "lend mut must name a place inside a mut parameter" else "lend must name a place inside a parameter");
       unify_at e.loc c.ret te.ty;
       mks (SLend te)
+  | Yield e ->
+      (match c.yields with
+       | None -> err "E0330" l "yield is allowed only in a function declared -> yield T"
+       | Some t ->
+           if c.in_try > 0 then err "E0330" l "yield cannot be inside try: the function stops here and is carried on by whoever asks for the next value";
+           mks (SYield (check c e t)))
   | Resume _ -> err "E0100" l "resume arrives with handlers in milestone 4"
 
 
@@ -2919,6 +2960,7 @@ and zonk_s (s : tstmt) : tstmt =
     | SCheck e -> SCheck (zonk_e e)
     | SLocalFn (v, lam) -> v.vty <- zonk v.vty; SLocalFn (v, zonk_lam lam)
     | SLend e -> SLend (zonk_e e)
+    | SYield e -> SYield (zonk_e e)
   in
   { s with st }
 
@@ -3318,7 +3360,10 @@ let declare_items tb modname (items : item list) =
 (* ---------- checking bodies ---------- *)
 
 let new_ctx tb (sg : fsig) self : fctx =
-  { tb; frames = [ { vars = []; lam = None } ]; tparams = sg.stparams; tnames = List.map fst sg.stparams; ret = sg.sret; errs = []; io = false;
+  (* the body of a `-> yield T` function gives no value of its own: each `yield e` gives a T *)
+  let yields = if List.mem "yield" sg.smods then (match repr sg.sret with TNamed ("Iter", [ t ]) -> Some t | _ -> None) else None in
+  { tb; frames = [ { vars = []; lam = None } ]; tparams = sg.stparams; tnames = List.map fst sg.stparams;
+    ret = (if yields <> None then TUnit else sg.sret); yields; errs = []; io = false;
     in_try = 0; loops = 0;
     declared = (if sg.sdeclared && (sg.seff.errs <> [] || sg.sexport) then Some sg.seff.errs else None);
     obligations = []; unsolved = []; moved = []; lent = []; closure_caps = Hashtbl.create 8; fname = sg.sdisplay; self_ty = self; lend_kind = sg.slend; retries = ref retry_budget; hint_failed = Hashtbl.create 16;
@@ -3373,13 +3418,21 @@ let check_fn tb uname : tfn =
   let params =
     List.map
       (fun (m, n, t, _) ->
-        let v = new_var n t (m = MMut) (VParam m) in
+        (* an iterator that was handed over is the function's own to advance *)
+        let own_iter = m = MTake && (match repr t with TNamed ("Iter", _) -> true | _ -> false) in
+        let v = new_var n t (m = MMut || own_iter) (VParam m) in
         bind c v sg.sloc;
         v)
       sg.sparams
   in
   if sg.slend <> None then check_lend_paths sg (Option.get fd.fbody);
-  let body = check_block c (Option.get fd.fbody) (Some sg.sret) sg.sloc in
+  let body = check_block c (Option.get fd.fbody) (Some c.ret) sg.sloc in
+  if c.yields <> None then begin
+    (* what the next value is asked from has nowhere to send a failure, and its caller's variables
+       are not there to write to when it carries on *)
+    if c.errs <> [] || sg.seff.errs <> [] then err "E0330" sg.sloc "'%s' is declared -> yield and can fail with %s: a function that yields cannot fail in this version" sg.sdisplay (String.concat ", " (List.map show_ty (c.errs @ sg.seff.errs)));
+    List.iter (fun (m, n, _, _) -> if m = MMut then err "E0330" sg.sloc "'%s' is declared -> yield and takes '%s' as mut: it runs on after the call has returned, when the caller's variable is no longer lent to it" sg.sdisplay n) sg.sparams
+  end;
   finish_ctx c sg.sloc;
   let body = zonk_e body in
   if tb.final_pass then begin

@@ -501,6 +501,21 @@ typedef struct StnClosure {
 
 static inline void stn_closure_drop(StnClosure* c) { stn_drop(c, c->release); }
 
+/* ---- iterators (section 10.6) ---- */
+/* What a function declared `-> yield T` gives: a heap block that holds the function's variables
+   and where it stopped. [resume] runs it on to its next yield, writes the value to *out and
+   returns 1, or returns 0 once the function has ended. [state] is 0 before the first value is
+   asked for, the number of the yield it stopped at after that, and -1 when it has ended.
+   [release] drops what the variables hold at that state, and frees the block. */
+typedef struct StnIter {
+    stn_header h;
+    uint8_t (*resume)(struct StnIter* self, void* out);
+    void (*release)(void* self);
+    int32_t state;
+} StnIter;
+
+static inline void stn_iter_drop(StnIter* it) { stn_drop(it, it->release); }
+
 /* ---- trait values (section 3.4) ---- */
 /* The counted box behind `any Trait`: the value follows the header, and [release] drops
    it and frees the box. The method table travels beside the box, in the value. */

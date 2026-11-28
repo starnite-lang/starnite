@@ -2,7 +2,7 @@
 (executable
  (name main)
  (public_name starnite)
- (libraries unix)
+ (libraries unix threads.posix)
  (flags (:standard -w +a-4-9-26-27-32..42-44-45-69-70 -warn-error -a)))
 
 (rule

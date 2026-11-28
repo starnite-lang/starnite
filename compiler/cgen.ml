@@ -191,7 +191,7 @@ let rec size_of st t =
   | TFloat | TDur | TBytes -> 8
   | TF32 | TChar -> 4
   | TBool | TUnit | TNever -> 1
-  | TArray _ | TFn _ -> 8
+  | TArray _ | TFn _ | TNamed ("Iter", _) -> 8
   | TStr | TErr _ | TAny _ -> 16
   | TTuple ts -> List.fold_left (fun a t -> a + max 8 (size_of st t)) 0 ts
   | TNamed _ when is_struct st t -> List.fold_left (fun a (_, t) -> a + max 1 (size_of st t)) 0 (struct_fields st t)
@@ -229,7 +229,7 @@ let sig_can_fail_sg (sg : fsig) =
 let rec needs_rc st t =
   match repr t with
   | TStr | TArray _ | TFn _ | TErr _ | TAny _ -> true
-  | TNamed (("Map" | "Set"), _) -> true
+  | TNamed (("Map" | "Set" | "Iter"), _) -> true
   | TTuple ts -> List.exists (needs_rc st) ts
   | TNamed _ when is_struct st t -> List.exists (fun (_, t) -> needs_rc st t) (struct_fields st t)
   | TNamed _ when is_data st t -> layout st t = LBoxed || List.exists (fun (_, fs) -> List.exists (fun (_, t) -> needs_rc st t) fs) (variants st t)
@@ -247,6 +247,7 @@ let rec cty st t : string =
   | TArray _ -> "StnArray*"
   | TNamed (("Map" | "Set"), _) -> "StnMap*"
   | TFn _ -> "StnClosure*"
+  | TNamed ("Iter", _) -> "StnIter*"
   | TErr _ -> "StnError"
   | TTuple _ | TNamed _ | TAny _ -> ensure_type st t; "stn_" ^ mangle t
   | TParam p -> failwith ("cgen: type parameter " ^ p)
@@ -390,7 +391,7 @@ and dup_stmt st t e =
   match repr t with
   (* a Str is assigned its duplicate: the duplicate of a view is a buffer of its own *)
   | TStr -> Printf.sprintf "%s = stn_str_dup(%s);" e e
-  | TArray _ | TFn _ | TNamed (("Map" | "Set"), _) -> Printf.sprintf "stn_dup(%s);" e
+  | TArray _ | TFn _ | TNamed (("Map" | "Set" | "Iter"), _) -> Printf.sprintf "stn_dup(%s);" e
   | TErr _ -> Printf.sprintf "stn_error_dup(%s);" e
   | _ -> ensure_type st t; Printf.sprintf "%s = dup_%s(%s);" e (mangle t) e
 
@@ -405,6 +406,7 @@ and drop_stmt st t e =
   | TArray _ -> Printf.sprintf "stn_drop(%s, stn_array_release);" e
   | TNamed (("Map" | "Set"), _) -> Printf.sprintf "stn_drop(%s, stn_map_release);" e
   | TFn _ -> Printf.sprintf "stn_closure_drop(%s);" e
+  | TNamed ("Iter", _) -> Printf.sprintf "stn_iter_drop(%s);" e
   | TErr _ -> Printf.sprintf "stn_error_drop(%s);" e
   | _ -> ensure_type st t; Printf.sprintf "drop_%s(%s);" (mangle t) e
 
@@ -413,7 +415,7 @@ let dup_expr st t e =
   else
     match repr t with
     | TStr -> Printf.sprintf "stn_str_dup(%s)" e
-    | TArray _ | TFn _ | TNamed (("Map" | "Set"), _) -> Printf.sprintf "(stn_dup(%s), %s)" e e
+    | TArray _ | TFn _ | TNamed (("Map" | "Set" | "Iter"), _) -> Printf.sprintf "(stn_dup(%s), %s)" e e
     | TErr _ -> Printf.sprintf "stn_error_dup(%s)" e
     | _ -> Printf.sprintf "dup_%s(%s)" (mangle t) e
 
@@ -470,7 +472,7 @@ let is_box st (t : ty) =
 let boxy st t = type_exists st (is_box st) t
 
 (* holds something that can run code or carry any value: what it is given it may keep *)
-let has_code st t = type_exists st (fun t -> match t with TFn _ | TAny _ | TErr _ -> true | _ -> false) t
+let has_code st t = type_exists st (fun t -> match t with TFn _ | TAny _ | TErr _ | TNamed ("Iter", _) -> true | _ -> false) t
 
 (* no block inside another: what a function given only this can leave shared is this alone *)
 let flat st t =
@@ -724,8 +726,102 @@ let u_reset () =
   Hashtbl.reset u_ahead; Hashtbl.reset u_decl_depth; u_depth := 0;
   Hashtbl.reset u_vars; Hashtbl.reset u_views; Hashtbl.reset u_home; Hashtbl.reset u_must; Hashtbl.reset u_dps_needs; Hashtbl.reset u_dps_soft; u_fresh := []; u_returns := false
 
+(* A function declared `-> yield T` is written as a resume function that stops at each yield and
+   is entered again at the label after it (section 10.6). Whatever it holds in a C local would be
+   lost between the two, so while its code is written every local it declares becomes a field of
+   the function's frame instead: the declaration is turned into an assignment here, and the name
+   is defined, around the function, to stand for the field. *)
+type gen = {
+  gbuf : Buffer.t;                          (* the code of the resume function *)
+  mutable gfields : (string * string) list; (* C type and name, last first *)
+  mutable gstates : int;                    (* yields so far *)
+  mutable grel : (int * string) list;       (* what to drop when released at each state *)
+}
+let gen_mode : gen option ref = ref None
+
+let gen_hoist (g : gen) (whole : string) : string =
+  let is_id c = c = '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') in
+  let keywords = [ "return"; "goto"; "case"; "else"; "do"; "break"; "continue"; "static"; "typedef"; "if"; "while"; "for"; "switch"; "sizeof"; "default"; "extern" ] in
+  let field t name =
+    (* a constant local is a field that is assigned once *)
+    let t = if String.length t > 6 && String.sub t 0 6 = "const " && not (String.contains t '*') then String.sub t 6 (String.length t - 6) else t in
+    if not (List.exists (fun (_, x) -> x = name) g.gfields) then g.gfields <- (t, name) :: g.gfields;
+    t in
+  (* one statement: a declaration at [i] of [s] becomes an assignment, or nothing *)
+  let one (s : string) : string =
+    let n = String.length s in
+    let decl i =
+      let p = ref i in
+      let word () = let a = !p in while !p < n && is_id s.[!p] do incr p done; String.sub s a (!p - a) in
+      let ty = Buffer.create 16 in
+      let w1 = word () in
+      Buffer.add_string ty w1;
+      (* `const T`, `struct T`, `const struct T` *)
+      let rec more last =
+        if (last = "const" || last = "struct") && !p < n && s.[!p] = ' ' then begin
+          incr p; let w = word () in
+          if w = "" then false else (Buffer.add_char ty ' '; Buffer.add_string ty w; more w)
+        end else true in
+      if w1 = "" || List.mem w1 keywords || (w1.[0] >= '0' && w1.[0] <= '9') || not (more w1) then None
+      else begin
+        (* `T const*`: the qualifier after the type *)
+        if !p + 6 <= n && String.sub s !p 6 = " const" && (!p + 6 = n || not (is_id s.[!p + 6])) then (Buffer.add_string ty " const"; p := !p + 6);
+        let a = !p in
+        while !p < n && (s.[!p] = ' ' || s.[!p] = '*') do (if s.[!p] = '*' then Buffer.add_char ty '*'); incr p done;
+        if !p = a then None
+        else begin
+          let name = word () in
+          let q = ref !p in
+          while !q < n && s.[!q] = ' ' do incr q done;
+          let generated = name <> "" && (name.[0] = '_' || String.exists (fun c -> c >= '0' && c <= '9') name) in
+          let t = Buffer.contents ty in
+          if name = "" || List.mem name keywords || List.mem t keywords || not generated then None
+          else if !q = n then Some (t, name, `Bare)
+          else if !q + 1 < n && s.[!q] = '=' && s.[!q + 1] <> '=' then Some (t, name, `Init (!q + 1))
+          else None
+        end
+      end in
+    let rewrite i prefix =
+      match decl i with
+      | None -> s
+      | Some (t, name, `Bare) -> ignore (field t name); prefix
+      | Some (t, name, `Init j) ->
+          let t = field t name in
+          let k = ref j in
+          while !k < n && s.[!k] = ' ' do incr k done;
+          (* an initializer in braces is not an expression until it is given its type *)
+          let cast = if !k < n && s.[!k] = '{' then "(" ^ t ^ ")" else "" in
+          prefix ^ name ^ " = " ^ cast ^ String.sub s !k (n - !k) in
+    if n > 5 && String.sub s 0 5 = "for (" then rewrite 5 "for (" else rewrite 0 "" in
+  (* the statements of the line: cut at each `;` outside brackets, braces and literals *)
+  let n = String.length whole in
+  let out = Buffer.create (n + 16) in
+  let start = ref 0 and depth = ref 0 and i = ref 0 in
+  let flush upto with_semi =
+    let seg = String.sub whole !start (upto - !start) in
+    let lead = ref 0 in
+    while !lead < String.length seg && seg.[!lead] = ' ' do incr lead done;
+    let body = String.sub seg !lead (String.length seg - !lead) in
+    Buffer.add_string out (String.sub seg 0 !lead);
+    Buffer.add_string out (one body);
+    if with_semi then Buffer.add_char out ';' in
+  while !i < n do
+    (match whole.[!i] with
+     | '"' | '\'' as q ->
+         incr i;
+         while !i < n && whole.[!i] <> q do (if whole.[!i] = '\\' then incr i); incr i done
+     | '(' | '[' | '{' -> incr depth
+     | ')' | ']' | '}' -> decr depth
+     | ';' when !depth = 0 -> flush !i true; start := !i + 1
+     | _ -> ());
+    incr i
+  done;
+  if !start < n then flush n false;
+  Buffer.contents out
+
 let line fc fmt =
   Printf.ksprintf (fun s ->
+      let s = match !gen_mode with Some g when g.gbuf == fc.b -> gen_hoist g s | _ -> s in
       (* a profiled build gives each line of C the line of the statement it came from, which is
          how a count of copies finds its place in the program *)
       (if fc.st.profile then
@@ -1745,7 +1841,7 @@ and call_instance fc (e : texpr) uname tys (sg : fsig) targs convs : r =
      that; main calls it through an entry that is hot and never inlined, where it is inlined *)
   let name =
     let is_main = match st.prog.main with Some m -> m = uname | None -> false in
-    if !(st.in_main) && sg.slend = None && not is_main && loops st uname then begin
+    if !(st.in_main) && sg.slend = None && not (List.mem "yield" sg.smods) && not is_main && loops st uname then begin
       if not (Hashtbl.mem st.entries name) then Hashtbl.replace st.entries name ("", "");
       entry_name name
     end else name in
@@ -3154,7 +3250,7 @@ and walk_texpr (fe : texpr -> unit) (fs : tstmt -> unit) (e : texpr) =
     | SWhile (c, b) -> we c; we b
     | SFor (_, it, b) -> wit it; we b
     | SLocalFn (_, lam) -> we lam.lbody
-    | SLend e -> we e
+    | SLend e | SYield e -> we e
   in
   fe e;
   match e.e with
@@ -3424,7 +3520,7 @@ and hoistable (v : var) (body : texpr list) : bool option =
       | SBreak | SContinue -> ()
       | SWhile (c, b) -> visit_child c; visit_child b
       | SFor (_, it, b) -> wit it; visit_child b
-      | SLend e -> visit_child e
+      | SLend e | SYield e -> visit_child e
       | SLocalFn (_, lam) ->
           if List.exists (fun (c : var) -> c.vid = v.vid) lam.lcaps then good := false;
           visit_child lam.lbody
@@ -3800,7 +3896,7 @@ and u_scan fc ~(deep : bool) ?(stmt : tstmt option) ?(own = true) (top : texpr o
           then (Hashtbl.replace u_vars v.vid (); Hashtbl.replace u_ahead v.vid ())
           else Hashtbl.remove u_vars v.vid
         end
-    | SLet (_, e) | SReturn e | SAssertFails (_, e) | SLend e -> go true e
+    | SLet (_, e) | SReturn e | SAssertFails (_, e) | SLend e | SYield e -> go true e
     | SExpr e | SAssert (e, _) | SCheck e -> go false e
     | SAssign (p, e) ->
         Option.iter (go true) p.via;
@@ -3927,6 +4023,7 @@ and note_moves st (owned_params : var list) (body : texpr) =
     | SReturn e -> Hashtbl.replace returns stmt ctx; w e
     | SExpr e | SAssert (e, _) | SAssertFails (_, e) | SCheck e -> w e
     | SLend e -> pin e; w e
+    | SYield e -> w e
     | SAssign (p, e) ->
         Option.iter w p.via;
         List.iter (function PIndex i -> w i | _ -> ()) p.path;
@@ -4229,6 +4326,24 @@ and stmt_at fc (s : tstmt) =
    | SReturn e when (match !(st.dps) with Some (_, b, _) -> b == fc.b | None -> false) ->
        (* in a function that runs as a loop (section 9.5), what is returned is in tail position *)
        (match !(st.dps) with Some (_, _, tail) -> tail e | None -> ())
+   | SReturn e when (match !gen_mode with Some g -> g.gbuf == fc.b | None -> false) ->
+       (* a function that yields ends here: what it holds is released, and it has no more values *)
+       discard fc e;
+       drop_until fc (fun _ -> false);
+       line fc "goto _gen_done;"
+   | SYield e ->
+       let g = match !gen_mode with Some g when g.gbuf == fc.b -> g | _ -> failwith "cgen: yield outside a yielding function" in
+       let x = expr fc e in
+       let v = own fc x e.ty in
+       line fc "*_out = %s;" v;
+       g.gstates <- g.gstates + 1;
+       let k = g.gstates in
+       (* released while it waits here, the function drops what a return at this point would *)
+       let before = Buffer.length fc.b in
+       drop_until fc (fun _ -> false);
+       g.grel <- (k, Buffer.sub fc.b before (Buffer.length fc.b - before)) :: g.grel;
+       Buffer.truncate fc.b before;
+       line fc "_f->h.state = %d; return 1; _y%d:;" k k
    | SReturn e ->
        let x = expr fc e in
        u_result fc e;
@@ -4328,6 +4443,22 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       line fc "%s %s;" (ct fc t) res;
       line fc "if (%s) {" ok;
       let sv = construct fc t 1 [ s ] in
+      line fc "  %s = %s;" res sv.c;
+      line fc "} else {";
+      let nv = construct fc t 0 [] in
+      line fc "  %s = %s;" res nv.c;
+      line fc "}";
+      { c = res; owned = true }
+  | "next@Iter" ->
+      let lv = m 0 in
+      let x = fresh st "_x" in
+      line fc "%s %s;" (cty st (elt ())) x;
+      let it = tmp fc (arg 0).a.ty lv in
+      let ok = tmp fc TBool (Printf.sprintf "%s->resume(%s, &%s)" it it x) in
+      let res = fresh st "_r" in
+      line fc "%s %s;" (ct fc t) res;
+      line fc "if (%s) {" ok;
+      let sv = construct fc t 1 [ x ] in
       line fc "  %s = %s;" res sv.c;
       line fc "} else {";
       let nv = construct fc t 0 [] in
@@ -4818,9 +4949,13 @@ let compile_instance st cname uname tys =
   note_self_sliced st tf.fbody;
   st.movable := [];
   note_moves st (List.filter_map (fun (v, m, _) -> if m = MTake then Some v else None) params) tf.fbody;
-  pr b "%s%s {\n" (if is_main then "" else "STN_HOT ") header;
+  let yields = List.mem "yield" sg.smods in
+  if yields && can_fail then raise (Syntax.Unsupported ("a function that yields cannot take a parameter whose effects are not known", sg.sloc));
+  if yields then gen_mode := Some { gbuf = b; gfields = []; gstates = 0; grel = [] }
+  else pr b "%s%s {\n" (if is_main then "" else "STN_HOT ") header;
+  let body_start = Buffer.length b in
   (* the entry main calls this through, if it loops: the same parameters, hot, never inlined *)
-  if not (is_main || lend) then begin
+  if not (is_main || lend || yields) then begin
     let entry = entry_name cname in
     let names = List.map (fun (v, _, _) -> var_name v) params in
     let args = String.concat ", " ((if can_fail then [ "_out"; "_err" ] else []) @ names) in
@@ -4873,6 +5008,62 @@ let compile_instance st cname uname tys =
               "'%s' is declared 'mut %s: unique', and a function inside this one captures it, so the compiler cannot tell that it stays unique" v.vname v.vname))
         end)
       (List.combine params (u_needs fc uname sg tys));
+  if yields then begin
+    let g = match !gen_mode with Some g -> g | None -> assert false in
+    let item = match repr ret with TNamed ("Iter", [ t ]) -> t | _ -> assert false in
+    (* released before it was ever asked for a value, the function drops the parameters it owns *)
+    let before = Buffer.length b in
+    drop_until fc (fun _ -> false);
+    g.grel <- (0, Buffer.sub b before (Buffer.length b - before)) :: g.grel;
+    Buffer.truncate b before;
+    push fc FStmt;
+    u_scan fc ~deep:true (Some tf.fbody);
+    discard fc tf.fbody;
+    pop fc;
+    pop fc;
+    gen_mode := None;
+    let body = Buffer.sub b body_start (Buffer.length b - body_start) in
+    Buffer.truncate b 0;
+    let fields = List.rev g.gfields in
+    let pnames = List.map (fun (v, _, _) -> var_name v) params in
+    (* a name that stands for a field must not also be the name of a member of something else *)
+    List.iter (fun (_, nme) ->
+        let hit pre = let pat = pre ^ nme in
+          let ln = String.length pat and bl = String.length body in
+          let rec at i = i + ln <= bl && ((String.sub body i ln = pat && (i + ln = bl || not (let c = body.[i + ln] in c = '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')))) || at (i + 1)) in
+          at 0 in
+        if hit "." || hit "->" then failwith ("cgen: a local of a yielding function is named as a member: " ^ nme)) fields;
+    let frame = "genframe_" ^ cname in
+    pr st.typedefs "struct %s { StnIter h; %s %s };\n" frame
+      (String.concat " " (List.map (fun (v, _, t) -> Printf.sprintf "%s %s;" (cty st t) (var_name v)) params))
+      (String.concat " " (List.filter_map (fun (t, nme) -> if List.mem nme pnames then None else Some (Printf.sprintf "%s %s;" t nme)) fields));
+    let names = pnames @ List.filter (fun nme -> not (List.mem nme pnames)) (List.map snd fields) in
+    pr st.protos "static uint8_t %s_resume(StnIter* _it, void* _outv);\nstatic void %s_release(void* _p);\n" cname cname;
+    List.iter (fun nme -> pr b "#define %s (_f->%s)\n" nme nme) names;
+    pr b "STN_HOT static uint8_t %s_resume(StnIter* _it, void* _outv) {\n" cname;
+    pr b "  struct %s* _f = (struct %s*)_it; %s* _out = (%s*)_outv; (void)_out;\n" frame frame (cty st item) (cty st item);
+    pr b "  switch (_f->h.state) { case 0: break;%s default: return 0; }\n"
+      (String.concat "" (List.init g.gstates (fun i -> Printf.sprintf " case %d: goto _y%d;" (i + 1) (i + 1))));
+    Buffer.add_string b body;
+    pr b "  _gen_done:;\n  _f->h.state = -1;\n  return 0;\n}\n";
+    (* the parameters it only reads were counted once more for it when it was made *)
+    let lent = String.concat " " (List.filter_map (fun (v, m, t) -> if m = MBorrow && needs_rc st t then Some (drop_stmt st t (var_name v)) else None) params) in
+    pr b "static void %s_release(void* _p) {\n  struct %s* _f = (struct %s*)_p;\n  switch (_f->h.state) {\n%s  default: break;\n  }\n  %s\n  stn_free(_p);\n}\n"
+      cname frame frame
+      (String.concat "" (List.map (fun (k, drops) -> Printf.sprintf "  case %d: {\n%s  } break;\n" k drops) (List.rev g.grel)))
+      lent;
+    List.iter (fun nme -> pr b "#undef %s\n" nme) names;
+    (* the function the program calls only makes the frame *)
+    pr b "%s {\n  struct %s* _f = (struct %s*)stn_alloc(sizeof(struct %s));\n  _f->h.resume = %s_resume; _f->h.release = %s_release; _f->h.state = 0;\n" header frame frame frame cname cname;
+    List.iter (fun (v, m, t) ->
+        let nme = var_name v in
+        pr b "  _f->%s = %s;\n" nme (if m = MBorrow then dup_expr st t nme else nme)) params;
+    pr b "  return &_f->h;\n}\n\n";
+    fc.frames <- [];
+    st.in_main := false;
+    record ();
+    Buffer.add_buffer st.funcs b
+  end else
   if lend then begin
     (* every path ends in a lend statement, which returns; the checker proved it *)
     discard fc tf.fbody;
@@ -5010,7 +5201,7 @@ let note_demotions st =
   let candidates = ref [] in
   Hashtbl.iter (fun u (f : tfn) ->
       let sg = f.fsig in
-      if not sg.sexport && prog.main <> Some u && sg.slend = None && not (Hashtbl.mem methods u) && not (Hashtbl.mem valued u)
+      if not sg.sexport && prog.main <> Some u && sg.slend = None && not (List.mem "yield" sg.smods) && not (Hashtbl.mem methods u) && not (Hashtbl.mem valued u)
          && not (List.exists (fun (m, _, _, _) -> m = MMut) sg.sparams) && not (loop_shaped u f.fbody) then
         List.iteri (fun i ((v : var), (m, _, _, _)) ->
             if m = MTake && not v.vcell && not v.vcaptured && not (try List.nth sg.suniq i with _ -> false) then candidates := (u, i, v, f.fbody) :: !candidates)
@@ -5064,7 +5255,7 @@ let note_demotions st =
               Option.iter (go true) cp.ccond) cs
     and stmt (s : tstmt) =
       match s.st with
-      | SLet (_, e) | SVar (_, e) | SReturn e | SLend e | SCheck e -> go false e
+      | SLet (_, e) | SVar (_, e) | SReturn e | SLend e | SYield e | SCheck e -> go false e
       | SExpr e | SAssert (e, _) | SAssertFails (_, e) -> go true e
       | SAssign (p, e) ->
           if Hashtbl.mem derived p.root.vid then ok := false;
@@ -5099,7 +5290,7 @@ let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~d
     let main_u = match prog.main with Some m -> m | None -> "" in
     Hashtbl.iter (fun u (f : tfn) ->
         let sg = f.fsig in
-        if (not sg.sexport) && sg.slend = None && (not sg.sruniq) && u <> main_u
+        if (not sg.sexport) && sg.slend = None && not (List.mem "yield" sg.smods) && (not sg.sruniq) && u <> main_u
            && (match repr sg.sret with TUnit | TNever | TInt _ | TFloat | TF32 | TBool | TChar | TStr | TDur | TBytes -> false | _ -> true)
         then Hashtbl.replace u_inferred u ()) prog.fns;
     Hashtbl.reset u_inferred_params;
@@ -5110,7 +5301,7 @@ let rec emit ?(check_only = false) ?explain ?(profile = false) (prog : tprog) ~d
        @ List.map (fun (_, b, _, _, _) -> b) prog.tests @ List.map (fun (l : lambda) -> l.lbody) prog.lambdas);
     Hashtbl.iter (fun u (f : tfn) ->
         let sg = f.fsig in
-        if (not sg.sexport) && sg.slend = None && u <> main_u && not (Hashtbl.mem methods u) && not (Hashtbl.mem valued u) then
+        if (not sg.sexport) && sg.slend = None && not (List.mem "yield" sg.smods) && u <> main_u && not (Hashtbl.mem methods u) && not (Hashtbl.mem valued u) then
           List.iteri (fun i ((v : var), (m, _, _, _)) ->
               if m = MTake && not v.vcell && not v.vcaptured then Hashtbl.replace u_inferred_params (u, i) ())
             (List.combine f.fparams sg.sparams)) prog.fns;

@@ -23,6 +23,22 @@ type value =
   | VAny of ty * value           (* a trait value: the hidden type and the value (section 3.4) *)
   | VMap of (value * value) array   (* entries in insertion order; never mutated in place (section 3.6) *)
   | VSet of value array
+  | VIter of gen                 (* what a `-> yield T` function gives (section 10.6) *)
+
+(* A function that yields runs in a thread of its own, which is let run only while a value is
+   being asked of it: asking hands the turn over and waits for it to come back, with the value
+   or with word that the function has ended. So exactly one of the two runs at any time, and the
+   function's locals are simply where its thread left them. *)
+and gen = {
+  gm : Mutex.t;
+  gc : Condition.t;
+  mutable gturn : bool;          (* the function's turn to run *)
+  mutable gitem : value option;  (* what it yielded last *)
+  mutable gdone : bool;
+  mutable gfail : exn option;    (* what ended it, to be raised where the value was asked for *)
+  mutable gstarted : bool;
+  gbody : unit -> unit;
+}
 
 exception Failed of ty * value
 exception Partial of value list * exn
@@ -58,6 +74,48 @@ let cell_busy_trap l what = trap "shared cell busy" l ("a shared cell was " ^ wh
 (* The C backend gives a condition, an operand of and/or, the value of a branch, an arm or a
    block, the body of a comprehension, a try and a function body each a frame of its own, and
    releases the cells a long access holds when that frame ends. So does the interpreter. *)
+(* the yielding function now running, if any *)
+let cur_gen : gen option ref = ref None
+
+let gen_next (g : gen) : value option =
+  if g.gdone then None
+  else begin
+    let saved = !cur_gen in
+    Mutex.lock g.gm;
+    g.gturn <- true;
+    g.gitem <- None;
+    if not g.gstarted then begin
+      g.gstarted <- true;
+      ignore (Thread.create (fun () ->
+          Mutex.lock g.gm;
+          while not g.gturn do Condition.wait g.gc g.gm done;
+          cur_gen := Some g;
+          (try g.gbody () with e -> g.gfail <- Some e);
+          g.gdone <- true;
+          g.gturn <- false;
+          Condition.broadcast g.gc;
+          Mutex.unlock g.gm) ())
+    end
+    else Condition.broadcast g.gc;
+    while g.gturn do Condition.wait g.gc g.gm done;
+    Mutex.unlock g.gm;
+    cur_gen := saved;
+    (match g.gfail with Some e -> g.gfail <- None; raise e | None -> ());
+    g.gitem
+  end
+
+let gen_yield (v : value) =
+  match !cur_gen with
+  | None -> failwith "interp: yield outside a yielding function"
+  | Some g ->
+      g.gitem <- Some v;
+      g.gturn <- false;
+      Condition.broadcast g.gc;
+      while not g.gturn do Condition.wait g.gc g.gm done;
+      cur_gen := Some g
+
+let new_gen body = { gm = Mutex.create (); gc = Condition.create (); gturn = false; gitem = None; gdone = false; gfail = None; gstarted = false; gbody = body }
+
 let scoped f =
   let saved = !busy in
   Fun.protect ~finally:(fun () -> busy := saved) f
@@ -189,6 +247,8 @@ and call_fn env (name : string) (targs : ty list) (args : value list) loc : valu
   let sub = List.combine (List.map fst tf.fsig.stparams) targs in
   let env' = { env with vars = Hashtbl.create 16; sub } in
   List.iter2 (fun v a -> bind env' v a) tf.fparams args;
+  if List.mem "yield" tf.fsig.smods then VIter (new_gen (fun () -> try ignore (eval env' tf.fbody) with Return _ -> ()))
+  else
   try eval env' tf.fbody with Return v -> v
 
 (* A call of a user function with mut parameters: run it, then read back the
@@ -197,6 +257,8 @@ and invoke env (tf : tfn) sub (vals : value list) : value * value list =
   let env' = { env with vars = Hashtbl.create 16; sub } in
   List.iter2 (fun v a -> bind env' v a) tf.fparams vals;
   let outs () = List.map (fun (v : var) -> !(get_var env' v)) tf.fparams in
+  if List.mem "yield" tf.fsig.smods then (VIter (new_gen (fun () -> try ignore (eval env' tf.fbody) with Return _ -> ())), outs ())
+  else
   match scoped (fun () -> eval env' tf.fbody) with
   | r -> (r, outs ())
   | exception Return r -> (r, outs ())
@@ -726,6 +788,7 @@ and exec_ env (s : tstmt) : unit =
       let caps = List.map (fun (cv : var) -> (cv.vid, get_var env cv)) lam.lcaps in
       bind env v (VClosure (lam, caps, env.sub))
   | SLend e -> raise (Lent (place_of_expr env e))
+  | SYield e -> gen_yield (eval env e)
 
 (* When assert e fails, show the value of each side of a comparison (section 20.2). *)
 and describe_assert env (e : texpr) : string =
@@ -817,6 +880,8 @@ and builtin env name (tys : ty list) (vals : value list) loc : value * value lis
   | "bench_begin@Str", _ -> bench_turn := false; pure VUnit
   | "bench_running@", [] -> bench_turn := not !bench_turn; pure (VBool !bench_turn)
   | "clock_ns@", [] -> pure (VInt (Int64.of_float (Unix.gettimeofday () *. 1e9)))
+  | "next@Iter", [ VIter g ] ->
+      ((match gen_next g with Some v -> VVariant (1, [| v |]) | None -> VVariant (0, [||])), vals)
   | "len@Array", [ VArr a ] -> pure (VInt (Int64.of_int (Array.length a)))
   | "push@Array", [ VArr a; x ] -> (VUnit, [ VArr (Array.append a [| x |]); x ])
   | "pop@Array", [ VArr a ] ->

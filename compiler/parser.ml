@@ -685,6 +685,7 @@ and parse_simple st : stmt =
       advance st;
       let m = accept_kw st "mut" in
       mks (Lend (m, parse_postfix st))
+  | KW "yield" -> advance st; mks (Yield (parse_expr st))
   | KW "resume" ->
       advance st;
       (match peek st with
@@ -743,14 +744,23 @@ and parse_fn_sig st mods =
   expect_op st "(";
   let ps = comma_list st ")" (parse_param ~lambda:false) in
   expect_op st ")";
+  let yields = ref false in
   let ret, lend =
     if accept_op st "->" then
       if accept_kw st "lend" then
         let m = accept_kw st "mut" in
         (Some (parse_type st), Some (if m then "lend mut" else "lend"))
+      else if accept_kw st "yield" then begin
+        (* `-> yield T`: the function gives an Iter[T], and its body says `yield e` for each value *)
+        yields := true;
+        let tl = loc st in
+        let t = parse_type st in
+        (Some (TyPath ([ "Iter" ], [ t ], tl)), None)
+      end
       else (Some (parse_type st), None)
     else (None, None)
   in
+  let mods = if !yields then "yield" :: mods else mods in
   let effs = if accept_op st "!" then Some (parse_effects st) else None in
   let wh = if accept_kw st "where" then Some (parse_expr st) else None in
   let ens = if accept_kw st "ensures" then Some (parse_expr st) else None in

@@ -101,6 +101,7 @@ and stmt_d =
   | Continue
   | Check of expr
   | Lend of bool * expr
+  | Yield of expr                                 (* yield e: the next value of a `-> yield T` function *)
   | Resume of expr option
   | Assert of expr
   | AssertFails of ty * expr

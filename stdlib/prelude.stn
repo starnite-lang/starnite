@@ -10,6 +10,8 @@ type ParseError* = InvalidNumber(text: Str) | OutOfRange(text: Str)
 # Map and Set (section 3.6): built into the backends as one insertion-ordered hash table
 type Map*[K, V]
 type Set*[K]
+# what a function declared `-> yield T` gives: its values, one at a time, as they are asked for
+type Iter*[T]
 
 trait Eq*:
     fn eq(a: Self, b: Self) -> Bool
@@ -55,6 +57,10 @@ fn bench_begin*(name: Str, label: Str, n: Int, spec: Str, a: Int, b: Int, c: Int
 fn bench_running*() -> Bool ! io
 # after a bench has run: fails it when its measure block was never reached
 fn bench_end*(name: Str) ! io
+
+# ---- iterators ----
+# the next value of an iterator, or None when it has no more
+fn next*[T](mut it: Iter[T]) -> T?
 
 # ---- arrays ----
 fn len*[T](xs: Array[T]) -> Int
