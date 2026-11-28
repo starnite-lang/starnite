@@ -553,7 +553,7 @@ let rec deep_into st (t : ty) : string =
             "%s x = *src; for (;;) { if ((uintptr_t)x & 1) { *dst = x; break; } %s n = (%s)stn_alloc(sizeof(struct box_%s)); n->h.tag = x->h.tag; %s next = NULL; %s* hole = NULL; switch (x->h.tag) { %s default: break; } *dst = n; if (hole == NULL) break; dst = hole; x = next; }"
             c c c m c c arms
     in
-    pr st.helpers "static void %s(void* dstv, const void* srcv) { if (stn_copy_enter(dstv, srcv, %s)) return; %s* dst = (%s*)dstv; const %s* src = (const %s*)srcv; %s stn_copy_leave(); }\n"
+    pr st.helpers "static void %s(void* dstv, const void* srcv) { if (stn_copy_enter(dstv, srcv, %s)) return; %s* dst = (%s*)dstv; %s const* src = (%s const*)srcv; %s stn_copy_leave(); }\n"
       name name c c c c body
   end;
   name
