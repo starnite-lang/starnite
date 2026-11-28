@@ -481,72 +481,93 @@ let flat st t =
   | _ -> not (boxy st t)
 
 (* deepcopy_M: a copy of x that shares no block with it (the copy() of section 6.2). x is read, not
-   taken. A value of a data type is copied in a loop along the last field of its own type, so a long
-   list is copied in constant stack; its other fields are copied by calls. *)
-let rec deep_copy st (t : ty) (e : string) : string =
+   taken. The work is done by deepinto_M(dst, src), which writes the copy of *src to *dst. A value
+   of a data type is copied in a loop along the last field of its own type, so a long list is
+   copied without a call per cell. Everything else it holds is copied by a call, and those nest
+   only STN_COPY_DEPTH deep: past that the place and what belongs there go on a list, and are
+   filled in when the nesting has unwound (stn_copy_enter). So the stack a copy needs does not
+   grow with the depth of the value, whatever its shape. *)
+let rec deep_into st (t : ty) : string =
+  ensure_type st t;
+  let m = mangle t in
+  let name = "deepinto_" ^ m in
+  let c = cty st t in
+  if not (Hashtbl.mem st.defined name) then begin
+    Hashtbl.replace st.defined name ();
+    pr st.protos "static void %s(void* dstv, const void* srcv);\n" name;
+    (* the copy of the field or element at src, put at dst *)
+    let put (ft : ty) dst src =
+      if boxy st ft then Printf.sprintf "%s(&%s, &%s);" (deep_into st ft) dst src
+      else Printf.sprintf "%s = %s;" dst (dup_expr st ft src) in
+    let body =
+      match repr t with
+      | TArray et ->
+          let ec = cty st et in
+          Printf.sprintf "StnArray* a = stn_array_clone(*src); %s *dst = a;"
+            (if boxy st et then
+               (* the clone counted each element once more; the copy takes its place *)
+               Printf.sprintf "for (int64_t i = 0; i < a->len; i++) { %s* e = &((%s*)a->data)[i]; %s %s(e, &((%s*)(*src)->data)[i]); }"
+                 ec ec (drop_stmt st et "*e") (deep_into st et) ec
+             else "")
+      | TNamed (("Map" | "Set"), args) ->
+          let part off (pt : ty) =
+            if boxy st pt then
+              let pc = cty st pt in
+              Printf.sprintf "{ %s* q = (%s*)(e + m->%s); %s %s(q, o + m->%s); }" pc pc off (drop_stmt st pt "*q") (deep_into st pt) off
+            else "" in
+          let parts = match args with
+            | [ k; v ] -> part "koff" k ^ part "voff" v
+            | [ k ] -> part "koff" k
+            | _ -> "" in
+          (* the clone keeps the order, so the entries of the two are walked side by side *)
+          Printf.sprintf "StnMap* m = stn_map_clone(*src); int64_t pos = 0, opos = 0; for (char* e; (e = stn_map_next(m, &pos)) != NULL; ) { const char* o = stn_map_next(*src, &opos); (void)o; %s } *dst = m;" parts
+      | TTuple ts ->
+          String.concat " " (List.mapi (fun i ft -> put ft (Printf.sprintf "dst->f%d" i) (Printf.sprintf "src->f%d" i)) ts)
+      | TNamed _ when is_struct st t ->
+          String.concat " " (List.map (fun (n, ft) -> put ft ("dst->" ^ fname n) ("src->" ^ fname n)) (struct_fields st t))
+      | TNamed _ when layout st t = LInline ->
+          let arms = String.concat " "
+              (List.map (fun ((v : variant_info), fs) ->
+                   if fs = [] then ""
+                   else Printf.sprintf "case %d: %s break;" v.vindex
+                       (String.concat " " (List.mapi (fun i (_, ft) ->
+                            let f = Printf.sprintf "u.%s.f%d" (c_ident v.vname_) i in
+                            put ft ("dst->" ^ f) ("src->" ^ f)) fs)))
+                  (variants st t)) in
+          Printf.sprintf "*dst = *src; switch (src->tag) { %s default: break; }" arms
+      | _ ->
+          let arms = String.concat " "
+              (List.map (fun ((v : variant_info), fs) ->
+                   if fs = [] then ""
+                   else begin
+                     let last_self =
+                       List.fold_left (fun acc (i, (_, ft)) -> if mangle ft = m then Some i else acc) None (List.mapi (fun i f -> (i, f)) fs) in
+                     Printf.sprintf "case %d: %s break;" v.vindex
+                       (String.concat " " (List.mapi (fun i (_, ft) ->
+                            let f = Printf.sprintf "u.%s.f%d" (c_ident v.vname_) i in
+                            if Some i = last_self then Printf.sprintf "next = x->%s; hole = &n->%s;" f f
+                            else put ft ("n->" ^ f) ("x->" ^ f)) fs))
+                   end)
+                  (variants st t)) in
+          Printf.sprintf
+            "%s x = *src; for (;;) { if ((uintptr_t)x & 1) { *dst = x; break; } %s n = (%s)stn_alloc(sizeof(struct box_%s)); n->h.tag = x->h.tag; %s next = NULL; %s* hole = NULL; switch (x->h.tag) { %s default: break; } *dst = n; if (hole == NULL) break; dst = hole; x = next; }"
+            c c c m c c arms
+    in
+    pr st.helpers "static void %s(void* dstv, const void* srcv) { if (stn_copy_enter(dstv, srcv, %s)) return; %s* dst = (%s*)dstv; %s const* src = (%s const*)srcv; %s stn_copy_leave(); }\n"
+      name name c c c c body
+  end;
+  name
+
+let deep_copy st (t : ty) (e : string) : string =
   if not (boxy st t) then dup_expr st t e
   else begin
-    ensure_type st t;
-    let m = mangle t in
-    let name = "deepcopy_" ^ m in
+    let into = deep_into st t in
+    let name = "deepcopy_" ^ mangle t in
     let c = cty st t in
     if not (Hashtbl.mem st.defined name) then begin
       Hashtbl.replace st.defined name ();
       pr st.protos "static %s %s(%s x);\n" c name c;
-      let body =
-        match repr t with
-        | TArray et ->
-            let ec = cty st et in
-            Printf.sprintf "StnArray* a = stn_array_clone(x); %s return a;"
-              (if boxy st et then
-                 Printf.sprintf "for (int64_t i = 0; i < a->len; i++) { %s* e = &((%s*)a->data)[i]; %s n = %s; %s *e = n; }"
-                   ec ec ec (deep_copy st et "*e") (drop_stmt st et "*e")
-               else "")
-        | TNamed (("Map" | "Set"), args) ->
-            let part off (pt : ty) =
-              if boxy st pt then
-                let pc = cty st pt in
-                Printf.sprintf "{ %s* q = (%s*)(e + m->%s); %s n = %s; %s *q = n; }" pc pc off pc (deep_copy st pt "*q") (drop_stmt st pt "*q")
-              else "" in
-            let parts = match args with
-              | [ k; v ] -> part "koff" k ^ part "voff" v
-              | [ k ] -> part "koff" k
-              | _ -> "" in
-            Printf.sprintf "StnMap* m = stn_map_clone(x); int64_t pos = 0; for (char* e; (e = stn_map_next(m, &pos)) != NULL; ) { %s } return m;" parts
-        | TTuple ts ->
-            String.concat " " (List.mapi (fun i ft -> Printf.sprintf "x.f%d = %s;" i (deep_copy st ft (Printf.sprintf "x.f%d" i))) ts) ^ " return x;"
-        | TNamed _ when is_struct st t ->
-            String.concat " " (List.map (fun (n, ft) -> Printf.sprintf "x.%s = %s;" (fname n) (deep_copy st ft ("x." ^ fname n))) (struct_fields st t))
-            ^ " return x;"
-        | TNamed _ when layout st t = LInline ->
-            let arms = String.concat " "
-                (List.map (fun ((v : variant_info), fs) ->
-                     if fs = [] then ""
-                     else Printf.sprintf "case %d: %s break;" v.vindex
-                         (String.concat " " (List.mapi (fun i (_, ft) ->
-                              let f = Printf.sprintf "x.u.%s.f%d" (c_ident v.vname_) i in
-                              Printf.sprintf "%s = %s;" f (deep_copy st ft f)) fs)))
-                    (variants st t)) in
-            Printf.sprintf "switch (x.tag) { %s default: break; } return x;" arms
-        | _ ->
-            let arms = String.concat " "
-                (List.map (fun ((v : variant_info), fs) ->
-                     if fs = [] then ""
-                     else begin
-                       let last_self =
-                         List.fold_left (fun acc (i, (_, ft)) -> if mangle ft = m then Some i else acc) None (List.mapi (fun i f -> (i, f)) fs) in
-                       Printf.sprintf "case %d: %s break;" v.vindex
-                         (String.concat " " (List.mapi (fun i (_, ft) ->
-                              let f = Printf.sprintf "u.%s.f%d" (c_ident v.vname_) i in
-                              if Some i = last_self then Printf.sprintf "next = x->%s; hole = &n->%s;" f f
-                              else Printf.sprintf "n->%s = %s;" f (deep_copy st ft ("x->" ^ f))) fs))
-                     end)
-                    (variants st t)) in
-            Printf.sprintf
-              "%s res; %s* dst = &res; for (;;) { if ((uintptr_t)x & 1) { *dst = x; break; } %s n = (%s)stn_alloc(sizeof(struct box_%s)); n->h.tag = x->h.tag; %s next = NULL; %s* hole = NULL; switch (x->h.tag) { %s default: break; } *dst = n; if (hole == NULL) break; dst = hole; x = next; } return res;"
-              c c c c m c c arms
-      in
-      pr st.helpers "static %s %s(%s x) { %s }\n" c name c body
+      pr st.helpers "static %s %s(%s x) { %s r; %s(&r, &x); return r; }\n" c name c c into
     end;
     Printf.sprintf "%s(%s)" name e
   end

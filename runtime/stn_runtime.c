@@ -125,6 +125,40 @@ void stn_release_drain(int fresh) {
     if (stn_release_pending == 0) stn_release_left = stn_release_budget;
 }
 
+/* ---- copying deep structures (section 6.2) ---- */
+int32_t stn_copy_depth = 0;
+typedef struct { void* dst; const void* src; void (*copy)(void*, const void*); } StnCopyPending;
+static StnCopyPending* stn_copy_pending;
+static size_t stn_copy_count, stn_copy_cap;
+static int stn_copy_draining;
+
+int stn_copy_defer(void* dst, const void* src, void (*copy)(void*, const void*)) {
+    if (stn_copy_count == stn_copy_cap) {
+        size_t cap = stn_copy_cap ? stn_copy_cap * 2 : 256;
+        StnCopyPending* grown = (StnCopyPending*)realloc(stn_copy_pending, cap * sizeof *grown);
+        if (!grown) { fputs("trap: out of memory\n", stderr); exit(2); }
+        stn_copy_pending = grown; stn_copy_cap = cap;
+    }
+    stn_copy_pending[stn_copy_count].dst = dst;
+    stn_copy_pending[stn_copy_count].src = src;
+    stn_copy_pending[stn_copy_count].copy = copy;
+    stn_copy_count++;
+    return 1;
+}
+
+/* Makes the copies on the list, last in first out, so the list stays as short as the structure is
+   wide. Each goes in through stn_copy_enter at no depth, and what it puts off in turn is taken
+   by this same loop: the copy that ends inside it finds the loop already running. */
+void stn_copy_drain(void) {
+    if (stn_copy_count == 0 || stn_copy_draining) return;
+    stn_copy_draining = 1;
+    while (stn_copy_count != 0) {
+        StnCopyPending e = stn_copy_pending[--stn_copy_count];
+        e.copy(e.dst, e.src);
+    }
+    stn_copy_draining = 0;
+}
+
 static void stn_release_setup(void) {
     const char* s = getenv("STN_FREE_BUDGET");
     if (s && *s) {

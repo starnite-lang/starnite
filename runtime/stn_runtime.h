@@ -110,6 +110,26 @@ static inline void stn_release_leave(void) {
     }
 }
 
+/* ---- copying deep structures (section 6.2) ---- */
+/* A function that writes the copy of *src to *dst goes in through stn_copy_enter, which lets such
+   functions nest only STN_COPY_DEPTH deep: past that the pair is put on a list, and the copy is
+   made when the nesting has unwound. *dst must stay where it is until then, which a place inside
+   the copy does, and *src too, which a place inside what is copied does. */
+#define STN_COPY_DEPTH 256
+extern int32_t stn_copy_depth;         /* copies now running, one inside another */
+int stn_copy_defer(void* dst, const void* src, void (*copy)(void*, const void*));
+void stn_copy_drain(void);
+/* at the start of copy, for dst and src: 1 when they were put on the list instead, and copy must return */
+static inline int stn_copy_enter(void* dst, const void* src, void (*copy)(void*, const void*)) {
+    if (__builtin_expect(stn_copy_depth >= STN_COPY_DEPTH, 0)) return stn_copy_defer(dst, src, copy);
+    stn_copy_depth++;
+    return 0;
+}
+/* at the end of a copy that went in */
+static inline void stn_copy_leave(void) {
+    if (--stn_copy_depth == 0) stn_copy_drain();
+}
+
 static inline void stn_drop(void* p, void (*release)(void*)) {
     if ((uintptr_t)p & 1) return;
     STN_COUNT_OP();

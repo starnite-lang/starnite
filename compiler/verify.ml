@@ -50,7 +50,7 @@ let dups = [ "stn_dup"; "stn_str_dup"; "STN_STR_DUP"; "stn_error_dup" ]
 let reason name =
   match name with
   | "stn_alloc" -> "it allocates a cell"
-  | "stn_array_clone" | "stn_map_clone" -> "it copies a value, so that nothing else holds the copy"
+  | "stn_array_clone" | "stn_map_clone" | "stn_copy_enter" | "stn_copy_leave" -> "it copies a value, so that nothing else holds the copy"
   | "stn_array_make_unique" | "stn_array_copy_for_write" | "STN_POP" | "stn_array_clear" | "stn_array_remove"
   | "stn_array_reverse_i64" | "stn_array_sort_i64" ->
       "it writes to an array, which is copied first if anything else holds it"
