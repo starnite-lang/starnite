@@ -1218,6 +1218,52 @@ A caller whose use of the result *stays* calls the `__in` entry with its own reg
 
 Some library types exist only in local mode, so they never need counts: `StrView` and `Slice[T]` (a pointer and a length into a borrowed buffer), and every iterator. `for x in xs` builds its iterator on the stack.
 
+### 10.6 Functions that yield
+
+Status: Implemented in the bootstrap compiler, with the limits listed at the end.
+
+```
+fn count(from: Int, to: Int) -> yield Int:
+    var i = from
+    while i < to:
+        yield i
+        i += 1
+
+for n in count(0, 10):
+    print(f"{n}")
+
+var it = count(0, 3)
+let first = next(mut it)        # Some(0)
+```
+
+- A function declared `-> yield T` returns an `Iter[T]`. Calling it evaluates its arguments and runs none of its body.
+- `next(mut it)` runs the body up to its next `yield e` and gives `Some(e)`, or runs it to its end and gives `None`. Once it has given `None` it gives `None` again.
+- `yield e` is a statement. `return` in such a function takes no value and ends it. Leaving the body by its end does the same.
+- `for p in e: body`, where `e` is an `Iter[T]`, stands for
+
+  ```
+  var it = e
+  while true:
+      match next(mut it):
+          Some(p) -> body
+          None -> break
+  ```
+
+- An `Iter[T]` is owned by one holder. It is moved at its last use and cannot be copied (E0331): a second holder would see values go missing as the first asked for them. A function that reads an iterator takes it with `take`, and may then advance it though the parameter is not declared `var`.
+- An `Iter[T]` has no `Eq`, `Hash` or `Show`.
+- Releasing an iterator that has not ended releases what its function held where it stopped.
+
+Compilation. The function is written as three pieces: a frame holding its parameters and the variables that are alive across a `yield`, a resume function with a `switch` on the saved state that jumps to the statement after the `yield` it stopped at, and a release function with a `switch` on the same state. This is the state-machine transform that section 14.5 uses for `async`, and `-> yield T` is the first form of the suspending handler of section 7.3: `fn f() -> yield T` stands for `fn f() ! Yield[T]` handled by whoever asks for the next value.
+
+Limits in this version (E0330):
+
+- A function that yields cannot fail, and cannot take a `mut` parameter: it runs on after the call that made it has returned.
+- A function-typed parameter of a function that yields must be a function that cannot fail.
+- `yield` cannot be inside a closure or inside `try`.
+- `noalloc`, `inplace` and a `unique` result are not allowed on a function that yields.
+- A comprehension cannot run over an `Iter`.
+- The frame is a heap block, not yet placed in its caller's frame or on the stack as section 14.5 and section 10.5 describe.
+
 ## 11. Runtime and C output
 
 Status: Specified. The compiler emits one C11 file per module and links a runtime of roughly 3,000 lines of C; that size is a target, not a measurement.
@@ -2422,7 +2468,7 @@ Status: Specified. Version 1 ships 13 modules; anything not listed is out of sco
 | `array` | `Array[T]`, `Slice[T]`, `range`, sort, search, `split_at_mut`, `swap` | 1 |
 | `str` | `Str`, `StrView`, `CStr`, formatting, UTF-8 iteration, `split`, `words`, `parse_int`, `parse_float` | 1 |
 | `map` | `Map[K, V]`, `Set[K]`, `SortedMap[K, V]`, `SortedSet[K]` | 2 |
-| `iter` | `map`, `filter`, `zip`, `enumerate`, `fold`, `sum`, `any`, `all`; all on local iterators | 2 |
+| `iter` | `iter`, `map`, `filter`, `zip`, `enumerate`, `limit`, `skip`, `collect`, `fold`, `sum`, `any`, `all`; over `Iter[T]` (section 10.6), in the prelude for now | 3 |
 | `mem` | `Ptr[T]`, raw allocation; trusted code only | 2 |
 | `io` | `print`, standard streams, `File[S]`, `read_file`, `write_file`, paths, clock, random; IoError, including its Denied variant; `Access`; narrowing handlers fs.under, net.only, env.only and proc.only; the root handler and \[grants\] checks (section 7.5) | 4 |
 | `log` | Leveled logging (log.info, log.error) to a replaceable sink, with the io effect | 4 |
