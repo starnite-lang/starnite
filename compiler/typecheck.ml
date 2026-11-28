@@ -3039,7 +3039,12 @@ let make_sig tb ~modname ~uname (fd : Syntax.fn_def) (extra_tps : (string * (str
     List.map
       (fun (p : Syntax.param) ->
         match p.pty with
-        | Some t -> (p.pmode, p.pname, conv_ty tb names self (snd (strip t)), p.pdefault)
+        | Some t ->
+            let ty = conv_ty tb names self (snd (strip t)) in
+            (* a function that yields has nowhere to send a failure, so a function it is handed
+               must be one that cannot fail *)
+            let ty = if List.mem "yield" fd.fmods then (match ty with TFn f -> TFn { f with feff = { f.feff with errs = []; poly = false } } | _ -> ty) else ty in
+            (p.pmode, p.pname, ty, p.pdefault)
         | None -> err "E0104" p.ploc "parameter '%s' needs a type" p.pname)
       fd.fparams
   in

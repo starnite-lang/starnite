@@ -742,11 +742,7 @@ let gen_mode : gen option ref = ref None
 let gen_hoist (g : gen) (whole : string) : string =
   let is_id c = c = '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') in
   let keywords = [ "return"; "goto"; "case"; "else"; "do"; "break"; "continue"; "static"; "typedef"; "if"; "while"; "for"; "switch"; "sizeof"; "default"; "extern" ] in
-  let field t name =
-    (* a constant local is a field that is assigned once *)
-    let t = if String.length t > 6 && String.sub t 0 6 = "const " && not (String.contains t '*') then String.sub t 6 (String.length t - 6) else t in
-    if not (List.exists (fun (_, x) -> x = name) g.gfields) then g.gfields <- (t, name) :: g.gfields;
-    t in
+  ignore g;
   (* one statement: a declaration at [i] of [s] becomes an assignment, or nothing *)
   let one (s : string) : string =
     let n = String.length s in
@@ -781,17 +777,17 @@ let gen_hoist (g : gen) (whole : string) : string =
           else None
         end
       end in
+    (* the declaration is marked, not yet decided: \001 type \002 name \003 for one with a
+       value, \004 for one without, and \005 where a value in braces would need its type *)
     let rewrite i prefix =
       match decl i with
       | None -> s
-      | Some (t, name, `Bare) -> ignore (field t name); prefix
+      | Some (t, name, `Bare) -> Printf.sprintf "%s\001%s\002%s\004" prefix t name
       | Some (t, name, `Init j) ->
-          let t = field t name in
           let k = ref j in
           while !k < n && s.[!k] = ' ' do incr k done;
-          (* an initializer in braces is not an expression until it is given its type *)
-          let cast = if !k < n && s.[!k] = '{' then "(" ^ t ^ ")" else "" in
-          prefix ^ name ^ " = " ^ cast ^ String.sub s !k (n - !k) in
+          let cast = if !k < n && s.[!k] = '{' then "\005" else "" in
+          Printf.sprintf "%s\001%s\002%s\003 = %s%s" prefix t name cast (String.sub s !k (n - !k)) in
     if n > 5 && String.sub s 0 5 = "for (" then rewrite 5 "for (" else rewrite 0 "" in
   (* the statements of the line: cut at each `;` outside brackets, braces and literals *)
   let n = String.length whole in
@@ -818,6 +814,114 @@ let gen_hoist (g : gen) (whole : string) : string =
   done;
   if !start < n then flush n false;
   Buffer.contents out
+
+(* Which of the marked locals must be fields of the frame, and the code with each declaration
+   written as what it turned out to be. A local can stay a local of the resume function when no
+   value of it is needed after a stop. That holds when it is declared once, nothing that is
+   dropped on release names it, no yield lies between its declaration and its last use, and no
+   loop whose body does not hold its declaration holds both a use of it and a yield: every way from a
+   yield to a use then goes through the declaration again. [always] are fields whatever is found. *)
+let gen_settle (g : gen) (body : string) (always : string list) : string * (string * string) list =
+  let n = String.length body in
+  let is_id c = c = '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') in
+  (* declarations: name -> (type, position) list; uses: name -> positions *)
+  let decls : (string, (string * int) list) Hashtbl.t = Hashtbl.create 64 in
+  let uses : (string, int list) Hashtbl.t = Hashtbl.create 64 in
+  let yields = ref [] and loops = ref [] in
+  let add tbl k v = Hashtbl.replace tbl k (v :: (try Hashtbl.find tbl k with Not_found -> [])) in
+  let close_of i =   (* the brace that closes the first one opened at or after i *)
+    let d = ref 0 and j = ref i and res = ref n and fin = ref false in
+    while not !fin && !j < n do
+      (match body.[!j] with
+       | '"' | '\'' as q -> incr j; while !j < n && body.[!j] <> q do (if body.[!j] = '\\' then incr j); incr j done
+       | '{' -> incr d
+       | '}' -> decr d; if !d = 0 then (res := !j; fin := true)
+       | _ -> ());
+      incr j
+    done; !res in
+  let i = ref 0 in
+  while !i < n do
+    let c = body.[!i] in
+    if c = '\001' then begin
+      let a = !i + 1 in
+      let m = String.index_from body a '\002' in
+      let e = ref (m + 1) in
+      while body.[!e] <> '\003' && body.[!e] <> '\004' do incr e done;
+      add decls (String.sub body (m + 1) (!e - m - 1)) (String.sub body a (m - a), !i);
+      i := !e + 1
+    end
+    else if c = '"' || c = '\'' then begin
+      incr i; while !i < n && body.[!i] <> c do (if body.[!i] = '\\' then incr i); incr i done; incr i
+    end
+    else if is_id c && (!i = 0 || not (is_id body.[!i - 1])) then begin
+      let a = !i in
+      while !i < n && is_id body.[!i] do incr i done;
+      let w = String.sub body a (!i - a) in
+      if w = "for" || w = "while" || w = "do" then begin
+        (* where the body opens: past the bracketed head, at the first brace *)
+        let j = ref !i and d = ref 0 and fin = ref false in
+        while not !fin && !j < n do
+          (match body.[!j] with
+           | '(' -> incr d
+           | ')' -> decr d
+           | '{' when !d = 0 -> fin := true
+           | _ -> ());
+          if not !fin then incr j
+        done;
+        loops := (a, !j, close_of !j) :: !loops
+      end
+      else if String.length w > 2 && w.[0] = '_' && w.[1] = 'y' && !i < n && body.[!i] = ':' then yields := a :: !yields
+      else add uses w a
+    end
+    else incr i
+  done;
+  let dropped = String.concat "\n" (List.map snd g.grel) in
+  let named_in text w =
+    let lw = String.length w and lt = String.length text in
+    let rec at k = k + lw <= lt && ((String.sub text k lw = w && (k = 0 || not (is_id text.[k - 1])) && (k + lw = lt || not (is_id text.[k + lw]))) || at (k + 1)) in
+    at 0 in
+  let field : (string, string) Hashtbl.t = Hashtbl.create 64 in
+  let order = ref [] in
+  Hashtbl.iter (fun name ds ->
+      let us = try Hashtbl.find uses name with Not_found -> [] in
+      let keep_local =
+        match ds with
+        | [ (_, d) ] ->
+            (not (List.mem name always)) && (not (named_in dropped name))
+            && List.for_all (fun u -> u > d) us
+            && (let last = List.fold_left max d us in not (List.exists (fun y -> y > d && y < last) !yields))
+            (* a loop whose body does not hold the declaration: its head is run again after the body *)
+            && not (List.exists (fun (a, o, e) -> not (d > o && d < e) && e > d && List.exists (fun u -> u > a && u < e) us && List.exists (fun y -> y > o && y < e) !yields) !loops)
+        | _ -> false in
+      if not keep_local then begin
+        let t = fst (List.hd ds) in
+        (* a constant local is a field that is assigned once *)
+        let t = if String.length t > 6 && String.sub t 0 6 = "const " && not (String.contains t '*') then String.sub t 6 (String.length t - 6) else t in
+        Hashtbl.replace field name t;
+        order := (snd (List.hd (List.rev ds)), t, name) :: !order
+      end) decls;
+  (* the code, with each mark written out *)
+  let out = Buffer.create n in
+  let i = ref 0 in
+  let last_type = ref "" and last_field = ref false in
+  while !i < n do
+    (match body.[!i] with
+     | '\001' ->
+         let a = !i + 1 in
+         let m = String.index_from body a '\002' in
+         let e = ref (m + 1) in
+         while body.[!e] <> '\003' && body.[!e] <> '\004' do incr e done;
+         let t = String.sub body a (m - a) and name = String.sub body (m + 1) (!e - m - 1) in
+         let is_field = Hashtbl.mem field name in
+         last_type := (if is_field then Hashtbl.find field name else t); last_field := is_field;
+         if body.[!e] = '\004' then (if not is_field then (Buffer.add_string out t; Buffer.add_char out ' '; Buffer.add_string out name))
+         else (if not is_field then (Buffer.add_string out t; Buffer.add_char out ' '); Buffer.add_string out name);
+         i := !e
+     | '\005' -> if !last_field then (Buffer.add_char out '('; Buffer.add_string out !last_type; Buffer.add_char out ')')
+     | c -> Buffer.add_char out c);
+    incr i
+  done;
+  (Buffer.contents out, List.map (fun (_, t, nme) -> (t, nme)) (List.sort compare !order))
 
 let line fc fmt =
   Printf.ksprintf (fun s ->
@@ -5022,10 +5126,9 @@ let compile_instance st cname uname tys =
     pop fc;
     pop fc;
     gen_mode := None;
-    let body = Buffer.sub b body_start (Buffer.length b - body_start) in
-    Buffer.truncate b 0;
-    let fields = List.rev g.gfields in
     let pnames = List.map (fun (v, _, _) -> var_name v) params in
+    let body, fields = gen_settle g (Buffer.sub b body_start (Buffer.length b - body_start)) pnames in
+    Buffer.truncate b 0;
     (* a name that stands for a field must not also be the name of a member of something else *)
     List.iter (fun (_, nme) ->
         let hit pre = let pat = pre ^ nme in
