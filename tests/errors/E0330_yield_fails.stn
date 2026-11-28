@@ -1,0 +1,6 @@
+# expect: E0330 3:1
+type Bad = Bad(why: Str)
+fn f(n: Int) -> yield Int ! Bad:
+    if n < 0:
+        fail(Bad("negative"))
+    yield n

@@ -1,0 +1,9 @@
+# expect: E0331 8:5
+fn count(n: Int) -> yield Int:
+    for i in 0..n:
+        yield i
+
+fn main() ! io:
+    var a = count(3)
+    var b = a
+    print(f"{next(mut a)} {next(mut b)}")

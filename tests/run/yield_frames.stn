@@ -1,0 +1,130 @@
+# Shapes chosen to catch a local that is wrongly kept out of the frame: values made before a
+# loop and used in it after a yield, loop heads, matches whose bindings are used after a yield,
+# closures over a variable of the function, nested loops, and owned values of every kind.
+type Shape = Dot | Line(points: Array[Int]) | Named(name: Str, inner: Shape)
+type Pair = struct:
+    key: Str
+    vals: Array[Int]
+
+fn before_loop(xs: Array[Int]) -> yield Int:
+    let n = len(xs)
+    let scale = n * 10
+    let label = f"scale {scale}"
+    var i = 0
+    while i < n:
+        yield xs[i] * scale
+        yield len(label) + i
+        i += 1
+    yield n
+
+fn nested(rows: Array[Array[Int]]) -> yield (Int, Int, Int):
+    for (r, row) in enumerate(rows):
+        let width = len(row)
+        for (c, v) in enumerate(row):
+            if v % 2 == 0:
+                yield (r, c, v)
+            else:
+                yield (r, width, -v)
+        yield (r, -1, width)
+
+fn in_match(s: Shape) -> yield Str:
+    match s:
+        Dot -> yield "dot"
+        Line(points) ->
+            yield f"line of {len(points)}"
+            for p in points:
+                yield f"point {p}"
+            yield f"end of {len(points)}"
+        Named(name, inner) ->
+            yield "named " + name
+            for x in in_match(inner):
+                yield name + "/" + x
+            yield "done " + name
+
+fn with_closure(xs: Array[Int]) -> yield Int:
+    var seen = 0
+    let bump = fn(x: Int): x + seen
+    for x in xs:
+        seen += 1
+        yield bump(x)
+    yield seen
+
+fn over_map(m: Map[Str, Array[Int]]) -> yield Pair:
+    for (k, vs) in m:
+        var acc: Array[Int] = []
+        for v in vs:
+            acc.push(v)
+            yield Pair(k, acc)
+        yield Pair(k + "!", acc)
+
+fn strings(text: Str) -> yield Str:
+    var acc = ""
+    for c in chars(text):
+        acc += c
+        if c == ' ':
+            yield acc
+            acc = ""
+    yield acc
+    let view = text[0..3]
+    yield view
+    yield view + view
+
+fn conditional(n: Int) -> yield Int:
+    var i = 0
+    while i < n:
+        if i % 3 == 0:
+            let big = [i, i + 1, i + 2]
+            yield big[2]
+            yield len(big)
+        elif i % 3 == 1:
+            let s = f"{i}"
+            yield len(s)
+        else:
+            i += 1
+            continue
+        i += 1
+    yield -1
+
+fn early(n: Int) -> yield Array[Int]:
+    var grow: Array[Int] = []
+    for i in 0..n:
+        grow.push(i)
+        if i == 4:
+            return
+        yield grow
+
+fn show[T: Show](take it: Iter[T]) ! io:
+    var first = true
+    for x in it:
+        if not first:
+            write(" | ")
+        first = false
+        write(f"{x}")
+    print("")
+
+fn main() ! io:
+    show(before_loop([3, 1, 4]))
+    show(nested([[1, 2], [], [4, 5, 6]]))
+    show(in_match(Named("outer", Named("in", Line([7, 8])))))
+    show(in_match(Dot))
+    show(with_closure([10, 20, 30]))
+    for p in over_map({"a": [1, 2], "b": [], "c": [9]}):
+        write(f"{p.key}{p.vals} ")
+    print("")
+    show(strings("ab cd efg"))
+    show(conditional(8))
+    show(early(10))
+    # stopped part way, at each kind of place
+    for k in 0..12:
+        var it = in_match(Named("o", Line([1, 2, 3])))
+        var got = 0
+        while got < k:
+            let Some(x) = next(mut it) else break
+            got += 1
+        var m = over_map({"a": [1, 2], "b": [3]})
+        var taken = 0
+        while taken < k:
+            let Some(x) = next(mut m) else break
+            taken += 1
+        write(f"{got}{taken} ")
+    print("")

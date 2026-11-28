@@ -1,0 +1,12 @@
+# expect: E0331 7:5
+fn count(n: Int) -> yield Int:
+    for i in 0..n:
+        yield i
+
+fn total(it: Iter[Int]) -> Int:
+    for x in it:
+        return x
+    0
+
+fn main() ! io:
+    print(f"{total(count(3))}")

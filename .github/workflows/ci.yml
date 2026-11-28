@@ -49,6 +49,10 @@ jobs:
       - name: Reporting copies
         # --explain-copies and --profile-copies on a program that copies (tests/copies.sh)
         run: tests/copies.sh
+      - name: Functions that yield
+        # every local kept in the frame gives the same output, and no local is read after a
+        # resume jumped past it (tests/yield.sh)
+        run: tests/yield.sh
 
   portable:
     name: portable (byte-wise and big-endian)

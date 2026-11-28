@@ -1,0 +1,3 @@
+# expect: E0330 2:1
+fn f(mut xs: Array[Int]) -> yield Int:
+    yield len(xs)

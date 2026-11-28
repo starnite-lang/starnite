@@ -1,0 +1,27 @@
+# The iterator functions of the prelude (section 20.1): each that yields does its work as its
+# values are asked for, so a source without end is fine as long as what reads it stops.
+fn count(from: Int, to: Int) -> yield Int:
+    var i = from
+    while i < to:
+        yield i
+        i += 1
+
+fn naturals() -> yield Int:
+    var i = 0
+    while true:
+        yield i
+        i += 1
+
+fn main() ! io:
+    print(f"{collect(map(iter([1, 2, 3]), fn(x): x * 10))}")
+    print(f"{collect(filter(count(0, 20), fn(x): x % 7 == 0))}")
+    print(f"{collect(zip(iter(["a", "b", "c"]), naturals()))}")
+    print(f"{collect(enumerate(iter(["x", "y"])))}")
+    print(f"{enumerate(["x", "y"])}")
+    print(f"{collect(limit(skip(naturals(), 5), 4))}")
+    print(f"{sum(limit(naturals(), 101))}")
+    print(f"{fold(count(1, 6), 1, fn(a, x): a * x)} {fold(iter(["a", "b"]), "", fn(a, s): a + s)}")
+    print(f"{any(naturals(), fn(x): x > 1000)} {all(count(0, 10), fn(x): x < 5)} {all(count(0, 0), fn(x): false)}")
+    let words = ["pear", "fig", "apple"]
+    for (i, w) in enumerate(filter(iter(words), fn(w): len(w) > 3)):
+        print(f"{i} {w}")

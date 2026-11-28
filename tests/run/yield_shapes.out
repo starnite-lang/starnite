@@ -1,0 +1,24 @@
+[0, 1, 2, 3, 4, 5]
+[0, 1, 4, 9, 16]
+[12, 15, 18, 21, 24, 27]
+[0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89]
+[0, 1, 2]
+[]
+0a 1b 1c 2d 
+record number 0 with a name long enough for a buffer []
+record number 1 with a name long enough for a buffer [tag0]
+record number 2 with a name long enough for a buffer [tag0, tag1]
+record number 2 with a name long enough for a buffer! [tag0, 52]
+record number 3 with a name long enough for a buffer [tag0, tag1, tag2]
+record number 3 with a name long enough for a buffer! [tag0, 52]
+third: record number 2 with a name long enough for a buffer 2
+[first line]
+[second]
+[]
+[fourth without end]
+[10, 20, 30, 40, 50, 60, 70, 80, 90]
+[10, 20, 30, 40]
+b=3 a=2 c=1 
+24
+30000000000
+exit 0

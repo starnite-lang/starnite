@@ -1,0 +1,4 @@
+# expect: E0330 4:5
+fn f() -> yield Int:
+    yield 1
+    return 2

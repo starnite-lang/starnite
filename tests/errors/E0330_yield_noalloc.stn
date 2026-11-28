@@ -1,0 +1,3 @@
+# expect: E0330 2:9
+noalloc fn f() -> yield Int:
+    yield 1

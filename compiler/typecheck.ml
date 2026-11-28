@@ -3435,7 +3435,11 @@ let check_fn tb uname : tfn =
   if c.yields <> None then begin
     (* what the next value is asked from has nowhere to send a failure, and its caller's variables
        are not there to write to when it carries on *)
-    if c.errs <> [] || sg.seff.errs <> [] then err "E0330" sg.sloc "'%s' is declared -> yield and can fail with %s: a function that yields cannot fail in this version" sg.sdisplay (String.concat ", " (List.map show_ty (c.errs @ sg.seff.errs)));
+    (match List.filter (fun m -> m <> "yield") sg.smods with
+     | m :: _ -> err "E0330" sg.sloc "'%s' is declared -> yield and %s: a function that yields allocates the frame it runs in, and is not checked as %s" sg.sdisplay m m
+     | [] -> ());
+    if sg.sruniq then err "E0330" sg.sloc "'%s' is declared -> yield: 'unique' says nothing of the values it yields" sg.sdisplay;
+    if c.errs <> [] || sg.seff.errs <> [] then err "E0330" sg.sloc "'%s' is declared -> yield and can fail with %s: a function that yields cannot fail in this version" sg.sdisplay (String.concat ", " (List.sort_uniq compare (List.map show_ty (c.errs @ sg.seff.errs))));
     List.iter (fun (m, n, _, _) -> if m = MMut then err "E0330" sg.sloc "'%s' is declared -> yield and takes '%s' as mut: it runs on after the call has returned, when the caller's variable is no longer lent to it" sg.sdisplay n) sg.sparams
   end;
   finish_ctx c sg.sloc;

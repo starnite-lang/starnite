@@ -410,12 +410,19 @@ and drop_stmt st t e =
   | TErr _ -> Printf.sprintf "stn_error_drop(%s);" e
   | _ -> ensure_type st t; Printf.sprintf "drop_%s(%s);" (mangle t) e
 
+(* the statement whose code is being written, for an error about a copy it would make *)
+let stmt_loc : Syntax.loc option ref = ref None
+
 let dup_expr st t e =
   if not (needs_rc st t) then e
   else
     match repr t with
     | TStr -> Printf.sprintf "stn_str_dup(%s)" e
-    | TArray _ | TFn _ | TNamed (("Map" | "Set" | "Iter"), _) -> Printf.sprintf "(stn_dup(%s), %s)" e e
+    (* two holders of one iterator would each see the other's values go missing *)
+    | TNamed ("Iter", _) ->
+        raise (Syntax.Error ("E0331", (match !stmt_loc with Some l -> l | None -> fst !(st.cur)),
+          "an iterator cannot be copied: it is used again after this, or it is a parameter that is only lent. Hand it over at its last use, declare the parameter 'take', or make a second iterator"))
+    | TArray _ | TFn _ | TNamed (("Map" | "Set"), _) -> Printf.sprintf "(stn_dup(%s), %s)" e e
     | TErr _ -> Printf.sprintf "stn_error_dup(%s)" e
     | _ -> Printf.sprintf "dup_%s(%s)" (mangle t) e
 
@@ -747,36 +754,31 @@ let gen_hoist (g : gen) (whole : string) : string =
   let one (s : string) : string =
     let n = String.length s in
     let decl i =
+      (* words and stars up to `=` or the end: all but the last word are the type *)
       let p = ref i in
       let word () = let a = !p in while !p < n && is_id s.[!p] do incr p done; String.sub s a (!p - a) in
-      let ty = Buffer.create 16 in
-      let w1 = word () in
-      Buffer.add_string ty w1;
-      (* `const T`, `struct T`, `const struct T` *)
-      let rec more last =
-        if (last = "const" || last = "struct") && !p < n && s.[!p] = ' ' then begin
-          incr p; let w = word () in
-          if w = "" then false else (Buffer.add_char ty ' '; Buffer.add_string ty w; more w)
-        end else true in
-      if w1 = "" || List.mem w1 keywords || (w1.[0] >= '0' && w1.[0] <= '9') || not (more w1) then None
-      else begin
-        (* `T const*`: the qualifier after the type *)
-        if !p + 6 <= n && String.sub s !p 6 = " const" && (!p + 6 = n || not (is_id s.[!p + 6])) then (Buffer.add_string ty " const"; p := !p + 6);
-        let a = !p in
-        while !p < n && (s.[!p] = ' ' || s.[!p] = '*') do (if s.[!p] = '*' then Buffer.add_char ty '*'); incr p done;
-        if !p = a then None
+      let words = ref [] and stars_after = ref [] in
+      let go = ref true in
+      while !go do
+        let w = word () in
+        if w = "" then go := false
         else begin
-          let name = word () in
-          let q = ref !p in
-          while !q < n && s.[!q] = ' ' do incr q done;
-          let generated = name <> "" && (name.[0] = '_' || String.exists (fun c -> c >= '0' && c <= '9') name) in
-          let t = Buffer.contents ty in
-          if name = "" || List.mem name keywords || List.mem t keywords || not generated then None
-          else if !q = n then Some (t, name, `Bare)
-          else if !q + 1 < n && s.[!q] = '=' && s.[!q + 1] <> '=' then Some (t, name, `Init (!q + 1))
-          else None
+          let st = ref 0 in
+          while !p < n && (s.[!p] = ' ' || s.[!p] = '*') do (if s.[!p] = '*' then incr st); incr p done;
+          words := w :: !words; stars_after := !st :: !stars_after
         end
-      end in
+      done;
+      match !words with
+      | name :: (_ :: _ as tyw) ->
+          let tyw = List.rev tyw and st = List.rev (List.tl !stars_after) in
+          let t = String.concat " " (List.map2 (fun w k -> w ^ String.make k '*') tyw st) in
+          let generated = name.[0] = '_' || String.exists (fun c -> c >= '0' && c <= '9') name in
+          let first = List.hd tyw in
+          if List.exists (fun w -> List.mem w keywords) (name :: tyw) || (first.[0] >= '0' && first.[0] <= '9') || not generated then None
+          else if !p = n then Some (t, name, `Bare)
+          else if !p + 1 < n && s.[!p] = '=' && s.[!p + 1] <> '=' then Some (t, name, `Init (!p + 1))
+          else None
+      | _ -> None in
     (* the declaration is marked, not yet decided: \001 type \002 name \003 for one with a
        value, \004 for one without, and \005 where a value in braces would need its type *)
     let rewrite i prefix =
@@ -4258,6 +4260,7 @@ and array_reduction fc p src body =
   | _ -> None
 
 and stmt fc (s : tstmt) =
+  stmt_loc := Some s.sl;
   let saved = !(fc.st.cur) in
   (match s.st with
    | SLet (p, _) -> List.iter (fun (v : var) -> Hashtbl.remove u_vars v.vid; Hashtbl.remove u_views v.vid) (u_pat_vars p)
@@ -5033,6 +5036,7 @@ let compile_instance st cname uname tys =
   st.marking := sg.smods <> [] || st.explain || st.profile;
   st.marks := []; st.excused := []; Hashtbl.reset st.from_take; st.trusted := [];
   st.cur := (sg.sloc, "this function");
+  stmt_loc := None;
   (* what verify.ml reads of a noalloc or inplace function, once its code is written *)
   let looped = ref false in   (* the function was generated as a destination-passing loop *)
   let record () =

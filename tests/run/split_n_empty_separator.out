@@ -1,4 +1,4 @@
 [abc]
-trap: invalid argument at <prelude>:288:16
+trap: invalid argument at <prelude>:294:16
 split with an empty separator
 exit 2

@@ -1,0 +1,6 @@
+# expect: E0330 4:9
+fn f() -> yield Int:
+    fn g(x: Int) -> Int:
+        yield x
+        x
+    yield g(1)

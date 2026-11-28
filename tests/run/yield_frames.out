@@ -1,0 +1,11 @@
+90 | 8 | 30 | 9 | 120 | 10 | 3
+(0, 2, -1) | (0, 1, 2) | (0, -1, 2) | (1, -1, 0) | (2, 0, 4) | (2, 3, -5) | (2, 2, 6) | (2, -1, 3)
+named outer | outer/named in | outer/in/line of 2 | outer/in/point 7 | outer/in/point 8 | outer/in/end of 2 | outer/done in | done outer
+dot
+11 | 22 | 33 | 3
+a[1] a[1, 2] a![1, 2] b![] c[9] c![9] 
+ab  | cd  | efg | ab  | ab ab 
+2 | 3 | 1 | 5 | 3 | 1 | 8 | 3 | 1 | -1
+[0] | [0, 1] | [0, 1, 2] | [0, 1, 2, 3]
+00 11 22 33 44 55 65 75 75 75 75 75 
+exit 0

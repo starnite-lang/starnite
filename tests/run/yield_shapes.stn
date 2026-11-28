@@ -1,0 +1,152 @@
+# Harder shapes for functions that yield: owned values held across a yield, early release at
+# every kind of point, generic adapters, closures, maps, nested iterators, and strings.
+type Tree = Leaf | Node(left: Tree, value: Int, right: Tree)
+type Rec = struct:
+    name: Str
+    tags: Array[Str]
+
+fn count(from: Int, to: Int) -> yield Int:
+    var i = from
+    while i < to:
+        yield i
+        i += 1
+
+fn map2[T, U](take it: Iter[T], f: fn(T) -> U) -> yield U:
+    for x in it:
+        yield f(x)
+
+fn filter_it[T](take it: Iter[T], keep: fn(T) -> Bool) -> yield T:
+    for x in it:
+        if keep(x):
+            yield x
+
+fn take_n[T](take it: Iter[T], n: Int) -> yield T:
+    var left = n
+    while left > 0:
+        let Some(x) = next(mut it) else return
+        yield x
+        left -= 1
+
+fn zip_it[A, B](take a: Iter[A], take b: Iter[B]) -> yield (A, B):
+    while true:
+        let Some(x) = next(mut a) else return
+        let Some(y) = next(mut b) else return
+        yield (x, y)
+
+fn items[T](xs: Array[T]) -> yield T:
+    for x in xs:
+        yield x
+
+fn gather[T](take it: Iter[T]) -> Array[T]:
+    var out: Array[T] = []
+    for x in it:
+        out.push(x)
+    out
+
+fn records(n: Int) -> yield Rec:
+    for i in 0..n:
+        let name = f"record number {i} with a name long enough for a buffer"
+        var tags: Array[Str] = []
+        for k in 0..i:
+            tags.push(f"tag{k}")
+        yield Rec(name, tags)
+        # held across the yield, and used after it
+        if len(tags) > 1:
+            yield Rec(name + "!", [tags[0], f"{len(name)}"])
+
+fn lines_of(text: Str) -> yield Str:
+    var at = 0
+    var i = 0
+    let n = len(text)
+    while i < n:
+        if text[i..i + 1] == "\n":
+            yield text[at..i]
+            at = i + 1
+        i += 1
+    if at < n:
+        yield text[at..n]
+
+fn walk(t: Tree) -> yield Int:
+    match t:
+        Leaf -> return
+        Node(l, v, r) ->
+            for x in walk(l):
+                yield x
+            yield v
+            for x in walk(r):
+                yield x
+
+fn insert(t: Tree, v: Int) -> Tree:
+    match t:
+        Leaf -> Node(Leaf, v, Leaf)
+        Node(l, x, r) ->
+            if v < x:
+                Node(insert(l, v), x, r)
+            else:
+                Node(l, x, insert(r, v))
+
+fn counts(text: Str) -> yield (Str, Int):
+    var seen: Map[Str, Int] = {}
+    for w in split(text, " "):
+        seen[w] = (seen.get(w) ?: 0) + 1
+    for (w, n) in seen:
+        yield (w, n)
+
+fn fib() -> yield Int:
+    var a = 0
+    var b = 1
+    while true:
+        yield a
+        let c = a + b
+        a = b
+        b = c
+
+fn nothing() -> yield Int:
+    return
+
+fn main() ! io:
+    print(f"{gather(count(0, 6))}")
+    print(f"{gather(map2(count(0, 5), fn(x): x * x))}")
+    let limit = 10
+    print(f"{gather(filter_it(count(0, 30), fn(x): x % 3 == 0 and x > limit))}")
+    print(f"{gather(take_n(fib(), 12))}")
+    print(f"{gather(take_n(count(0, 3), 10))}")
+    print(f"{gather(nothing())}")
+    for (i, s) in zip_it(fib(), items(["a", "b", "c", "d"])):
+        write(f"{i}{s} ")
+    print("")
+    for r in records(4):
+        print(f"{r.name} {r.tags}")
+    # released early, at each of its yields and before the first
+    var early = records(5)
+    let first = next(mut early)
+    let second = next(mut early)
+    let third = next(mut early)
+    match third:
+        Some(r) -> print(f"third: {r.name} {len(r.tags)}")
+        None -> print("none")
+    let unused = records(3)
+    let unstarted = map2(records(3), fn(r): len(r.tags))
+    for l in lines_of("first line\nsecond\n\nfourth without end"):
+        print(f"[{l}]")
+    var t = Leaf
+    for v in [50, 20, 80, 10, 90, 30, 70, 60, 40]:
+        t = insert(t, v)
+    print(f"{gather(walk(t))}")
+    print(f"{gather(take_n(walk(t), 4))}")
+    for (w, n) in counts("b a b c a b"):
+        write(f"{w}={n} ")
+    print("")
+    # an iterator of iterators, and one kept in an array
+    var its: Array[Iter[Int]] = []
+    its.push(count(0, 3))
+    its.push(count(10, 12))
+    var total = 0
+    for k in 0..len(its):
+        while x = next(mut its[k]):
+            total += x
+    print(f"{total}")
+    var sum = 0
+    for x in take_n(map2(filter_it(count(0, 1000000), fn(x): x % 2 == 1), fn(x): x * 3), 100000):
+        sum += x
+    print(f"{sum}")

@@ -1,0 +1,9 @@
+0 1 2 3 4 
+1 2 3 5 8 9 
+10:a
+11:bb
+12:ccc
+Some(0) Some(1) Some(2) None None
+n=0
+n=2
+exit 0

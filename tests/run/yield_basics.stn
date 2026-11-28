@@ -1,0 +1,60 @@
+# Functions that yield (section 10.6): the function stops at each yield and is carried on when
+# the next value is asked for, by a for loop or by next. Counting, a walk of a tree that yields
+# from itself, two iterators stepped side by side, next called by hand, and break and continue.
+type Tree = Leaf | Node(left: Tree, value: Int, right: Tree)
+
+fn count(from: Int, to: Int) -> yield Int:
+    var i = from
+    while i < to:
+        yield i
+        i += 1
+
+fn walk(t: Tree) -> yield Int:
+    match t:
+        Leaf -> return
+        Node(l, v, r) ->
+            for x in walk(l):
+                yield x
+            yield v
+            for x in walk(r):
+                yield x
+
+fn zip2(take a: Iter[Int], take b: Iter[Str]) -> yield (Int, Str):
+    while true:
+        let Some(x) = next(mut a) else return
+        let Some(y) = next(mut b) else return
+        yield (x, y)
+
+fn pieces(text: Str) -> yield Str:
+    for w in split(text, " "):
+        yield w
+
+fn insert(t: Tree, v: Int) -> Tree:
+    match t:
+        Leaf -> Node(Leaf, v, Leaf)
+        Node(l, x, r) ->
+            if v < x:
+                Node(insert(l, v), x, r)
+            else:
+                Node(l, x, insert(r, v))
+
+fn main() ! io:
+    for n in count(0, 5):
+        write(f"{n} ")
+    print("")
+    var t = Leaf
+    for v in [5, 2, 8, 1, 9, 3]:
+        t = insert(t, v)
+    for v in walk(t):
+        write(f"{v} ")
+    print("")
+    for (n, w) in zip2(count(10, 100), pieces("a bb ccc")):
+        print(f"{n}:{w}")
+    var it = count(0, 3)
+    print(f"{next(mut it)} {next(mut it)} {next(mut it)} {next(mut it)} {next(mut it)}")
+    for n in count(0, 10):
+        if n == 3:
+            break
+        if n == 1:
+            continue
+        print(f"n={n}")

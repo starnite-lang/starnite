@@ -1,0 +1,7 @@
+# expect: E0204 7:23
+fn count(n: Int) -> yield Int:
+    for i in 0..n:
+        yield i
+
+fn main() ! io:
+    print(f"{count(1) == count(1)}")
