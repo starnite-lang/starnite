@@ -4156,6 +4156,32 @@ and stmt_at fc (s : tstmt) =
        let lov = tmp fc (TInt IInt) (expr fc lo).c in
        let hiv = tmp fc (TInt IInt) (expr fc hi).c in
        line fc "stn_str_slice_self(&%s, %s, %s, %s);" (var_read fc root) lov hiv (loc_args l)
+   | SAssign ({ via = None; path = []; root; _ }, { e = XBin (Add, { e = XVar lhs; _ }, rhs); _ })
+     when lhs.vid = root.vid && not root.vcell && repr (ts fc root.vty) = TStr
+          && (match Hashtbl.find_opt fc.vars root.vid with Some (VPtr _) -> true | _ -> false)
+          && (let rec apart (x : texpr) =
+                match x.e with
+                | XLit _ -> true
+                | XVar v -> v.vid <> root.vid
+                | XField (y, _, _) | XTupleGet (y, _) | XNeg y | XNot y | XConv y -> apart y
+                | XIndex (a, i) -> apart a && apart i
+                | XSlice (a, lo, hi) -> apart a && apart lo && apart hi
+                | XBin (_, a, b) -> apart a && apart b
+                | XTuple xs | XArray xs | XStruct (_, _, xs) | XVariant (_, _, _, xs) | XFStr xs -> List.for_all apart xs
+                | XCall (_, args, _) -> List.for_all (fun a -> apart a.a) args
+                | _ -> false
+              in
+              apart rhs) ->
+       (* `v = v + e` (and `v += e`) on a `mut` Str parameter, where e does not name v: e is
+          appended to the caller's string where it is, when nothing else holds its buffer
+          (section 9.3). A parameter cannot be moved out of as a local can, so without this every
+          append in a function that builds a string for its caller would copy all of it. e is
+          evaluated first; the append then takes the string out of the place and puts the result
+          back with nothing in between that can fail. *)
+       let x = expr fc rhs in
+       let bv = sref fc (borrow fc x rhs.ty) in
+       let dst = var_read fc root in
+       line fc "%s = stn_str_append(%s, %s);" dst dst bv
    | SAssign (p, e) ->
        let x = expr fc e in
        let nv = tmp fc p.pty (own fc x e.ty) in
@@ -4272,6 +4298,7 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
   let elt () = match tys with [ x ] -> x | _ -> TUnit in
   match name with
   | "print@Str" -> line fc "stn_print(%s);" (sref fc (b 0)); unit_ ()
+  | "write@Str" -> line fc "stn_write(%s);" (sref fc (b 0)); unit_ ()
   | "read_line@" ->
       let s = fresh st "_s" in
       line fc "StnStr %s;" s;

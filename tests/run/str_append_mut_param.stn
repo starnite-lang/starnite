@@ -1,0 +1,72 @@
+# `out += e` on a `mut` Str parameter appends to the caller's string where it is (section 9.3),
+# and must behave as the copy it replaces: another holder of the old text keeps it, a failing
+# right side leaves the string as it was, and a right side that names the string is not appended
+# to itself half way.
+type Bad = Bad(why: Str)
+
+fn add(mut out: Str, piece: Str):
+    out += piece
+
+fn add_many(mut out: Str, n: Int):
+    for i in 0..n:
+        out += f"{i},"
+
+fn checked(x: Int) -> Str ! Bad:
+    if x < 0:
+        fail(Bad("negative"))
+    f"<{x}>"
+
+fn add_checked(mut out: Str, x: Int) ! Bad:
+    out += "("
+    out += checked(x)
+    out += ")"
+
+fn twice(mut out: Str):
+    out += out
+
+fn framed(mut out: Str):
+    out = out + "[" + out + "]"
+
+fn nested(mut out: Str, depth: Int):
+    if depth == 0:
+        return
+    out += f"{depth}"
+    nested(mut out, depth - 1)
+    out += "."
+
+fn main() ! io:
+    var s = "start:"
+    let kept = s
+    add(mut s, "a")
+    add(mut s, "")
+    add(mut s, "bc")
+    print(f"{s} | {kept}")
+
+    var long = "a string that is long enough to live in a buffer of its own: "
+    let before = long
+    let view = long[2..8]
+    add_many(mut long, 12)
+    print(long)
+    print(f"{before} | {view}")
+
+    var t = "t"
+    match try add_checked(mut t, 5):
+        Ok(_) -> print(f"ok {t}")
+        Err(Bad(why)) -> print(f"err {why} {t}")
+    match try add_checked(mut t, -1):
+        Ok(_) -> print(f"ok {t}")
+        Err(Bad(why)) -> print(f"err {why} {t}")
+
+    var d = "ab"
+    twice(mut d)
+    twice(mut d)
+    framed(mut d)
+    print(d)
+
+    var n = ""
+    nested(mut n, 5)
+    print(n)
+
+    var big = ""
+    add_many(mut big, 20000)
+    print(f"{len(big)}")

@@ -916,6 +916,16 @@ void stn_print(const StnStr* s) {
     stn_outbuf[stn_outlen++] = '\n';
 }
 
+void stn_write(const StnStr* s) {
+    int64_t len;
+    const char* d = stn_str_span(s, &len);
+    size_t n = (size_t)len;
+    if (stn_outlen + n > sizeof stn_outbuf) stn_flush();
+    if (n > sizeof stn_outbuf) { fwrite(d, 1, n, stdout); return; }
+    memcpy(stn_outbuf + stn_outlen, d, n);
+    stn_outlen += n;
+}
+
 /* A Str is always valid UTF-8 (section 3.1): each byte that does not start a well-formed
    sequence (no overlong forms, no surrogates, nothing above U+10FFFF) becomes U+FFFD.
    The reference interpreter applies the same rule (Interp.sanitize_utf8). */
