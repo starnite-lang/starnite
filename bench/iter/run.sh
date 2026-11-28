@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Functions that yield against the loops they stand for (iter.stn), and against Rust's iterators,
+# Functions that yield against the loops they stand for (iter.stn), written in place of the loop
+# (starnite) and as iterators (iterators), and against Rust's iterators,
 # static and behind Box<dyn Iterator> (iter.rs): the best wall time of five runs as nanoseconds
 # per value, and the peak memory. Rust is left out when rustc is not there.
 set -euo pipefail
@@ -9,12 +10,14 @@ repo=$(cd "$here/../.." && pwd)
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 (cd "$repo" && "$repo/_build/default/compiler/main.exe" build --release "$here/iter.stn" -o "$out/starnite")
+# the same with an iterator made for every loop, as for one that is stored or stepped by hand
+(cd "$repo" && STN_NO_FUSE=1 "$repo/_build/default/compiler/main.exe" build --release "$here/iter.stn" -o "$out/iterators")
 rust=0
 if command -v rustc >/dev/null 2>&1; then rustc -C opt-level=3 -C overflow-checks=on -o "$out/rust" "$here/iter.rs" 2>/dev/null && rust=1; fi
 python3 - "$out" "$rust" <<'PY'
 import os, subprocess, sys, time
 out, rust = sys.argv[1], sys.argv[2] == "1"
-cases = [("starnite", c) for c in ("loop", "iter", "loop3", "iter3", "array")]
+cases = [("starnite", c) for c in ("loop", "iter", "loop3", "iter3", "array")] + [("iterators", c) for c in ("iter", "iter3")]
 if rust: cases += [("rust", c) for c in ("iter-static", "iter-dyn", "iter3-static", "iter3-dyn")]
 sums = {}
 print(f"{'build':9s} {'case':13s} {'ns per value':>13s} {'peak MiB':>9s}")
