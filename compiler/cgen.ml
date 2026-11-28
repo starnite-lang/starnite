@@ -413,6 +413,10 @@ and drop_stmt st t e =
 (* the statement whose code is being written, for an error about a copy it would make *)
 let stmt_loc : Syntax.loc option ref = ref None
 
+(* the variable a for loop makes for the call of a yielding function it runs over: which function
+   that is, so that the loop asks it for its values by name and the C compiler can see into it *)
+let gen_known : (int, string) Hashtbl.t = Hashtbl.create 16
+
 let dup_expr st t e =
   if not (needs_rc st t) then e
   else
@@ -4261,6 +4265,12 @@ and array_reduction fc p src body =
 
 and stmt fc (s : tstmt) =
   stmt_loc := Some s.sl;
+  (match s.st with
+   | SVar (v, { e = XCall (CFn (u, tys), _, _); _ })
+     when String.length v.vname > 7 && String.sub v.vname 0 7 = "__iter_"
+          && (match Hashtbl.find_opt fc.st.prog.fns u with Some f -> List.mem "yield" f.fsig.smods | None -> false) ->
+       Hashtbl.replace gen_known v.vid (inst_name u (List.map (ts fc) tys) ^ "_resume")
+   | _ -> ());
   let saved = !(fc.st.cur) in
   (match s.st with
    | SLet (p, _) -> List.iter (fun (v : var) -> Hashtbl.remove u_vars v.vid; Hashtbl.remove u_views v.vid) (u_pat_vars p)
@@ -4563,7 +4573,10 @@ and builtin fc (e : texpr) name tys (targs : targ list) convs : r =
       let x = fresh st "_x" in
       line fc "%s %s;" (cty st (elt ())) x;
       let it = tmp fc (arg 0).a.ty lv in
-      let ok = tmp fc TBool (Printf.sprintf "%s->resume(%s, &%s)" it it x) in
+      let ok =
+        match (arg 0).a.e with
+        | XVar v when Hashtbl.mem gen_known v.vid -> tmp fc TBool (Printf.sprintf "%s(%s, &%s)" (Hashtbl.find gen_known v.vid) it x)
+        | _ -> tmp fc TBool (Printf.sprintf "%s->resume(%s, &%s)" it it x) in
       let res = fresh st "_r" in
       line fc "%s %s;" (ct fc t) res;
       line fc "if (%s) {" ok;

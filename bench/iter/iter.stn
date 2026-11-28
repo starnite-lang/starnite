@@ -1,0 +1,44 @@
+# Iterators against the loops they stand for (section 10.6). Each case adds up 200 million
+# values, in 20 rounds of 10 million; the case is named on standard input.
+#   loop     a while loop                                iter     for over a function that yields
+#   loop3    a while loop with a test and a product      iter3    count, filter and map, chained
+#   array    the same through an array built first
+fn count(from: Int, to: Int) -> yield Int:
+    var i = from
+    while i < to:
+        yield i
+        i += 1
+
+fn main() ! io:
+    let which = trim(read_all())
+    var sum = 0
+    if which == "loop":
+        for r in 0..20:
+            var i = 0
+            while i < 10000000:
+                sum += i + r
+                i += 1
+    if which == "iter":
+        for r in 0..20:
+            for x in count(0, 10000000):
+                sum += x + r
+    if which == "loop3":
+        for r in 0..20:
+            var i = 0
+            while i < 10000000:
+                if i % 3 == 0:
+                    sum += (i * 2) + r
+                i += 1
+    if which == "iter3":
+        for r in 0..20:
+            for x in map(filter(count(0, 10000000), fn(x): x % 3 == 0), fn(x): x * 2):
+                sum += x + r
+    if which == "array":
+        for r in 0..20:
+            var xs: Array[Int] = []
+            for i in 0..10000000:
+                if i % 3 == 0:
+                    xs.push(i * 2)
+            for x in xs:
+                sum += x + r
+    print(f"{sum}")
