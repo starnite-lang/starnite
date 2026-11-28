@@ -2412,6 +2412,8 @@ Status: Specified. Version 1 ships 13 modules; anything not listed is out of sco
 
 `print(x)` takes any `Show` value, writes it followed by a newline, and has the `io` effect. `Show` for `Int` and the other integer types writes decimal digits with a leading `-` when negative; for `Bool`, `true` or `false`; for `Str`, its contents without quotes; for `Float`, the shortest text that reads back as the same value.
 
+`write(s)` writes a `Str` without the newline, and has the `io` effect. What `print` and `write` produce reaches standard output in the order of the calls; an implementation may collect it in a buffer, which it empties before reading standard input, before writing a trap message, and when the program ends.
+
 ### 20.1 Modules
 
 | Module | Contents | Needed by milestone |
