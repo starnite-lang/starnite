@@ -100,6 +100,32 @@ Not done yet:
 - the last oracle of the fuzzer of section 21.2, comparing each optional pass on and off, which waits for the optional passes
 - `split_at_mut`, `Slice[T]` and `StrView` of the `array` and `str` modules: they are views into a borrowed buffer, which the `local` mode of milestone 3 is for (section 10.5), and `swap` covers the common case of two parts of one array; and a search function over arrays, which the draft names without a signature
 
+## Milestone 3 so far
+
+- **Functions that yield (section 10.6).** A function declared `-> yield T` gives an `Iter[T]`: its body says `yield e` for each value, and it runs only as far as the next one each time a value is asked for, by a `for` loop or by `next(mut it)`, which gives `T?`.
+
+  ```
+  fn walk(t: Tree) -> yield Int:
+      match t:
+          Leaf -> return
+          Node(l, v, r) ->
+              for x in walk(l):
+                  yield x
+              yield v
+              for x in walk(r):
+                  yield x
+
+  for (i, w) in enumerate(filter(iter(words), fn(w): len(w) > 3)):
+      print(f"{i} {w}")
+  ```
+
+  - The prelude has `iter(xs)` for the elements of an array, and `map`, `filter`, `zip`, `enumerate`, `limit`, `skip`, `collect`, `fold`, `sum`, `any` and `all` over an `Iter`. Those that yield build nothing in between, so a source without end is fine as long as what reads it stops. `enumerate(xs)` on an array still gives an array.
+  - How it is compiled: the function becomes a frame on the heap, a resume function that jumps to where it stopped, and a release function that drops what the function held at that point, so an iterator that is let go part way leaks nothing. Only what is alive across a yield is kept in the frame; every other local stays a C local. `tests/yield.sh` builds the tests again with every local in the frame and compares, and compiles the C with the warnings for a variable read before it is written.
+  - The reference interpreter runs a yielding function in a thread of its own, which is let run only while a value is asked of it.
+  - An iterator cannot be copied (E0331): two holders would each see the other's values go missing. It is handed over at its last use, and a function that reads one takes it as `take it: Iter[T]`.
+  - `bench/iter/run.sh`, in nanoseconds per value: a loop over one yielding function costs 1.7 where the plain loop costs 0.7; `count`, `filter` and `map` chained cost 4.6, where the plain loop costs 0.9, building an array first 2.1 (and 27 MiB where the others stay at 13), and Rust's iterators 0.7 when the compiler sees through them and 4.0 behind `Box<dyn Iterator>`, which is what an `Iter[T]` is.
+  - Limits (E0330): a function that yields cannot fail, cannot take a `mut` parameter, and the functions it is handed must be ones that cannot fail. `yield` cannot be inside a closure. Each iterator is one heap block, and each stage of a chain is a call through a pointer: a chain whose stages are all in sight is not yet merged into one loop. A comprehension cannot run over an `Iter`; `collect` does that. A function that yields from itself, as `walk` does, runs as deep on the stack as the value is deep, for each value.
+
 ## Milestone 2 so far
 
 - **Output piece by piece.**
