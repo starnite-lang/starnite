@@ -1,0 +1,107 @@
+# copy() of values that are deep where a copy cannot loop (section 6.2): a tree a million deep on
+# its left, a million values each held in the array of the next, and the same through a map and a
+# struct. Copies nest only so far before the rest is put on a list, so none of them needs a stack
+# as deep as the value. Each copy is then changed at its far end, and the original is not.
+type Tree = Leaf | Node(left: Tree, value: Int, right: Tree)
+type Rose = Rose(value: Int, kids: Array[Rose])
+type Doc = Num(n: Int) | Obj(fields: Map[Str, Doc])
+type Wrap = struct:
+    label: Int
+    inner: Option[Link]
+type Link = Link(w: Wrap)
+
+fn left_spine(n: Int) -> Tree:
+    var t = Leaf
+    var i = 0
+    while i < n:
+        t = Node(t, i, Leaf)
+        i = i + 1
+    t
+
+fn spine_sum(t: Tree) -> Int:
+    var total = 0
+    var at = t
+    while true:
+        match at:
+            Leaf -> break
+            Node(l, v, _) ->
+                total += v
+                at = l
+    total
+
+fn chain(n: Int) -> Rose:
+    var r = Rose(0, [])
+    var i = 1
+    while i < n:
+        r = Rose(i, [r])
+        i = i + 1
+    r
+
+fn chain_sum(r: Rose) -> Int:
+    var total = 0
+    var at = r
+    while true:
+        match at:
+            Rose(v, kids) ->
+                total += v
+                if len(kids) == 0:
+                    break
+                at = kids[0]
+    total
+
+fn nest(n: Int) -> Doc:
+    var d = Num(7)
+    var i = 0
+    while i < n:
+        d = Obj({"in": d, "n": Num(i)})
+        i = i + 1
+    d
+
+fn nest_sum(d: Doc) -> Int:
+    var total = 0
+    var at = d
+    while true:
+        match at:
+            Num(n) ->
+                total += n
+                break
+            Obj(fields) ->
+                match fields["n"]:
+                    Num(n) -> total += n
+                    Obj(_) -> total += 0
+                at = fields["in"]
+    total
+
+fn wrapped(n: Int) -> Wrap:
+    var w = Wrap(0, None)
+    var i = 1
+    while i < n:
+        w = Wrap(i, Some(Link(w)))
+        i = i + 1
+    w
+
+fn wrapped_sum(w: Wrap) -> Int:
+    var total = 0
+    var at = w
+    while true:
+        total += at.label
+        match at.inner:
+            None -> break
+            Some(Link(next)) -> at = next
+    total
+
+fn main() ! io:
+    let t = left_spine(1000000)
+    var t2 = copy(t)
+    t2 = Node(take t2, 5, Leaf)
+    print(f"{spine_sum(t)} {spine_sum(t2)}")
+    let r = chain(1000000)
+    var r2 = copy(r)
+    r2 = Rose(3, [r2])
+    print(f"{chain_sum(r)} {chain_sum(r2)}")
+    let d = nest(300000)
+    let d2 = copy(d)
+    print(f"{nest_sum(d)} {nest_sum(d2)}")
+    let w = wrapped(300000)
+    let w2 = copy(w)
+    print(f"{wrapped_sum(w)} {wrapped_sum(w2)}")

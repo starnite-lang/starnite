@@ -35,5 +35,12 @@ for mode in "" --release; do
     if cmp -s "$tmp/out" "$here/deep/copy.out"; then pass=$((pass + 1))
     else echo "FAIL deep/copy ${mode:-debug}"; diff "$here/deep/copy.out" "$tmp/out" | head -10; fail=$((fail + 1)); fi
 done
+# the same of values that are deep along a field a copy cannot loop over, and through arrays,
+# maps and structs: the copies nest only so far (section 6.2)
+for mode in "" --release; do
+    "$starnite" run $mode "$here/deep/copy_shapes.stn" < /dev/null > "$tmp/out" 2>&1; echo "exit $?" >> "$tmp/out"
+    if cmp -s "$tmp/out" "$here/deep/copy_shapes.out"; then pass=$((pass + 1))
+    else echo "FAIL deep/copy_shapes ${mode:-debug}"; diff "$here/deep/copy_shapes.out" "$tmp/out" | head -10; fail=$((fail + 1)); fi
+done
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]
