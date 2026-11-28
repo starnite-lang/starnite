@@ -1,0 +1,108 @@
+# A for loop over a call of a yielding function that is in sight is written with the function in
+# place of the loop (section 10.6). It must behave as the iterator it stands for: break,
+# continue and return from inside the loop, values that are owned, loops inside loops, a chain
+# of calls, the same inside a function that itself yields, and arguments evaluated once, in
+# order, before anything runs.
+type Rec = struct:
+    name: Str
+    tags: Array[Str]
+
+fn count(from: Int, to: Int) -> yield Int:
+    var i = from
+    while i < to:
+        yield i
+        i += 1
+
+fn names(n: Int) -> yield Rec:
+    for i in 0..n:
+        let name = f"a name that is long enough to need a buffer, number {i}"
+        yield Rec(name, [f"t{i}", name])
+
+fn noisy(label: Str, n: Int) -> Int ! io:
+    print(f"evaluated {label}")
+    n
+
+fn evens(take it: Iter[Int]) -> yield Int:
+    for x in it:
+        if x % 2 == 1:
+            continue
+        yield x
+
+fn until(take it: Iter[Int], stop: Int) -> yield Int:
+    for x in it:
+        if x >= stop:
+            break
+        yield x
+
+fn guarded(n: Int) -> yield Int:
+    if n < 0:
+        return
+    for x in count(0, n):
+        yield x * 10
+
+fn pairs(n: Int) -> yield (Int, Int):
+    for a in count(0, n):
+        for b in count(a, n):
+            yield (a, b)
+
+fn first_over(limit_: Int) -> Int:
+    for x in map(count(0, 1000000), fn(x): x * x):
+        if x > limit_:
+            return x
+    return 0 - 1
+
+fn find_name(n: Int, want: Int) -> Str:
+    for r in names(n):
+        if len(r.tags[0]) == want:
+            return r.name
+    "none"
+
+fn main() ! io:
+    var total = 0
+    for x in count(0, 10):
+        if x == 3:
+            continue
+        if x == 7:
+            break
+        total += x
+    print(f"{total}")
+    var kept: Array[Rec] = []
+    for r in names(5):
+        if len(kept) == 2:
+            continue
+        kept.push(r)
+    print(f"{len(kept)} {kept[1].tags[0]} {len(kept[1].name)}")
+    for r in names(3):
+        let copy = r.tags
+        if copy[0] == "t1":
+            break
+    print(f"{first_over(50)} {first_over(-5)} {find_name(20, 3)} {find_name(3, 9)}")
+    print(f"{collect(evens(count(0, 9)))} {collect(until(evens(count(0, 100)), 7))}")
+    var seen: Array[Int] = []
+    for x in until(evens(map(count(0, 1000000), fn(x): x + 1)), 9):
+        seen.push(x)
+    print(f"{seen}")
+    print(f"{collect(guarded(3))} {collect(guarded(-1))} {collect(pairs(3))}")
+    var grid = 0
+    for (a, b) in pairs(4):
+        if b == 2:
+            continue
+        if a == 3:
+            break
+        for c in count(0, b):
+            if c > a:
+                break
+            grid += 1
+    print(f"{grid}")
+    for x in count(noisy("from", 2), noisy("to", 4)):
+        print(f"x={x}")
+    let base = 100
+    for (i, x) in enumerate(filter(map(count(noisy("a", 0), noisy("b", 9)), fn(x): x + base), fn(x): x % 3 == 0)):
+        print(f"{i}:{x}")
+    for x in skip(count(0, 6), 4):
+        write(f"{x} ")
+    print("")
+    var words: Array[Str] = []
+    for w in map(iter(["a", "bb", "ccc"]), fn(w): w + "!"):
+        words.push(w)
+    print(f"{words}")

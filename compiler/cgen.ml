@@ -423,11 +423,16 @@ let stmt_loc : Syntax.loc option ref = ref None
 type inl = { ibrk : string; iyield : texpr -> unit }
 let inl_ctx : inl option ref = ref None
 let inl_stack : string list ref = ref []
+(* every function written in place around this point, the bodies of their loops included: the
+   variables of a function are named once, so it is not written inside itself there either *)
+let inl_open : string list ref = ref []
 type lazy_gen = { lu : string; ltys : ty list; largs : lazy_arg list }
 and lazy_arg = LVal of string * ty | LCode of string * string * ty | LGen of lazy_gen
 let inl_lazy : (int, lazy_gen) Hashtbl.t = Hashtbl.create 8
 let known_code : (int, string) Hashtbl.t = Hashtbl.create 8
 let last_closure : string ref = ref ""
+(* the calls of one chain that are to be written in place, while its arguments are evaluated *)
+let fuse_pending : string list ref = ref []
 
 (* the variable a for loop makes for the call of a yielding function it runs over: which function
    that is, so that the loop asks it for its values by name and the C compiler can see into it *)
@@ -4311,7 +4316,7 @@ and fuse_plan fc (src : texpr) : [ `Call of string * ty list * targ list | `Lazy
   else
     match src.e with
     | XVar v -> Option.map (fun g -> `Lazy g) (Hashtbl.find_opt inl_lazy v.vid)
-    | XCall (CFn (u, tys), args, []) when fusable_fn fc.st u && not (List.mem u !inl_stack) && List.length !inl_stack < 8 ->
+    | XCall (CFn (u, tys), args, []) when fusable_fn fc.st u && not (List.mem u !inl_open) && List.length !inl_open < 8 ->
         Some (`Call (u, List.map (ts fc) tys, args))
     | _ -> None
 
@@ -4343,7 +4348,8 @@ and fuse_args fc (u : string) (args : targ list) : lazy_arg list =
         !uses = 1 && top tf.fbody in
       let t = ts fc a.a.ty in
       match a.a.e with
-      | XCall (CFn (u2, tys2), args2, []) when not (env_on "STN_NO_FUSE") && fusable_fn fc.st u2 && u2 <> u && not (List.mem u2 !inl_stack) && only_looped_over () ->
+      | XCall (CFn (u2, tys2), args2, []) when not (env_on "STN_NO_FUSE") && fusable_fn fc.st u2 && not (List.mem u2 (u :: !inl_open @ !fuse_pending)) && only_looped_over () ->
+          fuse_pending := u2 :: !fuse_pending;
           LGen { lu = u2; ltys = List.map (ts fc) tys2; largs = fuse_args fc u2 args2 }
       | XLambda _ ->
           let c = tmp fc a.a.ty (own fc (expr fc a.a) a.a.ty) in
@@ -4387,6 +4393,8 @@ and fuse_loop ?(held = false) fc (g : lazy_gen) (p : tpat) (body : texpr) =
   note_moves st !owned tf.fbody;
   let item_ty = match repr tf.fsig.sret with TNamed ("Iter", [ t ]) -> t | _ -> assert false in
   inl_stack := g.lu :: saved_stack;
+  let saved_open = !inl_open in
+  inl_open := g.lu :: saved_open;
   inl_ctx := Some { ibrk = id; iyield = (fun (e : texpr) ->
       (* at the yield: the value, bound as the loop binds it, and the body of the loop *)
       let cur = fg in
@@ -4416,7 +4424,7 @@ and fuse_loop ?(held = false) fc (g : lazy_gen) (p : tpat) (body : texpr) =
   discard fg tf.fbody;
   pop fg;
   pass fg fc;
-  inl_ctx := saved_ctx; inl_stack := saved_stack;
+  inl_ctx := saved_ctx; inl_stack := saved_stack; inl_open := saved_open;
   List.iter2 (fun (pv : var) (a : lazy_arg) -> match a with LGen _ -> Hashtbl.remove inl_lazy pv.vid | LCode _ -> Hashtbl.remove known_code pv.vid | LVal _ -> ()) tf.fparams g.largs;
   line fc "%s:;" id;
   pop fc;
@@ -4601,12 +4609,17 @@ and stmt_at fc (s : tstmt) =
            | _ -> ()
          end
        end
-   | SExpr { e = XBlock ([ { st = SVar (iv, src); _ }; { st = SWhile (_, wb); _ } ], _); _ }
+   | SExpr { e = XBlock ([ { st = SVar (iv, src); _ }; ({ st = SWhile (_, wb); _ } as loop) ], _); _ }
      when String.length iv.vname > 7 && String.sub iv.vname 0 7 = "__iter_" && fuse_plan fc src <> None && for_parts wb <> None ->
        let p, body = Option.get (for_parts wb) in
-       (match Option.get (fuse_plan fc src) with
-        | `Call (u, tys, args) -> fuse_loop fc { lu = u; ltys = tys; largs = fuse_args fc u args } p body
-        | `Lazy g -> fuse_loop ~held:true fc g p body)
+       let plan = match Option.get (fuse_plan fc src) with
+         | `Call (u, tys, args) -> fuse_pending := [ u ]; let largs = fuse_args fc u args in fuse_pending := []; (false, { lu = u; ltys = tys; largs })
+         | `Lazy g -> (true, g) in
+       (* the body is the body of a loop, as it was when the loop was the while it stands for *)
+       u_scan fc ~deep:false ~stmt:loop None;
+       incr u_depth;
+       fuse_loop ~held:(fst plan) fc (snd plan) p body;
+       decr u_depth
    | SExpr e -> discard_value fc e
    | SReturn e when (match !(st.dps) with Some (_, b, _) -> b == fc.b | None -> false) ->
        (* in a function that runs as a loop (section 9.5), what is returned is in tail position *)

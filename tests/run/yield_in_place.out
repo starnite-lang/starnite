@@ -1,0 +1,19 @@
+18
+2 t1 53
+64 0 a name that is long enough to need a buffer, number 10 none
+[0, 2, 4, 6, 8] [0, 2, 4, 6]
+[2, 4, 6, 8]
+[0, 10, 20] [] [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)]
+8
+evaluated from
+evaluated to
+x=2
+x=3
+evaluated a
+evaluated b
+0:102
+1:105
+2:108
+4 5 
+[a!, bb!, ccc!]
+exit 0
