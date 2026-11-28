@@ -1304,7 +1304,7 @@ and infer_name c l n exp : texpr =
                   let ty = TFn { fps = List.map (fun (m, _, t, _) -> (m, t)) ps; fret = ret; feff = eff } in
                   (match exp with Some t -> unify_at l t ty | None -> ());
                   mk (XFnRef (u, List.map snd s)) ty l
-              | cands -> (
+              | _ :: _ as cands -> (
                   (* a function of this program is the one meant where the prelude has one of the same name *)
                   match List.filter (fun u -> (Hashtbl.find c.tb.fns u).smodule <> "core") cands with
                   | [ u ] when not (is_builtin u) ->
