@@ -1255,13 +1255,16 @@ let first = next(mut it)        # Some(0)
 
 Compilation. The function is written as three pieces: a frame holding its parameters and the variables that are alive across a `yield`, a resume function with a `switch` on the saved state that jumps to the statement after the `yield` it stopped at, and a release function with a `switch` on the same state. This is the state-machine transform that section 14.5 uses for `async`, and `-> yield T` is the first form of the suspending handler of section 7.3: `fn f() -> yield T` stands for `fn f() ! Yield[T]` handled by whoever asks for the next value.
 
+A `for` loop over a call of a yielding function may be compiled with the function's body in place of the loop and the loop's body in place of its `yield`, with no iterator made. What the program does is the same: the arguments of the call, and of the calls inside it, are evaluated once, in their order, before the first value. The bootstrap compiler does this for a function with one `yield` that is not being written into itself.
+
+A comprehension over an `Iter[T]` runs over the array of its values.
+
 Limits in this version (E0330):
 
 - A function that yields cannot fail, and cannot take a `mut` parameter: it runs on after the call that made it has returned.
 - A function-typed parameter of a function that yields must be a function that cannot fail.
 - `yield` cannot be inside a closure or inside `try`.
 - `noalloc`, `inplace` and a `unique` result are not allowed on a function that yields.
-- A comprehension cannot run over an `Iter`.
 - The frame is a heap block, not yet placed in its caller's frame or on the stack as section 14.5 and section 10.5 describe.
 
 ## 11. Runtime and C output
