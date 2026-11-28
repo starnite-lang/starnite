@@ -364,3 +364,82 @@ fn words*(s: Str) -> Array[Str]:
             out.push(s[i..j])
             i = j
     out
+
+# ---- iterators (section 10.6) ----
+# Each of these that yields does its work as the values are asked for: nothing is built in
+# between, and a source without end is fine as long as what reads it stops.
+
+# the elements of an array, as an iterator
+fn iter*[T](xs: Array[T]) -> yield T:
+    for x in xs:
+        yield x
+
+fn map*[T, U](take it: Iter[T], f: fn(T) -> U) -> yield U:
+    for x in it:
+        yield f(x)
+
+fn filter*[T](take it: Iter[T], keep: fn(T) -> Bool) -> yield T:
+    for x in it:
+        if keep(x):
+            yield x
+
+# pairs of the values of two iterators, until either has no more
+fn zip*[A, B](take a: Iter[A], take b: Iter[B]) -> yield (A, B):
+    while true:
+        let Some(x) = next(mut a) else return
+        let Some(y) = next(mut b) else return
+        yield (x, y)
+
+fn enumerate*[T](take it: Iter[T]) -> yield (Int, T):
+    var i = 0
+    for x in it:
+        yield (i, x)
+        i += 1
+
+# the first n values
+fn limit*[T](take it: Iter[T], n: Int) -> yield T:
+    var left = n
+    while left > 0:
+        let Some(x) = next(mut it) else return
+        yield x
+        left -= 1
+
+# what follows the first n values
+fn skip*[T](take it: Iter[T], n: Int) -> yield T:
+    var left = n
+    for x in it:
+        if left > 0:
+            left -= 1
+        else:
+            yield x
+
+# every value, in an array
+fn collect*[T](take it: Iter[T]) -> Array[T]:
+    var out: Array[T] = []
+    for x in it:
+        out.push(x)
+    out
+
+fn fold*[T, A](take it: Iter[T], take start: A, f: fn(A, T) -> A) -> A:
+    var acc = start
+    for x in it:
+        acc = f(take acc, x)
+    acc
+
+fn sum*(take it: Iter[Int]) -> Int:
+    var total = 0
+    for x in it:
+        total += x
+    total
+
+fn any*[T](take it: Iter[T], f: fn(T) -> Bool) -> Bool:
+    for x in it:
+        if f(x):
+            return true
+    false
+
+fn all*[T](take it: Iter[T], f: fn(T) -> Bool) -> Bool:
+    for x in it:
+        if not f(x):
+            return false
+    true

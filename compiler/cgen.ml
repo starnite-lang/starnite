@@ -887,7 +887,9 @@ let gen_settle (g : gen) (body : string) (always : string list) : string * (stri
       let keep_local =
         match ds with
         | [ (_, d) ] ->
-            (not (List.mem name always)) && (not (named_in dropped name))
+            (* STN_GEN_ALL keeps every local in the frame: what the tests compare this pass with *)
+            Sys.getenv_opt "STN_GEN_ALL" = None
+            && (not (List.mem name always)) && (not (named_in dropped name))
             && List.for_all (fun u -> u > d) us
             && (let last = List.fold_left max d us in not (List.exists (fun y -> y > d && y < last) !yields))
             (* a loop whose body does not hold the declaration: its head is run again after the body *)
@@ -3694,7 +3696,7 @@ and moves fc (e : texpr) (v : var) =
 and movable_type st (t : ty) : bool =
   let rec part t =
     match repr t with
-    | TStr | TArray _ | TNamed (("Map" | "Set"), _) -> true
+    | TStr | TArray _ | TNamed (("Map" | "Set" | "Iter"), _) -> true
     | TTuple ts -> List.for_all part ts
     | TNamed _ as t when is_struct st t -> List.for_all (fun (_, ft) -> part ft) (struct_fields st t)
     | TNamed _ as t when is_data st t ->

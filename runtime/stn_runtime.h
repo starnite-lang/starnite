@@ -514,7 +514,8 @@ typedef struct StnIter {
     int32_t state;
 } StnIter;
 
-static inline void stn_iter_drop(StnIter* it) { stn_drop(it, it->release); }
+/* an iterator that was moved out of its variable leaves an odd pointer there, which is not read */
+static inline void stn_iter_drop(StnIter* it) { if (!((uintptr_t)it & 1)) stn_drop(it, it->release); }
 
 /* ---- trait values (section 3.4) ---- */
 /* The counted box behind `any Trait`: the value follows the header, and [release] drops
