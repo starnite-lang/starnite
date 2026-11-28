@@ -799,6 +799,9 @@ and builtin env name (tys : ty list) (vals : value list) loc : value * value lis
   | "print@Str", [ VStr s ] -> Buffer.add_string out s; Buffer.add_char out '\n';
       if Buffer.length out > 60000 then flush_out ();
       pure VUnit
+  | "write@Str", [ VStr s ] -> Buffer.add_string out s;
+      if Buffer.length out > 60000 then flush_out ();
+      pure VUnit
   | "read_line@", [] -> (
       flush_out ();
       match In_channel.input_line stdin with

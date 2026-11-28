@@ -1,0 +1,38 @@
+# A million records written as JSON lines, two ways (the argument on standard input picks one):
+#   whole   the output is built as one string and printed once
+#   pieces  each piece is written as it is made, with write
+# usage: echo pieces | write > /dev/null
+fn record_whole(mut out: Str, i: Int):
+    out += "{\"id\": "
+    out += f"{i}"
+    out += ", \"name\": \"user"
+    out += f"{i % 1000}"
+    out += "\", \"scores\": ["
+    for k in 0..4:
+        if k > 0:
+            out += ", "
+        out += f"{i * (k + 1) % 97}"
+    out += "]}\n"
+
+fn record_pieces(i: Int) ! io:
+    write("{\"id\": ")
+    write(f"{i}")
+    write(", \"name\": \"user")
+    write(f"{i % 1000}")
+    write("\", \"scores\": [")
+    for k in 0..4:
+        if k > 0:
+            write(", ")
+        write(f"{i * (k + 1) % 97}")
+    write("]}\n")
+
+fn main() ! io:
+    let which = trim(read_all())
+    if which == "whole":
+        var out = ""
+        for i in 0..1000000:
+            record_whole(mut out, i)
+        write(out)
+    else:
+        for i in 0..1000000:
+            record_pieces(i)

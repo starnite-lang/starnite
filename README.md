@@ -102,6 +102,9 @@ Not done yet:
 
 ## Milestone 2 so far
 
+- **Output piece by piece.**
+  - `write(s)` is `print(s)` without the newline. Output is collected in the runtime's buffer of 64 KB and goes out in order with `print`, and before the program reads input, so a program need not build its whole output as one string first. `bench/write/run.sh` writes a million JSON lines (58.5 MB) both ways: built as one string and printed once it takes 0.57 s and 95 MiB at its peak, written piece by piece 0.35 s and 17 MiB (of which 13 MiB is the floor of the measurement).
+  - `out += e` on a `mut` `Str` parameter appends to the caller's string where it is, as it already did on a local variable. It copied the whole string each time: a function that built 1.2 MB for its caller in 180,000 appends took 29.5 s, and takes 0.02 s.
 - **Small things the prelude was missing.**
   - `text + c` and `text += c` add a `Char` to a `Str`, as the text it shows as. This is in the checker; the rest are functions written in Starnite in `stdlib/prelude.stn`.
   - `to_int(s)` and `to_float(s)` give an option, where `parse_int` and `parse_float` fail with a reason.

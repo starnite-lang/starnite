@@ -519,6 +519,7 @@ static inline StnError stn_error_dup(StnError e) { if (e.box) stn_dup(e.box); re
 
 /* ---- console and the rest of the built-ins ---- */
 void    stn_print(const StnStr* s);
+void    stn_write(const StnStr* s);   /* the same without the newline */
 int     stn_read_line(StnStr* out);
 StnStr  stn_read_all(const char* file, int line, int col);
 int64_t stn_clock_ns(void);

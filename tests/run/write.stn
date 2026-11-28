@@ -1,0 +1,28 @@
+# write is print without the newline (section 20.1): output goes out piece by piece, in order
+# with print, and nothing is added at the end of the program.
+fn row(cells: Array[Int]) ! io:
+    write("[")
+    for (i, c) in enumerate(cells):
+        if i > 0:
+            write(", ")
+        write(f"{c}")
+    print("]")
+
+fn main() ! io:
+    write("a")
+    write("")
+    write("b")
+    print("c")
+    row([])
+    row([1])
+    row([1, 2, 3])
+    # more than the output buffer holds, in small pieces and in one
+    var n = 0
+    for i in 0..30000:
+        write("xyz")
+        n += 3
+    print("")
+    print(f"{n}")
+    write(repeat("-", 70000))
+    print("|")
+    write("no newline at the end")
