@@ -756,16 +756,15 @@ static inline uint64_t stn_sip_finish(StnSip* s) {
 static inline uint64_t stn_hash_combine(uint64_t h, uint64_t x) { return stn_hash_u64(h ^ (x + UINT64_C(0x9E3779B97F4A7C15) + (h << 6) + (h >> 2))); }
 
 /* The entry of a key in a table that has no index (ilog is 0: see stn_runtime.c), or NULL. The
-   search goes over the whole buffer, the unused places masked out, and picks the entry without a
-   branch: a loop that ended where the entries end, or at the one that matches, would be
-   mispredicted about once a search, which costs more than looking at the few places left. */
+   search looks at every entry there is and picks the one that matches without a branch on it;
+   it reads nothing past them, where the buffer has room that was never written. */
 static inline char* stn_map_small_i64(const StnMap* m, uint64_t key) {
     char* e = m->entries;
-    int64_t hit = -1, n = m->used, room = m->eroom;
+    int64_t hit = -1, n = m->used;
     size_t stride = m->stride;
-    for (int64_t i = 0; i < room; i++) {
+    for (int64_t i = 0; i < n; i++) {
         uint64_t k; memcpy(&k, e + (size_t)i * stride, 8);
-        hit = ((k == key) & (i < n)) ? i : hit;
+        hit = (k == key) ? i : hit;
     }
     return hit < 0 ? NULL : e + (size_t)hit * stride;
 }
@@ -773,14 +772,13 @@ static inline char* stn_map_small_i64(const StnMap* m, uint64_t key) {
    words are equal; only two buffers of one length need their bytes compared. */
 static inline char* stn_map_small_str(const StnMap* m, StnStr key) {
     char* e = m->entries;
-    int64_t hit = -1, n = m->used, room = m->eroom;
+    int64_t hit = -1, n = m->used;
     size_t stride = m->stride;
-    for (int64_t i = 0; i < room; i++) {
+    for (int64_t i = 0; i < n; i++) {
         StnStr s; memcpy(&s, e + (size_t)i * stride + 8, sizeof s);
-        int live = i < n;
         int same = (s.w0 == key.w0) & (s.w1 == key.w1);
-        hit = (same & live) ? i : hit;
-        if (__builtin_expect(live & !same & (int)(s.w1 >> 63) & !((s.w1 ^ key.w1) & ~STN_STR_VIEW_BIT), 0))
+        hit = same ? i : hit;
+        if (__builtin_expect(!same & (int)(s.w1 >> 63) & !((s.w1 ^ key.w1) & ~STN_STR_VIEW_BIT), 0))
             if (stn_str_eq(s, key)) return e + (size_t)i * stride;
     }
     return hit < 0 ? NULL : e + (size_t)hit * stride;

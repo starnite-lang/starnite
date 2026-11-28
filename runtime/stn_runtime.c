@@ -1497,9 +1497,11 @@ static inline char* stn_map_small_lookup(const StnMap* m, const void* key) {
     const StnMapOps* ops = m->ops;
     if (ops->kind == STN_KEY_I64) return stn_map_small_i64(m, *(const uint64_t*)key);
     if (ops->kind == STN_KEY_STR) return stn_map_small_str(m, *(const StnStr*)key);
-    char* e = m->entries + m->koff;
-    for (int64_t i = 0; i < m->used; i++, e += m->stride)
-        if (ops->eq(e, key)) return e - m->koff;
+    /* an entry is addressed only when there is one: an empty table has no buffer to point into */
+    for (int64_t i = 0; i < m->used; i++) {
+        char* e = m->entries + (size_t)i * m->stride;
+        if (ops->eq(e + m->koff, key)) return e;
+    }
     return NULL;
 }
 static inline char* stn_map_lookup(const StnMap* m, const void* key, uint64_t w, uint64_t* slot);

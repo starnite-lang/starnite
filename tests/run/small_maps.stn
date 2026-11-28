@@ -10,6 +10,7 @@ fn show_ints(m: Map[Int, Int]) -> Str:
     join(parts, " ")
 
 fn main() ! io:
+    empty_then_full()
     # Int keys: grow past eight, remove back below, grow again
     var m: Map[Int, Int] = {}
     for n in 0..20:
@@ -80,3 +81,14 @@ fn main() ! io:
     other.clear()
     other[1] = 1
     print(f"{len(other)} {other.get(1)} {len(big)}")
+
+# an empty table with a key that is neither an Int nor a Str: looked up, removed from and
+# compared before anything was put in it, then filled to the last place of its first buffer
+fn empty_then_full() ! io:
+    var m: Map[Point, Int] = {}
+    var s: Set[(Int, Int)] = {}
+    print(f"{m.get(Point(1, 2)) ?: -1} {s.contains((1, 2))} {len(m)} {len(s)}")
+    for i in 0..8:
+        m[Point(i, i)] = i
+        s.add((i, i))
+        print(f"{m.get(Point(i, i)) ?: -1} {m.get(Point(i, i + 1)) ?: -1} {s.contains((i, i))} {s.contains((i + 1, i))}")

@@ -1,3 +1,12 @@
+-1 false 0 0
+0 -1 true false
+1 -1 true false
+2 -1 true false
+3 -1 true false
+4 -1 true false
+5 -1 true false
+6 -1 true false
+7 -1 true false
 4 | 0:0 7:1 14:2 21:3
 9 | 0:0 7:1 14:2 21:3 5:4 12:5 19:6 3:7 10:8
 10 | 0:0 7:1 14:2 21:3 5:4 12:5 19:6 3:7 10:8 17:9
