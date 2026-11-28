@@ -413,6 +413,22 @@ and drop_stmt st t e =
 (* the statement whose code is being written, for an error about a copy it would make *)
 let stmt_loc : Syntax.loc option ref = ref None
 
+(* A for loop over a call of a yielding function that is in sight is written with the function's
+   body in place of the loop and the loop's body in place of its yield (section 10.6): no
+   iterator is made. [inl_ctx] is the function being written this way, if any: its label, and
+   what to write at its yield, given the value. [inl_stack] are the functions so written around
+   this point, which are not written into themselves. [inl_lazy] are parameters of such a
+   function that stand for a call written the same way where the function loops over them, and
+   [known_code] those that are a closure written at the call, by the name of its code. *)
+type inl = { ibrk : string; iyield : texpr -> unit }
+let inl_ctx : inl option ref = ref None
+let inl_stack : string list ref = ref []
+type lazy_gen = { lu : string; ltys : ty list; largs : lazy_arg list }
+and lazy_arg = LVal of string * ty | LCode of string * string * ty | LGen of lazy_gen
+let inl_lazy : (int, lazy_gen) Hashtbl.t = Hashtbl.create 8
+let known_code : (int, string) Hashtbl.t = Hashtbl.create 8
+let last_closure : string ref = ref ""
+
 (* the variable a for loop makes for the call of a yielding function it runs over: which function
    that is, so that the loop asks it for its values by name and the C compiler can see into it *)
 let gen_known : (int, string) Hashtbl.t = Hashtbl.create 16
@@ -663,6 +679,8 @@ let err_val st t e = Printf.sprintf "(((errbox_%s*)(%s).box)->value)" (mangle t)
 type vinfo = VDirect of string | VPtr of string | VCell of string * ty | VCap of string | VCapCell of string * ty
 
 type fkind = FScope | FStmt | FLoop | FTry of string * string | FFun
+  | FGen of string            (* a yielding function written into the loop over it: the label after it *)
+  | FInl of string * string   (* the body of that loop, at a yield: the label after the function, and the one after this body *)
 
 type frame = { fk : fkind; mutable owned : (string * ty) list }
 
@@ -742,6 +760,9 @@ let u_reset () =
    lost between the two, so while its code is written every local it declares becomes a field of
    the function's frame instead: the declaration is turned into an assignment here, and the name
    is defined, around the function, to stand for the field. *)
+(* a switch of the tests: set, and not to nothing *)
+let env_on name = match Sys.getenv_opt name with None | Some "" -> false | Some _ -> true
+
 type gen = {
   gbuf : Buffer.t;                          (* the code of the resume function *)
   mutable gfields : (string * string) list; (* C type and name, last first *)
@@ -895,7 +916,7 @@ let gen_settle (g : gen) (body : string) (always : string list) : string * (stri
         match ds with
         | [ (_, d) ] ->
             (* STN_GEN_ALL keeps every local in the frame: what the tests compare this pass with *)
-            Sys.getenv_opt "STN_GEN_ALL" = None
+            not (env_on "STN_GEN_ALL")
             && (not (List.mem name always)) && (not (named_in dropped name))
             (* a short Str holds its bytes in itself: a pointer to them, which the runtime gives
                out for one whose address it is handed, must find them where they were *)
@@ -1269,7 +1290,7 @@ let note fc (at : Syntax.loc * string) =
   let st = fc.st in
   if !(st.marking) then begin
     st.cur := at;
-    st.marks := (fc.b, Buffer.length fc.b, fst at, snd at, List.exists (fun (f : frame) -> f.fk = FLoop) fc.frames) :: !(st.marks)
+    st.marks := (fc.b, Buffer.length fc.b, fst at, snd at, List.exists (fun (f : frame) -> match f.fk with FLoop | FInl _ -> true | _ -> false) fc.frames) :: !(st.marks)
   end
 
 (* what an expression is, in an error about the code it became *)
@@ -1664,7 +1685,7 @@ and construct fc t i (vals : string list) : r =
         let outside_loop tok =
           let rec go = function
             | [] -> true
-            | (f : frame) :: rest -> if List.exists (fun (o, _) -> o = tok) f.owned then true else if f.fk = FLoop then false else go rest in
+            | (f : frame) :: rest -> if List.exists (fun (o, _) -> o = tok) f.owned then true else if (match f.fk with FLoop | FInl _ -> true | _ -> false) then false else go rest in
           go fc.frames in
         (match List.find_opt (fun (tok, m, b) -> m = mangle t && b == fc.b && outside_loop tok) !(st.reuse) with
          | Some (tok, _, _) ->
@@ -1848,7 +1869,10 @@ and call fc (e : texpr) (cl : callee) (targs : targ list) convs : r =
       line fc "%s %s; StnError %s;" (ct fc t) res ev;
       let sigc = Printf.sprintf "uint8_t (*)(StnClosure*, %s*, StnError*%s)" (ct fc t)
           (String.concat "" (List.map (fun (m, pt) -> ", " ^ (match m with MMut -> ct fc pt ^ "*" | _ -> ct fc pt)) ps)) in
-      line fc "if (__builtin_expect(((%s)%s->code)(%s, &%s, &%s%s), 0)) {" sigc fv fv res ev
+      let code = match f.e with
+        | XVar v when Hashtbl.mem known_code v.vid -> Hashtbl.find known_code v.vid
+        | _ -> Printf.sprintf "((%s)%s->code)" sigc fv in
+      line fc "if (__builtin_expect(%s(%s, &%s, &%s%s), 0)) {" code fv res ev
         (String.concat "" (List.map (fun a -> ", " ^ a) avs));
       fc.ind <- fc.ind + 1;
       apply_convs fc convs ev;
@@ -2803,6 +2827,7 @@ and match_ ?tail fc t (s : texpr) arms : r =
 and closure fc (lam : lambda) : string =
   let st = fc.st in
   let name = fresh st ("clo_" ^ c_ident lam.lname ^ "_") in
+  last_closure := name ^ "_code";
   let ft = { lam.lfn with fps = List.map (fun (m, t) -> (m, ts fc t)) lam.lfn.fps; fret = ts fc lam.lfn.fret } in
   let caps = lam.lcaps in
   let cap_field (v : var) = Printf.sprintf "c%d_%s" v.vid (c_ident v.vname) in
@@ -4267,6 +4292,137 @@ and array_reduction fc p src body =
       Some (`Sum, lhs, array, add.l)
   | _ -> None
 
+(* the pattern and the body of the loop that `for p in e: body` over an Iter stands for *)
+and for_parts (wb : texpr) : (tpat * texpr) option =
+  let rec strip (e : texpr) =
+    match e.e with
+    | XBlock ([ { st = SExpr x; _ } ], { e = XLit LUnit; _ }) -> strip x
+    | XBlock ([], x) -> strip x
+    | _ -> e in
+  match (strip wb).e with
+  | XMatch ({ e = XCall (CBuiltin ("next@Iter", _), _, _); _ }, [ { pat = TPVariant (_, _, 1, [ p ]); guard = None; body }; _ ]) -> Some (p, body)
+  | _ -> None
+
+(* What a loop over [src] can be written from: a call of a yielding function with one yield that
+   is not being written into itself, or a parameter that stands for such a call. None when an
+   iterator has to be made. *)
+and fuse_plan fc (src : texpr) : [ `Call of string * ty list * targ list | `Lazy of lazy_gen ] option =
+  if env_on "STN_NO_FUSE" then None
+  else
+    match src.e with
+    | XVar v -> Option.map (fun g -> `Lazy g) (Hashtbl.find_opt inl_lazy v.vid)
+    | XCall (CFn (u, tys), args, []) when fusable_fn fc.st u && not (List.mem u !inl_stack) && List.length !inl_stack < 8 ->
+        Some (`Call (u, List.map (ts fc) tys, args))
+    | _ -> None
+
+and fusable_fn st (u : string) : bool =
+  match Hashtbl.find_opt st.prog.fns u with
+  | Some tf when List.mem "yield" tf.fsig.smods ->
+      let yields = ref 0 in
+      walk_texpr (fun _ -> ()) (fun (s : tstmt) -> match s.st with SYield _ -> incr yields | _ -> ()) tf.fbody;
+      !yields = 1 && List.for_all (fun (m, _, _, _) -> m <> MMut) tf.fsig.sparams
+  | _ -> false
+
+(* The arguments of a call that will be written in place, evaluated here, in their order: a
+   value, a closure with the name of its code, or, for an Iter parameter that the function loops
+   over once, as a statement of its body, and names nowhere else, a call to be written in place
+   in its turn. *)
+and fuse_args fc (u : string) (args : targ list) : lazy_arg list =
+  let tf = Hashtbl.find fc.st.prog.fns u in
+  List.map2 (fun (pv : var) (a : targ) ->
+      let only_looped_over () =
+        let uses = ref 0 in
+        walk_texpr (fun (x : texpr) -> match x.e with XVar v when v.vid = pv.vid -> incr uses | _ -> ()) (fun _ -> ()) tf.fbody;
+        let is_loop (s : tstmt) = match s.st with
+          | SExpr { e = XBlock ([ { st = SVar (iv, { e = XVar v; _ }); _ }; { st = SWhile (_, wb); _ } ], _); _ } ->
+              v.vid = pv.vid && String.length iv.vname > 7 && String.sub iv.vname 0 7 = "__iter_" && for_parts wb <> None
+          | _ -> false in
+        let rec top (e : texpr) = match e.e with
+          | XBlock (ss, v) -> List.exists is_loop ss || top v
+          | _ -> false in
+        !uses = 1 && top tf.fbody in
+      let t = ts fc a.a.ty in
+      match a.a.e with
+      | XCall (CFn (u2, tys2), args2, []) when not (env_on "STN_NO_FUSE") && fusable_fn fc.st u2 && u2 <> u && not (List.mem u2 !inl_stack) && only_looped_over () ->
+          LGen { lu = u2; ltys = List.map (ts fc) tys2; largs = fuse_args fc u2 args2 }
+      | XLambda _ ->
+          let c = tmp fc a.a.ty (own fc (expr fc a.a) a.a.ty) in
+          LCode (c, !last_closure, t)
+      | _ -> LVal (tmp fc a.a.ty (own fc (expr fc a.a) a.a.ty), t))
+    tf.fparams args
+
+(* [held]: the values of the arguments are owned by the loop this one is written inside of, which
+   releases them whether or not this point is reached; this function takes over those that can be
+   moved and counts the others once more *)
+and fuse_loop ?(held = false) fc (g : lazy_gen) (p : tpat) (body : texpr) =
+  let st = fc.st in
+  let tf = Hashtbl.find st.prog.fns g.lu in
+  let id = fresh st "_brk" in
+  let saved_ctx = !inl_ctx and saved_stack = !inl_stack in
+  line fc "{";
+  fc.ind <- fc.ind + 1;
+  push fc (FGen id);
+  (* the function's own types are read with its own type arguments *)
+  let fg = { fc with sub = List.combine (List.map fst tf.fsig.stparams) g.ltys } in
+  let pass (a : fc) (b : fc) =
+    b.frames <- a.frames; b.ind <- a.ind; b.unique_arrays <- a.unique_arrays; b.loop_indices <- a.loop_indices;
+    b.checked_ranges <- a.checked_ranges; b.unchecked_pops <- a.unchecked_pops in
+  let owned = ref [] in
+  let bind (pv : var) c t =
+    if not held then declare_var fg pv c
+    else if movable_type st t then (declare_var fg pv c; line fg "%s" (moved_out st t c))
+    else declare_var fg pv (if needs_rc st t then dup_expr st t c else c);
+    owned := pv :: !owned in
+  (* what the calls inside this one were given is this loop's to release *)
+  let rec hold (a : lazy_arg) = match a with
+    | LGen lg -> List.iter (function LVal (c, t) | LCode (c, _, t) -> if needs_rc st t then own_in fc c t | LGen _ as x -> hold x) lg.largs
+    | _ -> () in
+  if not held then List.iter hold g.largs;
+  List.iter2 (fun (pv : var) (a : lazy_arg) ->
+      match a with
+      | LGen lg -> Hashtbl.replace inl_lazy pv.vid lg
+      | LVal (c, t) -> bind pv c t
+      | LCode (c, code, t) -> bind pv c t; if not pv.vcell then Hashtbl.replace known_code pv.vid code)
+    tf.fparams g.largs;
+  note_moves st !owned tf.fbody;
+  let item_ty = match repr tf.fsig.sret with TNamed ("Iter", [ t ]) -> t | _ -> assert false in
+  inl_stack := g.lu :: saved_stack;
+  inl_ctx := Some { ibrk = id; iyield = (fun (e : texpr) ->
+      (* at the yield: the value, bound as the loop binds it, and the body of the loop *)
+      let cur = fg in
+      let x = expr cur e in
+      let item = tmp cur item_ty (own cur x e.ty) in
+      let cont = fresh st "_cont" in
+      line cur "{";
+      cur.ind <- cur.ind + 1;
+      push cur (FInl (id, cont));
+      if rc cur item_ty then own_in cur item item_ty;
+      pass cur fc;
+      let _, binds = pat_test fc (ts cur item_ty) p item in
+      bind_pattern fc binds;
+      let here_ctx = !inl_ctx and here_stack = !inl_stack in
+      inl_ctx := saved_ctx; inl_stack := saved_stack;
+      push fc FScope;
+      discard fc body;
+      pop fc;
+      inl_ctx := here_ctx; inl_stack := here_stack;
+      line fc "%s:;" cont;
+      pop fc;
+      fc.ind <- fc.ind - 1;
+      line fc "}";
+      pass fc cur) };
+  pass fc fg;
+  push fg FScope;
+  discard fg tf.fbody;
+  pop fg;
+  pass fg fc;
+  inl_ctx := saved_ctx; inl_stack := saved_stack;
+  List.iter2 (fun (pv : var) (a : lazy_arg) -> match a with LGen _ -> Hashtbl.remove inl_lazy pv.vid | LCode _ -> Hashtbl.remove known_code pv.vid | LVal _ -> ()) tf.fparams g.largs;
+  line fc "%s:;" id;
+  pop fc;
+  fc.ind <- fc.ind - 1;
+  line fc "}"
+
 and stmt fc (s : tstmt) =
   stmt_loc := Some s.sl;
   (match s.st with
@@ -4445,10 +4601,22 @@ and stmt_at fc (s : tstmt) =
            | _ -> ()
          end
        end
+   | SExpr { e = XBlock ([ { st = SVar (iv, src); _ }; { st = SWhile (_, wb); _ } ], _); _ }
+     when String.length iv.vname > 7 && String.sub iv.vname 0 7 = "__iter_" && fuse_plan fc src <> None && for_parts wb <> None ->
+       let p, body = Option.get (for_parts wb) in
+       (match Option.get (fuse_plan fc src) with
+        | `Call (u, tys, args) -> fuse_loop fc { lu = u; ltys = tys; largs = fuse_args fc u args } p body
+        | `Lazy g -> fuse_loop ~held:true fc g p body)
    | SExpr e -> discard_value fc e
    | SReturn e when (match !(st.dps) with Some (_, b, _) -> b == fc.b | None -> false) ->
        (* in a function that runs as a loop (section 9.5), what is returned is in tail position *)
        (match !(st.dps) with Some (_, _, tail) -> tail e | None -> ())
+   | SReturn e when !inl_ctx <> None ->
+       let ctx = Option.get !inl_ctx in
+       discard fc e;
+       drop_until fc (fun f -> f.fk = FGen ctx.ibrk);
+       line fc "goto %s;" ctx.ibrk
+   | SYield e when !inl_ctx <> None -> (Option.get !inl_ctx).iyield e
    | SReturn e when (match !gen_mode with Some g -> g.gbuf == fc.b | None -> false) ->
        (* a function that yields ends here: what it holds is released, and it has no more values *)
        discard fc e;
@@ -4474,12 +4642,24 @@ and stmt_at fc (s : tstmt) =
        let rv = tmp fc fc.ret v in
        drop_until fc (fun _ -> false);
        if fc.can_fail then (line fc "*_out = %s;" rv; line fc "return 0;") else line fc "return %s;" rv
-   | SBreak ->
-       drop_until fc (fun f -> f.fk = FLoop);
-       line fc "break;"
-   | SContinue ->
-       drop_until fc (fun f -> f.fk = FLoop);
-       line fc "continue;"
+   | SBreak -> (
+       match List.find_opt (fun (f : frame) -> match f.fk with FLoop | FInl _ -> true | _ -> false) fc.frames with
+       | Some { fk = FInl (brk, _); _ } ->
+           (* the loop is the yielding function written in its place: leave all of it *)
+           drop_until fc (fun f -> f.fk = FGen brk);
+           line fc "goto %s;" brk
+       | _ ->
+           drop_until fc (fun f -> f.fk = FLoop);
+           line fc "break;")
+   | SContinue -> (
+       match List.find_opt (fun (f : frame) -> match f.fk with FLoop | FInl _ -> true | _ -> false) fc.frames with
+       | Some { fk = FInl (_, cont) as k; _ } ->
+           (* on to what follows the yield *)
+           drop_until fc (fun f -> f.fk = k);
+           line fc "goto %s;" cont
+       | _ ->
+           drop_until fc (fun f -> f.fk = FLoop);
+           line fc "continue;")
    | SWhile (c, body) ->
        with_hoisted fc [ c; body ] @@ fun () ->
        line fc "for (;;) {";
