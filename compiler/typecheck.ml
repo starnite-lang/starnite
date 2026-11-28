@@ -1304,7 +1304,18 @@ and infer_name c l n exp : texpr =
                   let ty = TFn { fps = List.map (fun (m, _, t, _) -> (m, t)) ps; fret = ret; feff = eff } in
                   (match exp with Some t -> unify_at l t ty | None -> ());
                   mk (XFnRef (u, List.map snd s)) ty l
-              | _ :: _ -> err "E0201" l "'%s' is overloaded; call it directly" n
+              | cands -> (
+                  (* a function of this program is the one meant where the prelude has one of the same name *)
+                  match List.filter (fun u -> (Hashtbl.find c.tb.fns u).smodule <> "core") cands with
+                  | [ u ] when not (is_builtin u) ->
+                      let sg = Hashtbl.find c.tb.fns u in
+                      if sg.slend <> None then
+                        err "E0320" l "'%s' lends a place, so it cannot be used as a function value" n;
+                      let s, ps, ret, eff = instantiate sg in
+                      let ty = TFn { fps = List.map (fun (m, _, t, _) -> (m, t)) ps; fret = ret; feff = eff } in
+                      (match exp with Some t -> unify_at l t ty | None -> ());
+                      mk (XFnRef (u, List.map snd s)) ty l
+                  | _ -> err "E0201" l "'%s' is overloaded; call it directly" n)
               | [] -> unknown_name c l n)))
 
 (* `alias.name`, with `alias` an import of this module and not a variable, as the one name
@@ -1707,7 +1718,11 @@ and pick_overload c l name (cands : string list) (first : texpr option) : string
           match ms with
           | [ u ] -> u
           | [] -> err "E0201" l "no '%s' takes %s as its first argument" name (show_ty te.ty)
-          | _ -> err "E0105" l "'%s' matches more than one function" name)
+          | _ -> (
+              (* between a function of the program and one of the prelude, the program's is meant *)
+              match List.filter (fun u -> (Hashtbl.find c.tb.fns u).smodule <> "core") ms with
+              | [ u ] -> u
+              | _ -> err "E0105" l "'%s' matches more than one function" name))
 
 and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
   let f = norm_qual c f in
@@ -1766,7 +1781,9 @@ and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
       let cands = lookup_fns c n in
       let first =
         if List.length cands > 1 then
-          match args with a :: _ -> Some (infer c a.aexpr) | [] -> None
+          match args with
+          | a :: _ -> let snap = snapshot c in let te = infer c a.aexpr in restore c snap; Some te
+          | [] -> None
         else None
       in
       let u = pick_overload c l n cands first in
@@ -1780,7 +1797,9 @@ and infer_call c l (f : Syntax.expr) (args : Syntax.arg list) exp : texpr =
         match List.filter (fun u -> List.length (Hashtbl.find c.tb.fns u).stparams >= List.length tys) cands with [] -> cands | fit -> fit
       in
       let first =
-        if List.length cands > 1 then (match args with a :: _ -> Some (infer c a.aexpr) | [] -> None) else None
+        if List.length cands > 1 then
+          (match args with a :: _ -> let snap = snapshot c in let te = infer c a.aexpr in restore c snap; Some te | [] -> None)
+        else None
       in
       let u = pick_overload c l n cands first in
       call_sig c l u ~receiver:None ~explicit:tys args exp

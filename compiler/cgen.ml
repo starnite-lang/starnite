@@ -886,6 +886,7 @@ let gen_settle (g : gen) (body : string) (always : string list) : string * (stri
     let lw = String.length w and lt = String.length text in
     let rec at k = k + lw <= lt && ((String.sub text k lw = w && (k = 0 || not (is_id text.[k - 1])) && (k + lw = lt || not (is_id text.[k + lw]))) || at (k + 1)) in
     at 0 in
+  let strip_const t = if String.length t > 6 && String.sub t 0 6 = "const " then String.sub t 6 (String.length t - 6) else t in
   let field : (string, string) Hashtbl.t = Hashtbl.create 64 in
   let order = ref [] in
   Hashtbl.iter (fun name ds ->
@@ -896,6 +897,9 @@ let gen_settle (g : gen) (body : string) (always : string list) : string * (stri
             (* STN_GEN_ALL keeps every local in the frame: what the tests compare this pass with *)
             Sys.getenv_opt "STN_GEN_ALL" = None
             && (not (List.mem name always)) && (not (named_in dropped name))
+            (* a short Str holds its bytes in itself: a pointer to them, which the runtime gives
+               out for one whose address it is handed, must find them where they were *)
+            && not (strip_const (fst (List.hd ds)) = "StnStr" && List.exists (fun u -> u > 0 && body.[u - 1] = '&') us)
             && List.for_all (fun u -> u > d) us
             && (let last = List.fold_left max d us in not (List.exists (fun y -> y > d && y < last) !yields))
             (* a loop whose body does not hold the declaration: its head is run again after the body *)
