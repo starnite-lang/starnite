@@ -642,6 +642,9 @@ typedef struct StnMapOps {
 #define STN_KEY_I64 1
 #define STN_KEY_STR 2
 
+/* a table of this many entries or fewer has no index and hashes nothing: see stn_runtime.c */
+#define STN_MAP_SMALL 8
+
 typedef struct StnMap {
     stn_header h;
     int64_t len;          /* live entries */
@@ -653,7 +656,8 @@ typedef struct StnMap {
                              whose hash is worked out again when it is needed */
     uint32_t voff;        /* offset of the value in an entry */
     const StnMapOps* ops;
-    uint8_t* index;       /* the control bytes of the slots, then the places they name */
+    uint8_t* index;       /* the control bytes of the slots, then the places they name; NULL while the table is small.
+                             A modest index is the front of one block with the entries: see stn_runtime.c */
     uint8_t* places;
     char* entries;
     uint64_t* dead;       /* with no hash word: a bit for each removed entry, or NULL when there is none */
@@ -752,10 +756,39 @@ static inline uint64_t stn_sip_finish(StnSip* s) {
 }
 static inline uint64_t stn_hash_combine(uint64_t h, uint64_t x) { return stn_hash_u64(h ^ (x + UINT64_C(0x9E3779B97F4A7C15) + (h << 6) + (h >> 2))); }
 
+/* The entry of a key in a table that has no index (ilog is 0: see stn_runtime.c), or NULL. The
+   search looks at every entry there is and picks the one that matches without a branch on it;
+   it reads nothing past them, where the buffer has room that was never written. */
+static inline char* stn_map_small_i64(const StnMap* m, uint64_t key) {
+    char* e = m->entries;
+    int64_t hit = -1, n = m->used;
+    size_t stride = m->stride;
+    for (int64_t i = 0; i < n; i++) {
+        uint64_t k; memcpy(&k, e + (size_t)i * stride, 8);
+        hit = (k == key) ? i : hit;
+    }
+    return hit < 0 ? NULL : e + (size_t)hit * stride;
+}
+/* The same for Str keys, which follow the word of the entry. Two strings that are the same two
+   words are equal; only two buffers of one length need their bytes compared. */
+static inline char* stn_map_small_str(const StnMap* m, StnStr key) {
+    char* e = m->entries;
+    int64_t hit = -1, n = m->used;
+    size_t stride = m->stride;
+    for (int64_t i = 0; i < n; i++) {
+        StnStr s; memcpy(&s, e + (size_t)i * stride + 8, sizeof s);
+        int same = (s.w0 == key.w0) & (s.w1 == key.w1);
+        hit = same ? i : hit;
+        if (__builtin_expect(!same & (int)(s.w1 >> 63) & !((s.w1 ^ key.w1) & ~STN_STR_VIEW_BIT), 0))
+            if (stn_str_eq(s, key)) return e + (size_t)i * stride;
+    }
+    return hit < 0 ? NULL : e + (size_t)hit * stride;
+}
+
 /* stn_map_find for a table whose keys are 64-bit integers (STN_KEY_I64), inline: the layout of
    the index is the one stn_runtime.c describes. */
 static inline void* stn_map_find_i64(const StnMap* m, uint64_t key) {
-    if (__builtin_expect(!m->ilog, 0)) return NULL;
+    if (!m->ilog) { char* e = stn_map_small_i64(m, key); return e ? e + m->voff : NULL; }
     uint64_t h = stn_hash_u64(key);
     uint64_t w = h | (uint64_t)(h == 0);
     uint64_t mask = ((uint64_t)1 << m->ilog) - 1, pos = (w >> 7) & mask, step = 0;
@@ -797,7 +830,7 @@ static inline void* stn_map_find_i64(const StnMap* m, uint64_t key) {
 /* stn_map_find for a table whose keys are Str (STN_KEY_STR), inline. An inline key, or the very
    string the table holds, is compared as two words. */
 static inline void* stn_map_find_str(const StnMap* m, StnStr key) {
-    if (__builtin_expect(!m->ilog, 0)) return NULL;
+    if (!m->ilog) { char* e = stn_map_small_str(m, key); return e ? e + m->voff : NULL; }
     uint64_t h = stn_str_hash(key);
     uint64_t w = h | (uint64_t)(h == 0);
     uint64_t mask = ((uint64_t)1 << m->ilog) - 1, pos = (w >> 7) & mask, step = 0;
